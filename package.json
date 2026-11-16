@@ -1,0 +1,22 @@
+{
+	"name": "pi-packages",
+	"version": "0.0.0",
+	"private": true,
+	"description": "Pi packages: pi-keeper, pi-session-topic, pi-shell-highlight",
+	"license": "Apache-2.0",
+	"type": "module",
+	"workspaces": [
+		"pi-keeper",
+		"pi-session-topic",
+		"pi-shell-highlight"
+	],
+	"scripts": {
+		"check": "npm run typecheck && npm test",
+		"test": "npm test --workspaces --if-present",
+		"typecheck": "npm run typecheck --workspaces --if-present"
+	},
+	"devDependencies": {
+		"@types/node": "^22",
+		"typescript": "^5.9.3"
+	}
+}

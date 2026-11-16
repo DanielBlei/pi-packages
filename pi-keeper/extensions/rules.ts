@@ -1,0 +1,342 @@
+/**
+ * Permission rule evaluation for pi-keeper.
+ *
+ * Each mode is a fallback action plus a list of rules. Every rule whose
+ * tool and matcher match the call contributes its action; the strictest
+ * wins (deny > ask > allow, as in Claude Code), so an allow rule can never
+ * override a dangerous-command ask or the global privilege deny. When no
+ * rule matches, the mode's fallback applies.
+ */
+
+import {
+	bashWritesInsideArtifactDirs,
+	isCoveredByPrefixes,
+	isDangerousCommand,
+	isOutsideCwd,
+	isOutsideCwdRead,
+	isPrivilegedCommand,
+	isProtectedPath,
+	isScratchPath,
+	outsideCwdBashWrites,
+	isReadOnlyCommand,
+	isSamePath,
+	isSecretCommand,
+	isSubagentArtifactPath,
+	isSecretFile,
+	outsideCwdReadPaths,
+	outsideDestructiveTargets,
+	secretSearchHits,
+	secretUploads,
+	type PathContext,
+} from "./utils.ts";
+import { ANY_TOOL } from "./modes.ts";
+import { findMatchingRule, type ProjectPermissions } from "./project-rules.ts";
+
+export type Action = "allow" | "ask" | "deny";
+
+export type Matcher =
+	| "readOnlyBash"
+	| "unapprovedBash"
+	| "rememberedBash"
+	| "rememberedVerbatim"
+	| "projectAllowBash"
+	| "readOnlyTool"
+	| "sessionEdits"
+	| "scratchFile"
+	| "projectAsk"
+	| "projectDeny"
+	| "dangerousBash"
+	| "privilegedBash"
+	| "bridgeInactive"
+	| "childSession"
+	| "subagentArtifact"
+	| "secretBash"
+	| "planFile"
+	| "protectedPath"
+	| "outsideCwd"
+	| "outsideCwdRead"
+	| "outsideCwdBashWrite"
+	| "outsideCwdDestructive"
+	| "secretSearch"
+	| "secretUpload"
+	| "secretFile"
+	/** Never matched by a mode rule: the gate's decision for a child launched outside its parent's project (child-cwd.ts). */
+	| "childCwdLocked";
+
+export interface Rule {
+	/** Tool names this rule applies to, or `["*"]` for any tool. */
+	tools: string[];
+	/** Extra condition on the call input; omitted = every call of the tools. */
+	match?: Matcher;
+	action: Action;
+}
+
+export interface ModeRules {
+	/** Action when no rule matches. */
+	fallback: Action;
+	rules: Rule[];
+}
+
+export interface EvalContext extends PathContext {
+	/** Prefixes remembered via "Yes, and always allow <command>". */
+	remembered: readonly (readonly string[])[];
+	/** Exact commands remembered for the session ("Allow a different command pattern…"). */
+	rememberedExact?: readonly (readonly string[])[];
+	/** Whole commands remembered for the session ("don't ask again for this exact command"), as verbatimKey. */
+	rememberedVerbatim?: readonly string[];
+	/** Names of other packages' tools that only read (config.ts); allowed like read-only MCP tools. */
+	readOnlyTools?: ReadonlySet<string>;
+	/** The user allowed reads outside the cwd for the session. */
+	outsideReadsAllowed?: boolean;
+	/** The user allowed all edits for this pi session (default mode only lists the matcher). */
+	sessionEdits?: boolean;
+	/** User rules from `.pi/settings.local.json` (allow: trusted rules only). */
+	project?: ProjectPermissions;
+	/** Allow patterns of the running workflow command (`allowed-tools` frontmatter); same coverage as project allow rules. */
+	commandGrants?: { prefixes: readonly (readonly string[])[]; exact: readonly (readonly string[])[] };
+	/** Annotations a tool declares (MCP hints), by tool name; undefined = none known. */
+	annotationsOf?: (toolName: string) => ToolHints | undefined;
+	/** Subagent children will load this extension (the pi-subagents bridge is registered, or this is itself a child). */
+	subagentBridge?: boolean;
+	/** This session is a pi-subagents child. */
+	child?: boolean;
+}
+
+/** The subset of tool annotations the rules read. */
+export interface ToolHints {
+	readOnlyHint?: boolean;
+	destructiveHint?: boolean;
+}
+
+/** Tools that never count as read-only, whatever their annotations claim. */
+const NEVER_READ_ONLY_TOOLS = new Set(["bash", "powershell", "edit", "write", "exit_plan_mode"]);
+
+/** Tools that front other tools or launch agents: listing the name would allow whatever they are asked to run. */
+const NEVER_LISTED_TOOLS = new Set(["mcp", "subagent"]);
+
+/** How a whole command is remembered and compared: trimmed, otherwise as typed. */
+export function verbatimKey(command: string): string {
+	return command.trim();
+}
+
+/**
+ * A child's own report in a pi-subagents output dir: allowed in every mode, not
+ * "protected" and not "outside the cwd". A secret file name is not a report
+ * (like scratchFile): it falls through to the mode's ask or deny.
+ *
+ * A shell call counts only when *every* write it makes lands in an artifact
+ * dir and it deletes nothing (`mkdir -p .../outputs/<id> && echo ok`,
+ * `touch .../outputs/<id>/context.md`): a background child has no user to
+ * answer an outside-cwd ask, so such a call would otherwise be denied after
+ * the ask timeout and the child could never make its own report dir.
+ */
+function isChildArtifactWrite(call: ToolCall, ctx: EvalContext): boolean {
+	if (ctx.child !== true) return false;
+	if (call.toolName === "bash" || call.toolName === "powershell") return bashWritesInsideArtifactDirs(commandOf(call.input), ctx);
+	const path = pathOf(call.input);
+	return (call.toolName === "write" || call.toolName === "edit") && isSubagentArtifactPath(path, ctx) && !isSecretFile(path, ctx);
+}
+
+export interface ToolCall {
+	toolName: string;
+	input: unknown;
+}
+
+export interface Decision {
+	action: Action;
+	/** The rule that decided, or undefined for the fallback. */
+	rule?: Rule;
+}
+
+const SEVERITY: Record<Action, number> = { allow: 0, ask: 1, deny: 2 };
+
+/** Command text of a shell tool call. */
+export function commandOf(input: unknown): string {
+	const command = (input as { command?: unknown } | undefined)?.command;
+	return typeof command === "string" ? command : "";
+}
+
+/** Target path of a file tool call (`path`, or `file_path` in some tools). */
+export function pathOf(input: unknown): string {
+	const value = input as { path?: unknown; file_path?: unknown } | undefined;
+	const path = value?.path ?? value?.file_path;
+	return typeof path === "string" ? path : "";
+}
+
+function matches(matcher: Matcher, call: ToolCall, ctx: EvalContext): boolean {
+	switch (matcher) {
+		// Read-only analysis is bash syntax: powershell never matches it (fail closed)
+		case "readOnlyBash":
+			return call.toolName === "bash" && isReadOnlyCommand(commandOf(call.input), ctx.cwd, ctx.scratchDir, ctx.fetchHosts);
+		// Not read-only and not covered by "Yes, and always allow" prefixes. Excluding
+		// remembered commands here keeps a rememberedBash allow from being
+		// outranked by this ask (strictest wins).
+		case "unapprovedBash": {
+			const command = commandOf(call.input);
+			return call.toolName === "bash" && !isReadOnlyCommand(command, ctx.cwd, ctx.scratchDir, ctx.fetchHosts) && !isCoveredByPrefixes(command, ctx.remembered, ctx.cwd, ctx.rememberedExact ?? [], ctx.scratchDir, ctx.fetchHosts);
+		}
+		case "rememberedBash":
+			return call.toolName === "bash" && isCoveredByPrefixes(commandOf(call.input), ctx.remembered, ctx.cwd, ctx.rememberedExact ?? [], ctx.scratchDir, ctx.fetchHosts);
+		// The whole command, character for character, was approved for the session (default mode only lists this matcher)
+		case "rememberedVerbatim":
+			return call.toolName === "bash" && ctx.rememberedVerbatim?.includes(verbatimKey(commandOf(call.input))) === true;
+		// Persisted allow rules work like remembered prefixes (plus exact
+		// rules); only default mode lists this matcher
+		case "projectAllowBash": {
+			const allow = ctx.project?.allow;
+			const grants = ctx.commandGrants;
+			const prefixes = [...(allow?.prefixes ?? []), ...(grants?.prefixes ?? [])];
+			const exact = [...(allow?.exact ?? []), ...(grants?.exact ?? [])];
+			if (call.toolName !== "bash" || (prefixes.length === 0 && exact.length === 0)) return false;
+			return isCoveredByPrefixes(commandOf(call.input), [...ctx.remembered, ...prefixes], ctx.cwd, [...(ctx.rememberedExact ?? []), ...exact], ctx.scratchDir, ctx.fetchHosts);
+		}
+		// A tool that declares itself read-only and not destructive (MCP hints), or that the user listed in pi-keeper.json
+		case "readOnlyTool": {
+			if (NEVER_READ_ONLY_TOOLS.has(call.toolName)) return false;
+			if (ctx.readOnlyTools?.has(call.toolName) === true && !NEVER_LISTED_TOOLS.has(call.toolName)) return true;
+			const hints = ctx.annotationsOf?.(call.toolName);
+			return hints?.readOnlyHint === true && hints.destructiveHint !== true;
+		}
+		// The session scratch dir is writable in every mode (secrets still ask)
+		case "scratchFile":
+			return isScratchPath(pathOf(call.input), ctx) && !isSecretFile(pathOf(call.input), ctx);
+		case "sessionEdits":
+			return ctx.sessionEdits === true;
+		case "projectAsk":
+			return findMatchingRule(ctx.project?.ask ?? [], commandOf(call.input)) !== undefined;
+		case "projectDeny":
+			return findMatchingRule(ctx.project?.deny ?? [], commandOf(call.input)) !== undefined;
+		case "dangerousBash":
+			return isDangerousCommand(commandOf(call.input), ctx);
+		case "privilegedBash":
+			return isPrivilegedCommand(commandOf(call.input));
+		case "bridgeInactive":
+			return ctx.subagentBridge !== true;
+		case "childSession":
+			return ctx.child === true;
+		case "subagentArtifact":
+			return isChildArtifactWrite(call, ctx);
+		case "secretBash":
+			return isSecretCommand(commandOf(call.input), ctx);
+		case "planFile":
+			return ctx.planFile !== undefined && isSamePath(pathOf(call.input), ctx.planFile, ctx.cwd);
+		case "protectedPath":
+			return isProtectedPath(pathOf(call.input), ctx) && !isChildArtifactWrite(call, ctx);
+		case "outsideCwd":
+			return isOutsideCwd(pathOf(call.input), ctx) && !isChildArtifactWrite(call, ctx);
+		case "outsideCwdRead":
+			if (ctx.outsideReadsAllowed === true) return false;
+			if (call.toolName === "bash") return outsideCwdReadPaths(commandOf(call.input), ctx).length > 0;
+			return isOutsideCwdRead(pathOf(call.input), ctx);
+		// a write command naming a literal path outside the cwd (unresolvable targets don't match);
+		// a child's artifact-dir writes are exempt (isChildArtifactWrite)
+		case "outsideCwdBashWrite":
+			return outsideCwdBashWrites(commandOf(call.input), ctx).length > 0 && !isChildArtifactWrite(call, ctx);
+		// rm, mv, truncate, find -delete, destructive git aimed outside the cwd; unresolvable targets match too
+		case "outsideCwdDestructive":
+			return outsideDestructiveTargets(commandOf(call.input), ctx).length > 0;
+		// a recursive or hidden-file search over a tree holding a secret file
+		case "secretSearch":
+			return call.toolName === "bash" && secretSearchHits(commandOf(call.input), ctx).length > 0;
+		// curl / wget sending a secret file
+		case "secretUpload":
+			return call.toolName === "bash" && secretUploads(commandOf(call.input), ctx).length > 0;
+		case "secretFile":
+			return isSecretFile(pathOf(call.input), ctx);
+		// set by the gate, never by a mode rule
+		case "childCwdLocked":
+			return false;
+	}
+}
+
+/**
+ * Built-in tools whose input the rules inspect and whose execute never
+ * mutates it, so their input can be locked after approval.
+ */
+export const LOCKABLE_TOOLS = new Set(["bash", "powershell", "edit", "write", "read", "grep", "find", "ls"]);
+
+/**
+ * Lock a tool call's input once the user approved it, so an extension
+ * whose tool_call handler runs after this one can't change what runs.
+ * Top-level properties become read-only accessors whose setter throws a
+ * descriptive error (the call then fails instead of running something
+ * else); nested values are frozen; new properties can't be added. pi
+ * hands tools a validated clone of the arguments, so the tool call stored
+ * in the session is unaffected.
+ */
+export function lockApprovedInput(input: unknown, description: string): void {
+	if (input === null || typeof input !== "object" || !Object.isExtensible(input)) return;
+	const target = input as Record<string, unknown>;
+	for (const key of Object.keys(target)) {
+		const value = deepFreeze(target[key]);
+		Object.defineProperty(target, key, {
+			enumerable: true,
+			configurable: false,
+			get: () => value,
+			set: () => {
+				throw new Error(
+					`pi-keeper: the user approved "${description}"; another extension tried to change its \`${key}\` afterwards, so the call was stopped.`,
+				);
+			},
+		});
+	}
+	Object.preventExtensions(target);
+}
+
+function deepFreeze<T>(value: T): T {
+	if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+		for (const child of Object.values(value)) deepFreeze(child);
+		Object.freeze(value);
+	}
+	return value;
+}
+
+/** Decide a tool call: strictest matching rule, else the mode fallback. */
+export function evaluate(mode: ModeRules, globalRules: readonly Rule[], call: ToolCall, ctx: EvalContext): Decision {
+	let decision: Decision | undefined;
+	for (const rule of [...globalRules, ...mode.rules]) {
+		if (!rule.tools.includes(call.toolName) && !rule.tools.includes(ANY_TOOL)) continue;
+		if (rule.match !== undefined && !matches(rule.match, call, ctx)) continue;
+		if (decision === undefined || SEVERITY[rule.action] > SEVERITY[decision.action]) {
+			decision = { action: rule.action, rule };
+		}
+		if (rule.action === "deny") break;
+	}
+	return decision ?? { action: mode.fallback };
+}
+
+/** A named list of allow patterns (session memory, project rules, a workflow command's grants). */
+export interface PatternSource {
+	label: string;
+	prefixes: readonly (readonly string[])[];
+	exact: readonly (readonly string[])[];
+}
+
+/** `git commit *`, or `npm test (exact)`. */
+export function patternString(tokens: readonly string[], exact: boolean): string {
+	return exact ? `${tokens.join(" ")} (exact)` : `${tokens.join(" ")} *`;
+}
+
+/** Most patterns considered by `coveringPatterns` (it makes one coverage check per pattern). */
+const MAX_EXPLAINED_PATTERNS = 40;
+
+/**
+ * Which patterns let `command` run without a dialog: a minimal subset of the
+ * sources' patterns that still covers it (earlier sources are kept over later
+ * ones). Empty when the command is not covered (e.g. it is read-only).
+ */
+export function coveringPatterns(command: string, sources: readonly PatternSource[], cwd: string, scratch?: string, fetchHosts?: readonly string[]): Array<{ label: string; tokens: readonly string[]; exact: boolean }> {
+	let items = sources.flatMap((s) => [
+		...s.prefixes.map((tokens) => ({ label: s.label, tokens, exact: false })),
+		...s.exact.map((tokens) => ({ label: s.label, tokens, exact: true })),
+	]);
+	if (items.length === 0 || items.length > MAX_EXPLAINED_PATTERNS) return [];
+	const covers = (set: typeof items): boolean =>
+		set.length === 0 ? isReadOnlyCommand(command, cwd, scratch, fetchHosts) : isCoveredByPrefixes(command, set.filter((i) => !i.exact).map((i) => i.tokens), cwd, set.filter((i) => i.exact).map((i) => i.tokens), scratch, fetchHosts);
+	if (!covers(items)) return [];
+	for (let k = items.length - 1; k >= 0; k--) {
+		const without = items.filter((_, j) => j !== k);
+		if (covers(without)) items = without;
+	}
+	return items;
+}

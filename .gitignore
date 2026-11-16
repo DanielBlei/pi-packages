@@ -147,3 +147,21 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# pi: project-local settings and rules are machine-local
+.pi/
+.agents/skills/
+
+# local tooling leftovers
+__pycache__/
+*.py[cod]
+*.tsbuildinfo
+.idea/
+.vscode/
+dist/
+
+# credential files (defence in depth: .env and .env.* are covered above)
+*.pem
+*.key
+*.p12
+*.pfx
