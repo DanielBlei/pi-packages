@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CONFIG_FILE, DEFAULT_READ_ONLY_TOOLS, formatDuration, loadConfig, parseConfig, parseDuration, saveConfig } from "../../extensions/config.ts";
+import { CONFIG_FILE, DEFAULT_READ_ONLY_TOOLS, effectiveCommandColors, formatDuration, loadConfig, parseConfig, parseDuration, saveConfig } from "../../extensions/config.ts";
 
 const defaults = new Set(DEFAULT_READ_ONLY_TOOLS);
 
@@ -56,7 +56,7 @@ test("unusable files fall back to the defaults with one warning", () => {
 test("loadConfig reads <agent dir>/pi-keeper.json; absent means defaults and no warning", () => {
 	const dir = mkdtempSync(join(tmpdir(), "pdf-config-"));
 	try {
-		assert.deepEqual(loadConfig(dir), { readOnlyTools: defaults, autoSubagents: false, persistentProjectRules: false, backgroundAuto: false, projectCommands: true, projectReadDirs: false, modeInstructions: "message", backgroundAsks: true, backgroundAskTimeoutMs: 300000, backgroundAskPopup: "idle", subagentThinking: "follow", previewTextColor: "dim", warnings: [] });
+		assert.deepEqual(loadConfig(dir), { readOnlyTools: defaults, subagentsFollowAuto: false, projectExactCommands: false, backgroundAutoFallback: false, projectCommandApprovals: true, projectReadApprovals: false, ccExtensionsPrompt: true, modeInstructions: "message", backgroundAsks: true, backgroundAskTimeoutMs: 300000, backgroundAskPopup: "always", subagentThinking: "follow", commandColors: undefined, warnings: [] });
 		writeFileSync(join(dir, CONFIG_FILE), '{"readOnlyTools": ["x_tool"]}');
 		assert.deepEqual([...loadConfig(dir).readOnlyTools], ["x_tool"]);
 		writeFileSync(join(dir, CONFIG_FILE), "{broken");
@@ -66,23 +66,44 @@ test("loadConfig reads <agent dir>/pi-keeper.json; absent means defaults and no 
 	}
 });
 
-test("autoSubagents, persistentProjectRules and backgroundAuto: absent or a boolean reads as-is, anything else warns and stays off", () => {
-	assert.equal(parseConfig("{}").autoSubagents, false);
-	assert.equal(parseConfig('{"autoSubagents": true}').autoSubagents, true);
-	assert.equal(parseConfig('{"autoSubagents": false}').autoSubagents, false);
-	assert.equal(parseConfig("{}").persistentProjectRules, false);
-	assert.equal(parseConfig('{"persistentProjectRules": true}').persistentProjectRules, true);
-	assert.equal(parseConfig("{}").backgroundAuto, false);
-	assert.equal(parseConfig('{"backgroundAuto": true}').backgroundAuto, true);
-	const bad = parseConfig('{"autoSubagents": "yes", "persistentProjectRules": 7, "backgroundAuto": "on"}');
-	assert.equal(bad.autoSubagents, false);
-	assert.equal(bad.persistentProjectRules, false);
-	assert.equal(bad.backgroundAuto, false);
-	assert.deepEqual(bad.warnings, ["autoSubagents must be true or false; using false", "persistentProjectRules must be true or false; using false", "backgroundAuto must be true or false; using false"]);
+test("subagentsFollowAuto, projectExactCommands and backgroundAutoFallback: absent or a boolean reads as-is, anything else warns and stays off", () => {
+	assert.equal(parseConfig("{}").subagentsFollowAuto, false);
+	assert.equal(parseConfig('{"subagentsFollowAuto": true}').subagentsFollowAuto, true);
+	assert.equal(parseConfig('{"subagentsFollowAuto": false}').subagentsFollowAuto, false);
+	assert.equal(parseConfig("{}").projectExactCommands, false);
+	assert.equal(parseConfig('{"projectExactCommands": true}').projectExactCommands, true);
+	assert.equal(parseConfig("{}").backgroundAutoFallback, false);
+	assert.equal(parseConfig('{"backgroundAutoFallback": true}').backgroundAutoFallback, true);
+	const bad = parseConfig('{"subagentsFollowAuto": "yes", "projectExactCommands": 7, "backgroundAutoFallback": "on"}');
+	assert.equal(bad.subagentsFollowAuto, false);
+	assert.equal(bad.projectExactCommands, false);
+	assert.equal(bad.backgroundAutoFallback, false);
+	assert.deepEqual(bad.warnings, ["subagentsFollowAuto must be true or false; using false", "projectExactCommands must be true or false; using false", "backgroundAutoFallback must be true or false; using false"]);
 	// one bad key doesn't hide the other
-	const mixed = parseConfig('{"readOnlyTools": ["x_tool"], "autoSubagents": 7}');
+	const mixed = parseConfig('{"readOnlyTools": ["x_tool"], "subagentsFollowAuto": 7}');
 	assert.deepEqual([...mixed.readOnlyTools], ["x_tool"]);
-	assert.equal(mixed.autoSubagents, false);
+	assert.equal(mixed.subagentsFollowAuto, false);
+});
+
+test("ccExtensionsPrompt: absent is true, a boolean reads as-is, anything else warns and is true", () => {
+	assert.equal(parseConfig("{}").ccExtensionsPrompt, true);
+	assert.equal(parseConfig('{"ccExtensionsPrompt": false}').ccExtensionsPrompt, false);
+	assert.equal(parseConfig('{"ccExtensionsPrompt": true}').ccExtensionsPrompt, true);
+	const bad = parseConfig('{"ccExtensionsPrompt": "no"}');
+	assert.equal(bad.ccExtensionsPrompt, true);
+	assert.deepEqual(bad.warnings, ["ccExtensionsPrompt must be true or false; using true"]);
+	assert.equal(parseConfig("not json").ccExtensionsPrompt, true, "the unusable-file fallback");
+});
+
+test("saveConfig writes ccExtensionsPrompt and it loads back", () => {
+	const dir = mkdtempSync(join(tmpdir(), "pdf-config-"));
+	try {
+		assert.equal(saveConfig(dir, { ccExtensionsPrompt: false }), undefined);
+		assert.deepEqual(JSON.parse(readFileSync(join(dir, CONFIG_FILE), "utf8")), { ccExtensionsPrompt: false });
+		assert.equal(loadConfig(dir).ccExtensionsPrompt, false);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 test("saveConfig merges into the file, keeps unknown keys, creates it when absent", () => {
@@ -90,21 +111,25 @@ test("saveConfig merges into the file, keeps unknown keys, creates it when absen
 	try {
 		const file = join(dir, CONFIG_FILE);
 		// absent: created
-		assert.equal(saveConfig(dir, { autoSubagents: true }), undefined);
-		assert.equal(JSON.parse(readFileSync(file, "utf8")).autoSubagents, true);
+		assert.equal(saveConfig(dir, { subagentsFollowAuto: true }), undefined);
+		assert.equal(JSON.parse(readFileSync(file, "utf8")).subagentsFollowAuto, true);
 		// merges into what is there, keeping unknown keys and other settings
 		writeFileSync(file, '{"readOnlyTools": ["x_tool"], "future": {"a": 1}}');
-		assert.equal(saveConfig(dir, { autoSubagents: false, persistentProjectRules: true, backgroundAuto: true }), undefined);
+		assert.equal(saveConfig(dir, { subagentsFollowAuto: false, projectExactCommands: true, backgroundAutoFallback: true }), undefined);
 		const saved = JSON.parse(readFileSync(file, "utf8"));
-		assert.deepEqual(saved, { readOnlyTools: ["x_tool"], future: { a: 1 }, autoSubagents: false, persistentProjectRules: true, backgroundAuto: true });
+		assert.deepEqual(saved, { readOnlyTools: ["x_tool"], future: { a: 1 }, subagentsFollowAuto: false, projectExactCommands: true, backgroundAutoFallback: true });
 		assert.ok(statSync(file).isFile());
 		// what it wrote loads back
-		assert.equal(loadConfig(dir).autoSubagents, false);
+		assert.equal(loadConfig(dir).subagentsFollowAuto, false);
 		assert.deepEqual([...loadConfig(dir).readOnlyTools], ["x_tool"]);
-		// a broken file is replaced, not merged
+		// a broken file is refused, not replaced: the error says so and the file is left as it was
 		writeFileSync(file, "{broken");
-		assert.equal(saveConfig(dir, { autoSubagents: true }), undefined);
-		assert.equal(JSON.parse(readFileSync(file, "utf8")).autoSubagents, true);
+		assert.match(saveConfig(dir, { subagentsFollowAuto: true }) ?? "", /not valid JSON/);
+		assert.equal(readFileSync(file, "utf8"), "{broken");
+		// a valid file that is not an object is refused too (a save would discard its content)
+		writeFileSync(file, "[1, 2]");
+		assert.match(saveConfig(dir, { subagentsFollowAuto: true }) ?? "", /is not a JSON object/);
+		assert.equal(readFileSync(file, "utf8"), "[1, 2]");
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
@@ -115,7 +140,7 @@ test("saveConfig warns instead of throwing when the file can't be written", () =
 	const dir = mkdtempSync(join(tmpdir(), "pdf-config-"));
 	try {
 		mkdirSync(join(dir, CONFIG_FILE));
-		assert.match(saveConfig(dir, { autoSubagents: true }) ?? "", /could not (read|write)/);
+		assert.match(saveConfig(dir, { subagentsFollowAuto: true }) ?? "", /could not (read|write)/);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
@@ -129,39 +154,53 @@ test("tools that front other tools, and the writers, are rejected with a warning
 	for (const name of ["mcp", "subagent", "bash", "edit", "write"]) assert.ok(!defaults.has(name), `${name} is not a default`);
 });
 
-test("previewTextColor: the five values read as-is; absent is dim; anything else warns and stays dim", () => {
-	assert.equal(parseConfig("{}").previewTextColor, "dim");
+test("commandColors: the five values read as-is; absent is unset (undefined); anything else warns and is unset", () => {
+	assert.equal(parseConfig("{}").commandColors, undefined);
 	for (const value of ["dim", "muted", "text", "builtin-syntax", "shell-highlight"]) {
-		assert.equal(parseConfig(`{"previewTextColor": "${value}"}`).previewTextColor, value);
+		assert.equal(parseConfig(`{"commandColors": "${value}"}`).commandColors, value);
 	}
 	// the old single "syntax" value is gone: a stale file says so instead of meaning something else
-	for (const text of ['{"previewTextColor": "warning"}', '{"previewTextColor": "syntax"}', '{"previewTextColor": 7}', '{"previewTextColor": null}']) {
+	for (const text of ['{"commandColors": "warning"}', '{"commandColors": "syntax"}', '{"commandColors": 7}', '{"commandColors": null}']) {
 		const config = parseConfig(text);
-		assert.equal(config.previewTextColor, "dim", text);
-		assert.deepEqual(config.warnings, ['previewTextColor must be "dim", "muted", "text", "builtin-syntax" or "shell-highlight"; using "dim"'], text);
+		assert.equal(config.commandColors, undefined, text);
+		assert.deepEqual(config.warnings, ['commandColors must be "dim", "muted", "text", "builtin-syntax" or "shell-highlight"; using the default'], text);
 	}
 });
 
-test("saveConfig keeps a hand-written previewTextColor when it writes another setting", () => {
+test("effectiveCommandColors: unset means shell-highlight when the highlighter is loaded, else dim", () => {
+	assert.equal(effectiveCommandColors(undefined, true), "shell-highlight");
+	assert.equal(effectiveCommandColors(undefined, false), "dim");
+});
+
+test("effectiveCommandColors: an explicit value is respected, except shell-highlight without its package, which is dim", () => {
+	assert.equal(effectiveCommandColors("dim", true), "dim");
+	assert.equal(effectiveCommandColors("muted", false), "muted");
+	assert.equal(effectiveCommandColors("shell-highlight", false), "dim");
+	assert.equal(effectiveCommandColors("shell-highlight", true), "shell-highlight");
+	assert.equal(effectiveCommandColors("builtin-syntax", false), "builtin-syntax");
+	assert.equal(effectiveCommandColors("builtin-syntax", true), "builtin-syntax");
+});
+
+test("saveConfig keeps a hand-written commandColors when it writes another setting", () => {
 	const dir = mkdtempSync(join(tmpdir(), "pdf-config-"));
 	try {
-		writeFileSync(join(dir, CONFIG_FILE), '{"previewTextColor": "muted"}');
-		assert.equal(saveConfig(dir, { autoSubagents: true }), undefined);
+		writeFileSync(join(dir, CONFIG_FILE), '{"commandColors": "muted"}');
+		assert.equal(saveConfig(dir, { subagentsFollowAuto: true }), undefined);
 		const saved = JSON.parse(readFileSync(join(dir, CONFIG_FILE), "utf8"));
-		assert.equal(saved.previewTextColor, "muted");
-		assert.equal(saved.autoSubagents, true);
+		assert.equal(saved.commandColors, "muted");
+		assert.equal(saved.subagentsFollowAuto, true);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
 
-test("backgroundAskPopup: idle, always or badge reads as-is; absent is idle; anything else warns and stays idle", () => {
-	assert.equal(parseConfig("{}").backgroundAskPopup, "idle");
+test("backgroundAskPopup: idle, always or badge reads as-is; absent is always; anything else warns and stays always", () => {
+	assert.equal(parseConfig("{}").backgroundAskPopup, "always");
 	for (const value of ["idle", "always", "badge"]) assert.equal(parseConfig(`{"backgroundAskPopup": "${value}"}`).backgroundAskPopup, value);
 	for (const text of ['{"backgroundAskPopup": "never"}', '{"backgroundAskPopup": true}']) {
 		const config = parseConfig(text);
-		assert.equal(config.backgroundAskPopup, "idle", text);
-		assert.deepEqual(config.warnings, ['backgroundAskPopup must be "idle", "always" or "badge"; using "idle"'], text);
+		assert.equal(config.backgroundAskPopup, "always", text);
+		assert.deepEqual(config.warnings, ['backgroundAskPopup must be "idle", "always" or "badge"; using "always"'], text);
 	}
 });
 

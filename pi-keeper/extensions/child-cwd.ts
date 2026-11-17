@@ -53,16 +53,20 @@ function worktreeGitDir(dir: string): string | undefined {
 
 /**
  * Why a child may not work in `childCwd`, or undefined when it may.
- * `parentCwd` is undefined when the parent is unknown (then only the
- * root/home check applies).
+ * `parentCwd` is undefined when the parent is unknown: then only the
+ * root/home check applies, unless `parentExpected` (the env names a parent
+ * session and the child runs in auto), where the cwd cannot be checked and
+ * the child fails closed.
  */
-export function childCwdProblem(childCwd: string, parentCwd: string | undefined, home: string = homedir()): string | undefined {
+export function childCwdProblem(childCwd: string, parentCwd: string | undefined, home: string = homedir(), parentExpected = false): string | undefined {
 	const cwd = real(childCwd);
 	const realHome = real(home);
 	if (cwd === sep || cwd === realHome || inside(realHome, cwd)) {
 		return `your working directory ${cwd} is / or the home directory (or above it), which would put every file "inside" it`;
 	}
-	if (parentCwd === undefined) return undefined;
+	if (parentCwd === undefined) {
+		return parentExpected ? `your working directory ${cwd} cannot be checked because the parent session's grants could not be read` : undefined;
+	}
 	const parent = real(parentCwd);
 	const parentRoot = real(findProjectRoot(parent));
 	if (inside(cwd, parent) || inside(cwd, parentRoot)) return undefined;

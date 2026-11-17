@@ -12,8 +12,8 @@
 //   - a manual name (`/name`, `--name`, picker rename) always wins;
 //   - the reply is dropped when the session switched while it was in flight;
 //   - failures are silent: an empty title or a 4xx counts toward a cap of two
-//     attempts per session, while network errors, timeouts, 429 and 5xx retry
-//     on the next message.
+//     attempts per session; network errors, timeouts, 429 and 5xx retry on the
+//     next message, up to five times per session (canAttempt in title.ts).
 //
 // Commands:
 //   /topic [title]     regenerate from the first message, or set a title
@@ -31,10 +31,8 @@ import {
 	saveConfig,
 	type TopicConfig,
 } from "./config.ts"
-import { assistantText, buildTopicRequest, generateAndApply } from "./title.ts"
+import { assistantText, buildTopicRequest, canAttempt, generateAndApply } from "./title.ts"
 
-/** Deterministic failures (empty title, 4xx) stop retrying after this many. */
-const MAX_ATTEMPTS = 2
 /** Upper bound on one title request; it must never outlive a session by much. */
 const REQUEST_TIMEOUT_MS = 20_000
 const TITLE_MAX_TOKENS = 512
@@ -45,7 +43,10 @@ const MINIMAL_THINKING_BUDGET = { minimal: 256 }
 
 interface SessionState {
 	pending: boolean
+	/** Deterministic failures: empty title, 4xx. */
 	attempts: number
+	/** Transient failures: network, timeout, 429, 5xx. */
+	transientFailures: number
 }
 
 export default function sessionTopic(pi: ExtensionAPI): void {
@@ -75,9 +76,9 @@ export default function sessionTopic(pi: ExtensionAPI): void {
 		if (pi.getSessionName()?.trim()) return
 
 		const sessionId = ctx.sessionManager.getSessionId()
-		const state = states.get(sessionId) ?? { pending: false, attempts: 0 }
+		const state = states.get(sessionId) ?? { pending: false, attempts: 0, transientFailures: 0 }
 		states.set(sessionId, state)
-		if (state.pending || state.attempts >= MAX_ATTEMPTS) return
+		if (state.pending || !canAttempt(state)) return
 
 		const model = resolveModel(ctx, config.model)
 		if (!model) return
@@ -213,9 +214,14 @@ async function nameSession(
 			return
 		}
 		// A 4xx is deterministic (wrong model id, rejected prompt) and stops
-		// retrying; network errors, timeouts and 429 retry on the next message.
+		// retrying early; network errors, timeouts, 429 and 5xx retry on the next
+		// message until the transient cap.
 		if (isDeterministic(error)) state.attempts++
-		debug(config, `auto error=${describe(error)} attempts=${state.attempts}`)
+		else state.transientFailures++
+		debug(
+			config,
+			`auto error=${describe(error)} attempts=${state.attempts} transient=${state.transientFailures}`,
+		)
 	} finally {
 		state.pending = false
 	}

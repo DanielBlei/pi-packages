@@ -101,14 +101,14 @@ test("the exact command option is not offered with a session option, or in plan 
 	assert.ok(!dialogOptions(base).primary.includes(EXACT));
 });
 
-test("the persistent-project-rules setting adds the project option after the session one", () => {
-	const { primary, secondary } = dialogOptions({ ...base, exactCommand: true, persistentProjectRules: true });
+test("the project-exact-commands setting adds the project option after the session one", () => {
+	const { primary, secondary } = dialogOptions({ ...base, exactCommand: true, projectExactCommands: true });
 	assert.deepEqual(primary, ["Yes", EXACT, EXACT_PROJECT, "No", "More…"]);
 	assert.deepEqual(secondary, [FEEDBACK, AUTO]);
 });
 
-test("the persistent-project-rules option is offered to a child (it saves to the child's project) next to the shared session option", () => {
-	const { primary } = dialogOptions({ ...base, exactCommand: true, persistentProjectRules: true, child: true });
+test("the project-exact-commands option is offered to a child (it saves to the child's project) next to the shared session option", () => {
+	const { primary } = dialogOptions({ ...base, exactCommand: true, projectExactCommands: true, child: true });
 	// a child's session grant lands in the parent session, so its label says who it covers
 	assert.ok(!primary.includes(EXACT));
 	assert.ok(primary.includes(EXACT_SHARED));
@@ -125,10 +125,10 @@ test("a child's session grants are worded for the parent session and its subagen
 	assert.ok(dialogOptions({ ...base, sessionLabel: SESSION }).primary.includes(SESSION));
 });
 
-test("the persistent-project-rules option is not offered with a session option, in plan or auto mode, or when the setting is off", () => {
-	assert.ok(!dialogOptions({ ...base, persistentProjectRules: true, sessionLabel: SESSION, projectLabel: PROJECT }).primary.includes(EXACT_PROJECT));
-	assert.ok(!dialogOptions({ ...base, mode: "plan", persistentProjectRules: true }).primary.includes(EXACT_PROJECT));
-	assert.ok(!dialogOptions({ ...base, mode: "auto", persistentProjectRules: true }).primary.includes(EXACT_PROJECT));
+test("the project-exact-commands option is not offered with a session option, in plan or auto mode, or when the setting is off", () => {
+	assert.ok(!dialogOptions({ ...base, projectExactCommands: true, sessionLabel: SESSION, projectLabel: PROJECT }).primary.includes(EXACT_PROJECT));
+	assert.ok(!dialogOptions({ ...base, mode: "plan", projectExactCommands: true }).primary.includes(EXACT_PROJECT));
+	assert.ok(!dialogOptions({ ...base, mode: "auto", projectExactCommands: true }).primary.includes(EXACT_PROJECT));
 	assert.ok(!dialogOptions({ ...base, exactCommand: true }).primary.includes(EXACT_PROJECT));
 	assert.ok(!dialogOptions(base).primary.includes(EXACT_PROJECT));
 });

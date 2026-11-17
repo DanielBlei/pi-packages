@@ -96,7 +96,7 @@ test("long or multi-line bash commands get the full text; short ones nothing", a
 	assert.deepEqual(await previewFor({ toolName: "bash", input: { command: long } }, CWD), { kind: "text", text: long, lang: "bash" });
 	const heredoc = "cat > f <<EOF\nhello\nEOF";
 	assert.deepEqual(await previewFor({ toolName: "bash", input: { command: heredoc } }, CWD), { kind: "text", text: heredoc, lang: "bash" });
-	// the language goes with it, so the dialog can color the command (previewTextColor "syntax")
+	// the language goes with it, so the dialog can color the command (commandColors "syntax")
 	assert.deepEqual(await previewFor({ toolName: "powershell", input: { command: "Get-ChildItem `\n  -Recurse" } }, CWD), { kind: "text", text: "Get-ChildItem `\n  -Recurse", lang: "powershell" });
 	assert.equal(await previewFor({ toolName: "bash", input: { command: "npm test" } }, CWD), undefined);
 	assert.equal(await previewFor({ toolName: "read", input: { path: "x" } }, CWD), undefined);

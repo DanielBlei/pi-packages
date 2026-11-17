@@ -73,6 +73,8 @@ export interface ProjectPermissions {
 	readDirs: string[];
 	/** Trusted `Fetch(<host>)` hosts (curl/wget GETs that run without asking). */
 	fetchHosts: string[];
+	/** The file exists but cannot be read or parsed: every shell command asks (see LoadedRules.broken). */
+	broken?: string;
 }
 
 export const NO_PROJECT_RULES: ProjectPermissions = { allow: { prefixes: [], exact: [] }, ask: [], deny: [], readDirs: [], fetchHosts: [] };
@@ -239,7 +241,7 @@ export function findMatchingRule(rules: readonly ParsedRule[], command: string):
 }
 
 /** Rules that take effect: ask/deny always, allow only when `allowActive`. */
-export function compilePermissions(rules: ParsedRules, allowActive: boolean): ProjectPermissions {
+export function compilePermissions(rules: ParsedRules, allowActive: boolean, broken?: string): ProjectPermissions {
 	const allow = allowActive ? rules.allow : [];
 	return {
 		allow: { prefixes: allow.filter((r) => !r.exact).map((r) => r.tokens), exact: allow.filter((r) => r.exact).map((r) => r.tokens) },
@@ -247,6 +249,7 @@ export function compilePermissions(rules: ParsedRules, allowActive: boolean): Pr
 		deny: rules.deny,
 		readDirs: allowActive ? rules.readDirs.map((r) => r.dir) : [],
 		fetchHosts: allowActive ? rules.fetchHosts.map((r) => r.host) : [],
+		...(broken === undefined ? {} : { broken }),
 	};
 }
 
@@ -341,7 +344,14 @@ export interface LoadedRules {
 	/** The hash is one we recorded (or there is no file). */
 	trusted: boolean;
 	rules: ParsedRules;
+	/**
+	 * Why the file exists but its rules are unknown (not valid JSON, or unreadable such as EACCES or EISDIR).
+	 * While set, every shell command asks: a broken file must not silently drop the user's rules.
+	 */
+	broken?: string;
 }
+
+const NO_RULES: ParsedRules = { allow: [], ask: [], deny: [], readDirs: [], fetchHosts: [], warnings: [] };
 
 /** Read, parse and trust-check the project's rules file. Never throws. */
 export function loadProjectRules(cwd: string, agentDir: string): LoadedRules {
@@ -349,15 +359,18 @@ export function loadProjectRules(cwd: string, agentDir: string): LoadedRules {
 	let text: string;
 	try {
 		text = readFileSync(file, "utf8");
-	} catch {
-		return { file, exists: false, trusted: true, rules: { allow: [], ask: [], deny: [], readDirs: [], fetchHosts: [], warnings: [] } };
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { file, exists: false, trusted: true, rules: NO_RULES };
+		const code = (error as NodeJS.ErrnoException).code ?? "unknown error";
+		return { file, exists: true, trusted: true, rules: NO_RULES, broken: `the file cannot be read (${code})` };
 	}
 	const hash = sha256(text);
 	const trusted = readTrustStore(agentDir)[resolve(file)] === hash;
+	if (text.trim() === "") return { file, exists: true, hash, trusted, rules: NO_RULES };
 	try {
 		return { file, exists: true, hash, trusted, rules: parseRules(JSON.parse(text)) };
 	} catch {
-		return { file, exists: true, hash, trusted, rules: { allow: [], ask: [], deny: [], readDirs: [], fetchHosts: [], warnings: ["the file is not valid JSON; no rules loaded"] } };
+		return { file, exists: true, hash, trusted, rules: { ...NO_RULES, warnings: ["the file is not valid JSON; no rules loaded"] }, broken: "the file is not valid JSON" };
 	}
 }
 

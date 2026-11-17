@@ -56,6 +56,7 @@ async function parentAndChild(childEntry: "child-default" | "child-plan" | "chil
 const SUB = /Permission required \(subagent, default mode\)/;
 const SUB_PLAN = /Permission required \(subagent, plan mode\)/;
 const SUB_AUTO = /Permission required \(subagent, auto mode\)/;
+const PERMISSION_ANY = /Permission required/;
 const ALLOW_ONCE = "Yes";
 const EDITS = "Yes, allow all edits this session";
 const AUTO = "Yes, and switch to auto mode";
@@ -113,6 +114,50 @@ describe("dialogs never overlap in the parent's UI", () => {
 		]);
 		assert.equal(one.blocked, false);
 		assert.equal(two.blocked, true);
+		assert.equal(parent.maxOpenDialogs, 1);
+		parent.assertNoPendingAnswers();
+	});
+
+	it("a queued read of a directory granted for the session by the first answer is not asked again", async () => {
+		const sandbox = sandboxed();
+		const outside = realpathSync(mkdtempSync(join(sandbox.root, "outside-")));
+		writeFileSync(join(outside, "notes.md"), "x");
+		const file = join(outside, "notes.md");
+		const parent = await startPi({ sandbox });
+		await parent.session();
+		const first = await startPi({ sandbox, entry: "child-default" });
+		await first.session();
+		const second = await startPi({ sandbox, entry: "child-default" });
+		await second.session();
+		// only the first dialog is scripted: a second one would throw (no queued answer) and block the read
+		parent.dialogHoldMs = 20;
+		parent.answer(PERMISSION_ANY, `Yes, and allow reading from ${outside}/ this session`);
+		const [one, two] = await Promise.all([first.tool("read", { path: file }), second.tool("read", { path: file })]);
+		assert.equal(one.blocked, false);
+		assert.equal(two.blocked, false);
+		assert.equal(parent.dialogs.length, 1);
+		assert.equal(parent.maxOpenDialogs, 1);
+		parent.assertNoPendingAnswers();
+	});
+
+	it("a queued read after a one-time \"Yes\" still gets its own dialog", async () => {
+		const sandbox = sandboxed();
+		const outside = realpathSync(mkdtempSync(join(sandbox.root, "outside-")));
+		writeFileSync(join(outside, "notes.md"), "x");
+		const file = join(outside, "notes.md");
+		const parent = await startPi({ sandbox });
+		await parent.session();
+		const first = await startPi({ sandbox, entry: "child-default" });
+		await first.session();
+		const second = await startPi({ sandbox, entry: "child-default" });
+		await second.session();
+		parent.dialogHoldMs = 20;
+		parent.answer(PERMISSION_ANY, ALLOW_ONCE);
+		parent.answer(PERMISSION_ANY, ALLOW_ONCE);
+		const [one, two] = await Promise.all([first.tool("read", { path: file }), second.tool("read", { path: file })]);
+		assert.equal(one.blocked, false);
+		assert.equal(two.blocked, false);
+		assert.equal(parent.dialogs.length, 2);
 		assert.equal(parent.maxOpenDialogs, 1);
 		parent.assertNoPendingAnswers();
 	});
@@ -208,9 +253,9 @@ describe("a child's ask is relayed to the parent's UI", () => {
 		parent.assertNoPendingAnswers();
 	});
 
-	it("with the persistent-project-rules setting on, a child's exact-command ask offers the project option and saves to the child's project", async () => {
+	it("with the project-exact-commands setting on, a child's exact-command ask offers the project option and saves to the child's project", async () => {
 		const sandbox = sandboxed();
-		writeFileSync(join(sandbox.agentDir, "pi-keeper.json"), '{"persistentProjectRules": true}');
+		writeFileSync(join(sandbox.agentDir, "pi-keeper.json"), '{"projectExactCommands": true}');
 		const parent = await startPi({ sandbox });
 		await parent.session();
 		const child = await startPi({ sandbox, entry: "child-default" });
@@ -315,7 +360,7 @@ describe("an auto-mode child (the /keeper setting) runs auto while its asks rela
 	it("without a relay the child-auto entry falls back to default mode", async () => {
 		const sandbox = sandboxed();
 		// pin the setting off: with it on, a relay-less child-auto would run auto
-		writeFileSync(join(sandbox.agentDir, "pi-keeper.json"), '{"backgroundAuto": false}');
+		writeFileSync(join(sandbox.agentDir, "pi-keeper.json"), '{"backgroundAutoFallback": false}');
 		// no parent with a UI: no relay is published, so child-auto loads as default
 		const child = await startPi({ sandbox, entry: "child-auto" });
 		await child.session();
@@ -329,10 +374,10 @@ describe("an auto-mode child (the /keeper setting) runs auto while its asks rela
 	});
 });
 
-describe("a relay-less child runs auto with the background-auto setting", () => {
+describe("a relay-less child runs auto with the background-auto-fallback setting", () => {
 	it("child-default with the setting on: edits and safe bash run unasked, dangerous commands still deny", async () => {
 		const sandbox = sandboxed();
-		writeFileSync(join(sandbox.agentDir, "pi-keeper.json"), '{"backgroundAuto": true}');
+		writeFileSync(join(sandbox.agentDir, "pi-keeper.json"), '{"backgroundAutoFallback": true}');
 		// no parent with a UI: no relay is published
 		const child = await startPi({ sandbox, entry: "child-default" });
 		await child.session();
@@ -350,7 +395,7 @@ describe("a relay-less child runs auto with the background-auto setting", () => 
 
 	it("child-auto with the setting on stays auto without a relay", async () => {
 		const sandbox = sandboxed();
-		writeFileSync(join(sandbox.agentDir, "pi-keeper.json"), '{"backgroundAuto": true}');
+		writeFileSync(join(sandbox.agentDir, "pi-keeper.json"), '{"backgroundAutoFallback": true}');
 		const child = await startPi({ sandbox, entry: "child-auto" });
 		await child.session();
 		assert.equal((await child.tool("edit", { path: "src/a.ts", oldText: "a", newText: "b" })).blocked, false);
@@ -359,7 +404,7 @@ describe("a relay-less child runs auto with the background-auto setting", () => 
 
 	it("with the setting off child-default stays default and denies (pinned)", async () => {
 		const sandbox = sandboxed();
-		writeFileSync(join(sandbox.agentDir, "pi-keeper.json"), '{"backgroundAuto": false}');
+		writeFileSync(join(sandbox.agentDir, "pi-keeper.json"), '{"backgroundAutoFallback": false}');
 		const child = await startPi({ sandbox, entry: "child-default" });
 		await child.session();
 		const edit = await child.tool("edit", { path: "src/a.ts", oldText: "a", newText: "b" });
@@ -372,7 +417,7 @@ describe("a relay-less child runs auto with the background-auto setting", () => 
 
 	it("a foreground child with a relay is unaffected: default-mode asks still relay", async () => {
 		const sandbox = sandboxed();
-		writeFileSync(join(sandbox.agentDir, "pi-keeper.json"), '{"backgroundAuto": true}');
+		writeFileSync(join(sandbox.agentDir, "pi-keeper.json"), '{"backgroundAutoFallback": true}');
 		const parent = await startPi({ sandbox });
 		await parent.session();
 		const child = await startPi({ sandbox, entry: "child-default" });

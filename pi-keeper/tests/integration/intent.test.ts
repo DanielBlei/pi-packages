@@ -165,7 +165,7 @@ describe("Opt-in exact approvals in project scope: commands no prefix can cover 
 		assert.ok(!dialog.options.includes(EXACT_PROJECT), JSON.stringify(dialog.options));
 
 		// on: the project option appears, and the choice persists
-		writeFileSync(join(sb.agentDir, "pi-keeper.json"), '{"persistentProjectRules": true}');
+		writeFileSync(join(sb.agentDir, "pi-keeper.json"), '{"projectExactCommands": true}');
 		const on = await startPi({ sandbox: sb });
 		await on.session("resume");
 		await on.prompt("go");
@@ -185,7 +185,7 @@ describe("Opt-in exact approvals in project scope: commands no prefix can cover 
 	});
 
 	it("commands a rule body can't name (a quoted argument), removals and dangerous commands keep the old options", async () => {
-		writeFileSync(join(sb.agentDir, "pi-keeper.json"), '{"persistentProjectRules": true}');
+		writeFileSync(join(sb.agentDir, "pi-keeper.json"), '{"projectExactCommands": true}');
 		const h = await startPi({ sandbox: sb });
 		await h.session("resume");
 		const quoted = await expectAsk(h, "bash", bash("python3 -c 'print(1)'"));
@@ -776,7 +776,7 @@ describe("Opt-in auto subagents: with the /keeper setting on, an auto parent's c
 
 	/** A parent in auto mode with the setting on, plus a headless child of it. */
 	async function autoParentAndChild(): Promise<{ parent: Harness; child: Harness }> {
-		writeFileSync(join(sb.agentDir, "pi-keeper.json"), '{"autoSubagents": true}');
+		writeFileSync(join(sb.agentDir, "pi-keeper.json"), '{"subagentsFollowAuto": true}');
 		const parent = await startPi({ sandbox: sb });
 		await parent.session();
 		await parent.command("mode", "auto");
@@ -830,8 +830,8 @@ describe("Opt-in auto subagents: with the /keeper setting on, an auto parent's c
 		const parent = await startPi({ sandbox: sb });
 		await parent.session();
 		await parent.command("mode", "auto");
-		await parent.command("keeper", "auto-subagents on");
-		assert.equal(JSON.parse(readFileSync(join(sb.agentDir, "pi-keeper.json"), "utf8")).autoSubagents, true);
+		await parent.command("keeper", "subagents-follow-auto on");
+		assert.equal(JSON.parse(readFileSync(join(sb.agentDir, "pi-keeper.json"), "utf8")).subagentsFollowAuto, true);
 		// a new session (fresh load of the same file) keeps it
 		const second = await startPi({ sandbox: sb });
 		await second.session("resume");

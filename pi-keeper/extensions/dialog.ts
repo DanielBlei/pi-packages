@@ -4,16 +4,18 @@
  * title is styled per line (title.ts): headers and questions bold in the
  * normal text color, commands in the theme's warning color (yellow, like
  * the auto-mode badge), explanations dim — except a whole command when
- * `previewTextColor` asks for the shell highlighter (see below). Without a
+ * `commandColors` asks for the shell highlighter (see below). Without a
  * preview the same dialog shows just the title and the options.
  *
  * The full command of a long bash call (preview.kind === "text") is painted in the
- * slot `previewTextColor` names (config.ts, default "dim"), because a theme's dim is
- * often only just readable for a block of body text. The two syntax values color it
+ * slot `commandColors` names (config.ts), because a theme's dim is often only just
+ * readable for a block of body text. Unset, it is `"shell-highlight"` when
+ * `pi-shell-highlight` is loaded and `"dim"` when not; the choice is made each time a
+ * dialog opens, so a package that loads later counts. The two syntax values color it
  * instead: `"builtin-syntax"` with pi's own highlighter (the one the transcript uses
- * for fenced code), `"shell-highlight"` with `pi-shell-highlight` when that package is
- * loaded — command names and the inner language of a heredoc — and with pi's
- * highlighter when it is not. `"shell-highlight"` reaches two more surfaces through
+ * for fenced code), `"shell-highlight"` with `pi-shell-highlight` (command names and the
+ * inner language of a heredoc; without that package it means dim). `"shell-highlight"`
+ * reaches two more surfaces through
  * `paintShellLines`: the one-line `bash: <command>` title of a short command (which has
  * no preview block), and a shell fenced block in the plan view (plan-approval.ts).
  * A diff preview keeps its own added/removed colors on purpose: there the colors carry
@@ -30,27 +32,33 @@
 import type { ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { highlightCode, renderDiff } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { DEFAULT_PREVIEW_TEXT_COLOR, isSyntaxPreviewColor, type PreviewTextColor } from "./config.ts";
+import { effectiveCommandColors, type PreviewTextColor } from "./config.ts";
 import { withDialogLock } from "./dialog-lock.ts";
+import { ALLOW_ONCE } from "./options.ts";
 import type { Preview } from "./preview.ts";
 import { commandHighlighter, type CommandStyle } from "./shell-highlight-bridge.ts";
 import type { DialogTitle, TitleLine, TitleSegment } from "./title.ts";
 
 /**
- * Theme slot the full-command text is painted with. Set once per session from the
- * config (index.ts, right after `loadConfig`), so every dialog of this process agrees.
- * The default keeps the historical look until the setter runs.
+ * The configured full-command color: what config.ts holds, undefined when unset. Set once per
+ * session from the config (index.ts, right after `loadConfig`), so every dialog of this process
+ * agrees. It is resolved against the loaded highlighter at each use, not here.
  */
-let previewTextColor: PreviewTextColor = DEFAULT_PREVIEW_TEXT_COLOR;
+let commandColors: PreviewTextColor | undefined;
 
-/** Use `color` for the full-command text of every later dialog (config `previewTextColor`). */
-export function setPreviewTextColor(color: PreviewTextColor): void {
-	previewTextColor = color;
+/** Use `color` (undefined: unset) for the full-command text of every later dialog (config `commandColors`). */
+export function setPreviewTextColor(color: PreviewTextColor | undefined): void {
+	commandColors = color;
 }
 
-/** True when the config asks for the richer shell highlighter (`previewTextColor: "shell-highlight"`). */
+/** The color in effect now: the configured one, or the default that depends on whether pi-shell-highlight is loaded. */
+function resolvedCommandColors(): PreviewTextColor {
+	return effectiveCommandColors(commandColors, commandHighlighter() !== undefined);
+}
+
+/** True when the command is painted by the shell highlighter (`shell-highlight` in effect). */
 export function wantsShellHighlight(): boolean {
-	return previewTextColor === "shell-highlight";
+	return resolvedCommandColors() === "shell-highlight";
 }
 
 /**
@@ -99,10 +107,11 @@ export function paintShellLines(theme: Pick<Theme, "fg">, text: string, lang: st
  */
 function paintCommand(theme: Pick<Theme, "fg">, preview: { text: string; lang?: string }): string {
 	const lang = preview.lang ?? "bash";
-	if (isSyntaxPreviewColor(previewTextColor) === false) return theme.fg(previewTextColor, preview.text);
-	// builtin-syntax keeps pi's highlighter alone; shell-highlight adds command names and heredocs on top
-	if (wantsShellHighlight() === false) return highlightCode(preview.text, lang).join("\n");
-	return paintShellLines(theme, preview.text, lang).join("\n");
+	const color = resolvedCommandColors();
+	if (color === "shell-highlight") return paintShellLines(theme, preview.text, lang).join("\n");
+	// builtin-syntax keeps pi's highlighter alone
+	if (color === "builtin-syntax") return highlightCode(preview.text, lang).join("\n");
+	return theme.fg(color, preview.text);
 }
 
 /** Preview lines kept in the plain-text fallback (RPC select title). */
@@ -148,9 +157,20 @@ export function permissionDialog(
 	escLabel = "reject",
 	signalOverride?: AbortSignal,
 	onModeShortcut?: (data: string) => boolean,
+	/** Run inside the lock, before the dialog opens: true when the call is now allowed (a grant a queued dialog just made), and the dialog is skipped. */
+	recheck?: () => boolean,
 ): Promise<string | undefined> {
 	// the one choke point of every permission select, the parent's own and a child's relayed ask
-	return withDialogLock(() => openPermissionDialog(ctx, title, preview, options, escLabel, signalOverride, onModeShortcut), signalOverride ?? ctx.signal);
+	return withDialogLock(async () => {
+		if (recheck !== undefined) {
+			// Yield one macrotask first: the dialog that held the lock just before may still be on its way
+			// to recording its answer (a grant is written after its promise settles, a few microtasks later),
+			// and the recheck must see that grant.
+			await new Promise((resolve) => setImmediate(resolve));
+			if (recheck() === true) return ALLOW_ONCE;
+		}
+		return openPermissionDialog(ctx, title, preview, options, escLabel, signalOverride, onModeShortcut);
+	}, signalOverride ?? ctx.signal);
 }
 
 async function openPermissionDialog(

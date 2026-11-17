@@ -8,7 +8,7 @@
  * (`async: true`) is a separate process with no relay; with background asks
  * on (the default) its asks reach the parent's user through the mailbox, so
  * it stays in default mode too. Without a way to ask, its asks would be
- * denied; the `/keeper` setting `background-auto` then runs such a
+ * denied; the `/keeper` setting `background-auto-fallback` then runs such a
  * relay-less child in auto mode instead: edits and commands inside the project
  * run unasked, while dangerous commands, secrets and protected paths still ask
  * (and are denied, fail-closed). The choice is relaylessChildMode.
@@ -26,7 +26,7 @@ export default function childDefault(pi: ExtensionAPI): void {
 	let childMode: "default" | "auto" = "default";
 	if (findUiRelay() === undefined) {
 		const config = loadConfig(getAgentDir());
-		childMode = relaylessChildMode("default", { backgroundAsks: canAskParent(config, getAgentDir()), backgroundAuto: config.backgroundAuto });
+		childMode = relaylessChildMode("default", { backgroundAsks: canAskParent(config, getAgentDir()), backgroundAutoFallback: config.backgroundAutoFallback });
 	}
 	keeperExtension(pi, { childMode });
 }

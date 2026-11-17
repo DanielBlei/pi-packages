@@ -109,7 +109,7 @@ export interface ToolHints {
 }
 
 /** Tools that never count as read-only, whatever their annotations claim. */
-const NEVER_READ_ONLY_TOOLS = new Set(["bash", "powershell", "edit", "write", "exit_plan_mode"]);
+const NEVER_READ_ONLY_TOOLS = new Set(["bash", "powershell", "edit", "write", "exit_plan_mode", "mcp", "subagent"]);
 
 /** Tools that front other tools or launch agents: listing the name would allow whatever they are asked to run. */
 const NEVER_LISTED_TOOLS = new Set(["mcp", "subagent"]);
@@ -202,8 +202,9 @@ function matches(matcher: Matcher, call: ToolCall, ctx: EvalContext): boolean {
 			return isScratchPath(pathOf(call.input), ctx) && !isSecretFile(pathOf(call.input), ctx);
 		case "sessionEdits":
 			return ctx.sessionEdits === true;
+		// a rules file that cannot be read or parsed asks for every shell command until it is fixed
 		case "projectAsk":
-			return findMatchingRule(ctx.project?.ask ?? [], commandOf(call.input)) !== undefined;
+			return ctx.project?.broken !== undefined || findMatchingRule(ctx.project?.ask ?? [], commandOf(call.input)) !== undefined;
 		case "projectDeny":
 			return findMatchingRule(ctx.project?.deny ?? [], commandOf(call.input)) !== undefined;
 		case "dangerousBash":

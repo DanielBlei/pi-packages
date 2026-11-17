@@ -1097,7 +1097,9 @@ test("scratch dir: created 0700, containment by realpath, exempt from outside/pr
 		// reads of scratch files do not ask
 		assert.deepEqual(outsideCwdReadPaths(`cat ${join(scratch, "sub")}`, ctx), []);
 		assert.equal(isOutsideCwdRead(scratch, ctx), false);
-		assert.equal(isOutsideCwdRead(base, ctx), true);
+		// base sits in the temp dir, which is never an outside read; a path outside it still is
+		assert.equal(isOutsideCwdRead(base, ctx), false);
+		assert.equal(isOutsideCwdRead("/etc/hosts", ctx), true);
 		// secrets still apply there
 		assert.equal(isSecretFile(join(scratch, ".env")), true);
 		assert.equal(isSecretCommand(`cat ${join(scratch, ".env")}`, ctx), true);
@@ -2268,4 +2270,25 @@ test("isSecretFile: $HOME and ${HOME} credential paths are secret, like ~", () =
 		assert.equal(isSecretFile(p, { cwd: CWD }), true, p);
 	}
 	assert.equal(isSecretFile("$HOME/notes.txt", { cwd: CWD }), false);
+});
+
+test("isSecretCommand: echo or printf of a credential-named variable is a secret read", () => {
+	for (const command of ["echo $GITHUB_TOKEN", 'echo "$GITHUB_TOKEN"', "printf '%s' ${AWS_SECRET_ACCESS_KEY}", "echo $A && echo $API_KEY", "echo $NPM_TOKEN", "echo $OPENAI_API_KEY", "echo $DB_PASSWORD"]) {
+		assert.equal(isSecretCommand(command), true, command);
+	}
+});
+
+test("isSecretCommand: echo or printf of other variables, and literal single-quoted text, are not secret reads", () => {
+	for (const command of ["echo $HOME", "echo $PATH", "echo $GIT_AUTHOR_NAME", "printf '%s' \"$USER\"", "echo token", "echo '$GITHUB_TOKEN'", "echo \\$GITHUB_TOKEN"]) {
+		assert.equal(isSecretCommand(command), false, command);
+	}
+});
+
+test("isDangerousCommand: global options before the subcommand do not hide it", () => {
+	for (const command of ["docker -H tcp://prod:2375 push img", "docker --host=tcp://prod:2375 push img", "docker --context prod push img", "podman --remote push img", "cargo +nightly publish", "cargo --locked publish", "cargo -Z unstable-options publish", "gem -V push x.gem", "gh -R owner/repo pr merge 12", "gh pr -R owner/repo merge 12"]) {
+		assert.equal(isDangerousCommand(command, CTX), true, command);
+	}
+	for (const command of ["docker -H tcp://x ps", "docker run --name push alpine", "cargo +nightly build", "gh -R owner/repo pr view 1"]) {
+		assert.equal(isDangerousCommand(command, CTX), false, command);
+	}
 });

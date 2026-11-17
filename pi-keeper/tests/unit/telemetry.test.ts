@@ -53,6 +53,44 @@ test("logDecision records how long the decision took when the caller timed it", 
 	assert.equal("decideMs" in untimed.entries[0].data, false);
 });
 
+/** The logged target of a bash command, as the session log stores it. */
+function loggedCommand(command: string): string {
+	const { pi, entries } = fakePi();
+	logDecision(pi, "decide", "call-1", { toolName: "bash", input: { command } }, "default", { action: "ask" });
+	return entries[0].data.target as string;
+}
+
+test("secrets in a logged bash command are replaced with ***, the rest of the command is kept", () => {
+	assert.equal(loggedCommand('curl -H "Authorization: Bearer abc123" https://api.example.test/x'), 'curl -H "Authorization: ***" https://api.example.test/x');
+	assert.equal(loggedCommand("curl -H 'Authorization: token ghp_9' -s https://h"), "curl -H 'Authorization: ***' -s https://h");
+	assert.equal(loggedCommand('curl -H "X-Trace: 1" -H "Authorization: Basic dXNlcg==" url'), 'curl -H "X-Trace: 1" -H "Authorization: ***" url');
+	assert.equal(loggedCommand("echo Bearer xyz.123 done"), "echo Bearer *** done");
+	assert.equal(loggedCommand("gh api --token=ghp_123 repos/x"), "gh api --token=*** repos/x");
+	assert.equal(loggedCommand("mytool --password hunter2 run"), "mytool --password *** run");
+	assert.equal(loggedCommand('tool --api-key "a b c" go'), 'tool --api-key *** go');
+	assert.equal(loggedCommand("API_KEY=sk-123 npm test"), "API_KEY=*** npm test");
+	assert.equal(loggedCommand('GITHUB_TOKEN="a b" make'), "GITHUB_TOKEN=*** make");
+	// not credentials: kept as written
+	assert.equal(loggedCommand('git commit --author="Jane <j@x>" -m msg'), 'git commit --author="Jane <j@x>" -m msg');
+	assert.equal(loggedCommand("npm test --coverage PATH=/usr/bin npm run build"), "npm test --coverage PATH=/usr/bin npm run build");
+	// a flag with no value is not given the next flag as one
+	assert.equal(loggedCommand("tool --token --verbose"), "tool --token --verbose");
+});
+
+test("redaction happens before the length limit, so a secret at the end of a long command is hidden", () => {
+	const target = loggedCommand(`${"x".repeat(400)} --token=abc999`);
+	assert.doesNotMatch(target, /abc999/);
+	assert.match(target, /--token=\*\*\*$/);
+});
+
+test("the pattern and plan commands written to the log are redacted too", () => {
+	const { pi, entries } = fakePi();
+	logPattern(pi, "call-1", "curl -H Authorization:xyz *", "project");
+	logPlanApproval(pi, "call-2", ["execute-auto"], "execute-auto", "execute-auto", ["gh --token=ghp_1 x"]);
+	assert.equal(entries[0].data.pattern, "curl -H Authorization:*** *");
+	assert.deepEqual(entries[1].data.commands, ["gh --token=*** x"]);
+});
+
 test("logSession records the model and the prompt version once per session", () => {
 	const { pi, entries } = fakePi();
 	logSession(pi, { model: "anthropic/claude", promptVersion: "abc123" });

@@ -195,7 +195,7 @@ test("title styles: commands warning-yellow, labels muted, headers bold, explana
 	component.handleInput(KEYS.escape);
 });
 
-test("the full command is painted in the configured theme slot (previewTextColor)", async () => {
+test("the full command is painted in the configured theme slot (commandColors)", async () => {
 	const text: Preview = { kind: "text", text: "rtk grep foo" };
 	// render, close, then assert: an open dialog holds the dialog lock for the tests after it
 	const before = await open(text, { encode: true });
@@ -219,7 +219,7 @@ test("the full command is painted in the configured theme slot (previewTextColor
 });
 
 /** Renders one text preview under `color` and returns the dialog's rows, closed again. */
-async function paintedWith(color: "dim" | "muted" | "text" | "builtin-syntax" | "shell-highlight", preview: Preview): Promise<string> {
+async function paintedWith(color: "dim" | "muted" | "text" | "builtin-syntax" | "shell-highlight" | undefined, preview: Preview): Promise<string> {
 	setPreviewTextColor(color);
 	try {
 		const opened = await open(preview, { encode: true });
@@ -232,7 +232,7 @@ async function paintedWith(color: "dim" | "muted" | "text" | "builtin-syntax" | 
 	}
 }
 
-test("previewTextColor \"builtin-syntax\" colors the command with pi's highlighter", async () => {
+test("commandColors \"builtin-syntax\" colors the command with pi's highlighter", async () => {
 	const command = `rtk grep -n "ask_user_question" extensions | head -5 # why`;
 	const raw = await paintedWith("builtin-syntax", { kind: "text", text: command, lang: "bash" });
 	assert.ok(/\x1b\[[0-9;]*m/.test(raw), "the body carries color codes");
@@ -241,11 +241,12 @@ test("previewTextColor \"builtin-syntax\" colors the command with pi's highlight
 	assert.ok(!raw.includes(`⟦dim⟧${command}`) && !raw.includes(`⟦muted⟧${command}`), "not painted as one plain slot");
 });
 
-test("previewTextColor \"shell-highlight\" uses the registered highlighter and falls back without it", async () => {
+test("commandColors \"shell-highlight\" without pi-shell-highlight falls back to dim, not builtin-syntax", async () => {
 	const preview: Preview = { kind: "text", text: "git status", lang: "bash" };
-	// nothing registered: pi's highlighter, i.e. the builtin-syntax look
+	// nothing registered: the plain dim slot
 	const fallback = await paintedWith("shell-highlight", preview);
-	assert.equal(fallback, await paintedWith("builtin-syntax", preview), "no highlighter means the builtin one");
+	assert.ok(fallback.includes("⟦dim⟧git status"), "dim without the highlighter");
+	assert.notEqual(fallback, await paintedWith("builtin-syntax", preview), "not the builtin highlighter");
 
 	// a registered highlighter is asked, with the dialog's own color callbacks
 	const registry = globalThis as unknown as Record<symbol, unknown>;
@@ -280,17 +281,31 @@ test("previewTextColor \"shell-highlight\" uses the registered highlighter and f
 		}
 	}
 
-	// a highlighter that throws costs the colors, not the body
+	// a highlighter that throws costs the colors, not the body: pi's own highlighter, as before
 	registry[HIGHLIGHTER_KEY] = {
 		highlightCommand: () => {
 			throw new Error("boom");
 		},
 	};
 	try {
-		assert.equal(await paintedWith("shell-highlight", preview), fallback, "a throw falls back");
+		assert.equal(await paintedWith("shell-highlight", preview), await paintedWith("builtin-syntax", preview), "a throw falls back to pi's highlighter");
 	} finally {
 		delete registry[HIGHLIGHTER_KEY];
 	}
+});
+
+test("an unset commandColors is shell-highlight while the highlighter is loaded, dim without it (resolved per dialog)", async () => {
+	const preview: Preview = { kind: "text", text: "git status", lang: "bash" };
+	const registry = globalThis as unknown as Record<symbol, unknown>;
+	assert.ok((await paintedWith(undefined, preview)).includes("⟦dim⟧git status"), "dim when the package is not loaded");
+	registry[HIGHLIGHTER_KEY] = { highlightCommand: (text: string) => [`⟦remote⟧${text}⟦/⟧`] };
+	try {
+		assert.ok((await paintedWith(undefined, preview)).includes("⟦remote⟧git status⟦/⟧"), "shell-highlight once the package is loaded");
+		assert.ok((await paintedWith("dim", preview)).includes("⟦dim⟧git status"), "an explicit dim is respected");
+	} finally {
+		delete registry[HIGHLIGHTER_KEY];
+	}
+	assert.ok((await paintedWith(undefined, preview)).includes("⟦dim⟧git status"), "back to dim when it is gone");
 });
 
 test("the command in the title is painted by the shell highlighter when the config asks for it", async () => {

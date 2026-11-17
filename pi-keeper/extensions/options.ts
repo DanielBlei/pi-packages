@@ -19,7 +19,7 @@ export function readGrantLabel(dirs: readonly string[]): string {
 	const more = dirs.length > 2 ? ` (+${dirs.length - 2} more)` : "";
 	return `Yes, and allow reading from ${shown.join(", ")}${more} this session`;
 }
-/** "Yes, and always allow reading from <dir>/ in this project": the `/keeper` project-read-dirs setting. */
+/** "Yes, and always allow reading from <dir>/ in this project": the `/keeper` project-read-approvals setting. */
 export function projectReadGrantLabel(dirs: readonly string[]): string {
 	const shown = dirs.slice(0, 2).map((d) => sanitizeForTerminal(d.endsWith("/") ? d : `${d}/`));
 	const more = dirs.length > 2 ? ` (+${dirs.length - 2} more)` : "";
@@ -37,7 +37,7 @@ export function projectFetchGrantLabel(hosts: readonly string[]): string {
 export const REMEMBER_EXACT = "Yes, and don't ask again for this exact command this session";
 /** The same grant for a subagent's ask: the answer is stored in the parent session, so every child sees it. */
 export const REMEMBER_EXACT_SHARED = "Yes, and don't ask again for this exact command this session, for me and my subagents";
-/** Offered for the same commands when the `persistent-project-rules` setting is on: the exact rule persists in .pi/settings.local.json. */
+/** Offered for the same commands when the `project-exact-commands` setting is on: the exact rule persists in .pi/settings.local.json. */
 export const PROJECT_EXACT = "Yes, and always allow this exact command in this project";
 export const OTHER_PATTERN = "Allow a different command pattern…";
 export const MORE = "More…";
@@ -53,8 +53,8 @@ export interface DialogOptionsInput {
 	projectLabel?: string;
 	/** Offer REMEMBER_EXACT: the command needs approval, no prefix can cover it, and this is the user's own default-mode session. */
 	exactCommand?: boolean;
-	/** Offer PROJECT_EXACT after REMEMBER_EXACT: the `/keeper` setting is on and the exact rule is representable. */
-	persistentProjectRules?: boolean;
+	/** Offer PROJECT_EXACT after REMEMBER_EXACT: the `project-exact-commands` setting is on and the exact rule is representable. */
+	projectExactCommands?: boolean;
 	/** A pattern ladder exists for "Allow a different command pattern…". */
 	hasLadder: boolean;
 	/** "Yes, and allow reading from <dir>/ this session" label for an outside read; undefined when no directory can be granted. */
@@ -89,7 +89,7 @@ export function dialogOptions(input: DialogOptionsInput): DialogOptions {
 	if (input.sessionLabel !== undefined) primary.push(input.sessionLabel);
 	if (input.projectLabel !== undefined) primary.push(input.projectLabel);
 	if (input.exactCommand === true && input.mode === "default" && input.sessionLabel === undefined) primary.push(input.child === true ? REMEMBER_EXACT_SHARED : REMEMBER_EXACT);
-	if (input.persistentProjectRules === true && input.mode === "default" && input.sessionLabel === undefined) primary.push(PROJECT_EXACT);
+	if (input.projectExactCommands === true && input.mode === "default" && input.sessionLabel === undefined) primary.push(PROJECT_EXACT);
 	if (input.readGrantLabel !== undefined) primary.push(input.readGrantLabel);
 	if (input.projectReadGrantLabel !== undefined) primary.push(input.projectReadGrantLabel);
 	if (input.fetchGrantLabel !== undefined) primary.push(input.fetchGrantLabel);

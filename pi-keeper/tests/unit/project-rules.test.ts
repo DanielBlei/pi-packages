@@ -457,3 +457,28 @@ test("control characters in a rule are rejected, so they can't fake lines in the
 	assert.equal(rules.fetchHosts.length, 0);
 	assert.equal(rules.warnings.filter((w) => w.includes("control characters")).length, 3, rules.warnings.join("\n"));
 });
+
+test("loadProjectRules marks invalid JSON as broken, and whitespace-only as valid and empty", () => {
+	const t = temp();
+	try {
+		mkdirSync(join(t.project, ".pi"));
+		writeFileSync(join(t.project, FILE), "{broken");
+		assert.match(loadProjectRules(t.project, t.agent).broken ?? "", /not valid JSON/);
+		writeFileSync(join(t.project, FILE), "   \n");
+		assert.equal(loadProjectRules(t.project, t.agent).broken, undefined);
+	} finally {
+		t.done();
+	}
+});
+
+test("loadProjectRules marks an unreadable file as broken, a missing file as not broken", () => {
+	const t = temp();
+	try {
+		assert.equal(loadProjectRules(t.project, t.agent).broken, undefined);
+		// a directory where the file should be: the read fails with EISDIR, not ENOENT
+		mkdirSync(join(t.project, FILE), { recursive: true });
+		assert.match(loadProjectRules(t.project, t.agent).broken ?? "", /cannot be read/);
+	} finally {
+		t.done();
+	}
+});

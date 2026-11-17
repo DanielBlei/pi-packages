@@ -35,7 +35,11 @@ function promptWithSkills(locations: readonly string[]): string {
 /** skills/{alpha,beta}/SKILL.md, alpha/scripts/run.py, and an unrelated `other/`. */
 function withTree<T>(run: (base: string) => T): T {
 	const base = realpathSync(mkdtempSync(join(tmpdir(), "pdf-skills-")));
+	// The temp dir is `base/tmp`, inside the fixture: the fixture's files are outside it (a temp-dir file is never an outside read). Restored afterwards.
+	const savedTmp = process.env.TMPDIR;
+	process.env.TMPDIR = join(base, "tmp");
 	try {
+		mkdirSync(join(base, "tmp"));
 		mkdirSync(join(base, "skills", "alpha", "scripts"), { recursive: true });
 		mkdirSync(join(base, "skills", "beta"), { recursive: true });
 		mkdirSync(join(base, "other"));
@@ -45,6 +49,8 @@ function withTree<T>(run: (base: string) => T): T {
 		writeFileSync(join(base, "other", "notes.md"), "n");
 		return run(base);
 	} finally {
+		if (savedTmp === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = savedTmp;
 		rmSync(base, { recursive: true, force: true });
 	}
 }

@@ -27,13 +27,13 @@ credentials.
 | Declining ends the turn | The model must not push ahead or re-ask | Continue with feedback | 10, 11 |
 | The system prompt is constant; the mode travels as a hidden message | A changed prefix flushes the cache and, observed behind a gateway, breaks Claude sessions (signed thinking blocks); the message is the harness discipline Anthropic documents and Claude Code and OpenCode use | Mode text in the prompt; prompt per LLM turn | 10 |
 | Model-facing text is short, positive and says what to do next | Small local models lose long, repeated or contradictory rules | Long policy prose in every prompt | 1, 10 |
-| Per-session scratch dir | Plan mode needs somewhere to put notes and repros | Allow `/tmp` | 8 |
+| Per-session scratch dir | Plan mode needs somewhere to put notes and repros. Reads (not writes) under the system temp dir are allowed too, judged by realpath, with secrets still asking | Allow `/tmp` | 8 |
 | Deleting inside the scratch dir is free, the dir itself is not | The files are the session's own; asking for each `rm -rf <scratch>/x` is noise | Treat all `rm -r` outside the cwd as dangerous | 6, 8 |
 | Extra read-only tools come from a global file, not the project | A cloned repo must not grant itself tools; names are exact | Project-level list, wildcard names | 2 |
 | "Exact command" remember for what no prefix can cover, default mode only | Nearly every dialog is answered Yes; repeated interpreter/compound commands had no remember option; plan stays read-only | Remember interpreters by prefix, share with plan | 7 |
 | Exact rules may name interpreters, opt-in project scope via `/keeper` | An exact rule matches one command token-for-token, so `Bash(python3 x.py)` can't silently widen; the session-only exact option left the user re-approving the same interpreters every session | Allow interpreter *prefixes*; persist without a setting (surprise blast radius) | 7 |
 | A child may write in the subagent output tree (by real path, never a secret name) | pi-subagents scouts could not write `context.md` and returned everything inline. The artifact id is not the child's run id, so "its own dir" can't be enforced | Allow the whole agent dir to children; match the child's id | 4 |
-| Children with no way to ask run auto with `background-auto`, not useless-default | A headless default child denies every write and command — an orchestrated background worker cannot implement at all; auto's ask list (dangerous, secrets, protected, outside) stays fail-closed, so freedom is bounded. Only matters when background asks are off or the parent has no UI | Project allow-rules (can't cover edits) | 4 |
+| Children with no way to ask run auto with `background-auto-fallback`, not useless-default | A headless default child denies every write and command — an orchestrated background worker cannot implement at all; auto's ask list (dangerous, secrets, protected, outside) stays fail-closed, so freedom is bounded. Only matters when background asks are off or the parent has no UI | Project allow-rules (can't cover edits) | 4 |
 | Background children ask the parent's user through a file mailbox; the parent re-judges | A child has no UI and pi-subagents offers no permission channel; the request comes from a possibly injected model, so it is never believed beyond the call | A socket; pi's RPC UI channel; pi-subagents' supervisor channel; trusting the child's mode or grants | 4, Background asks |
 | Children get skills through a settings override, not through agent files | Every builtin hardcodes `inheritSkills: false`, but `subagents.agentOverrides.<name>` carries the field and wins over any definition, so three lines in `~/.pi/agent/settings.json` do what shadowing would do — and leave upstream prompts, tools and aliases exactly as shipped, so `pi update --extensions` keeps improving them. Verified by asking a `scout` child to list its catalog | Shipping `agents/*.md` in this package (versioned, but we would own three prompts and drift from upstream); new private alias names (collision, and the model keeps picking the advertised builtin); runtime agent registration (no skills field) | 4, Subagents |
 | Thinking is always on, medium per role | A single `agentOverrides.worker.thinking: false` made the writer the one agent that never reasoned, decided in settings rather than with the role. Upstream's own levels are the floor now (scout `low`, worker and reviewer `high`), and a settings override or a per-run `model="…:high"` raises it | Per-role levels baked in code; `subagents.defaultThinking` only (leaves `inheritSkills` unfixable) | 4, Subagents |
@@ -159,7 +159,7 @@ flowchart TD
     k_ui -- no --> k_noui(["Deny: no interactive user<br/>the model is told to continue without it"])
     k_ui -- yes --> k_dialog["Permission dialog<br/>options depend on the mode and on why it asked"]
     k_dialog --> k_yes["Yes: run once"]
-    k_dialog --> k_rem["Yes and remember<br/>command prefix for the session or the project<br/>exact command: default mode only, no prefix possible, no removal<br/>&nbsp;&nbsp;(project scope too, with the persistent-project-rules setting)<br/>all edits this session, a directory for reads"]
+    k_dialog --> k_rem["Yes and remember<br/>command prefix for the session or the project<br/>exact command: default mode only, no prefix possible, no removal<br/>&nbsp;&nbsp;(project scope too, with the project-exact-commands setting)<br/>all edits this session, a directory for reads"]
     k_dialog --> k_auto2["Yes and switch to auto<br/>default mode only, never for a child"]
     k_dialog --> k_no["No or Esc: stop and wait<br/>later asks in this run are auto-rejected"]
     k_dialog --> k_fb["No with feedback<br/>the model continues with the note"]
@@ -455,7 +455,10 @@ rules that run silently. Hence the gate (`extensions/project-rules.ts`,
   rulebook files (below): one path-to-hash map for every file that can change
   what the model is told or allowed to do.
 - `deny` and `ask` rules load regardless: they only tighten, so a malicious
-  file can't gain anything from them.
+  file can't gain anything from them. A file that exists but cannot be read or
+  is not valid JSON fails closed: the `projectAsk` matcher makes every shell
+  command ask, in every mode, until the file is fixed, so a broken file never
+  silently drops your rules.
 - `allow` rules load only when the hash matches; otherwise a review dialog
   lists them (*Load them* / *Ignore for this session*), checked at session
   start and before every prompt. Without a UI they are ignored.
@@ -545,7 +548,7 @@ Code: `extensions/subagents-bridge.ts` (`registerChildMode`, `childModeFor`,
 
 - Children follow the parent mode but never exceed it: plan → plan,
   default → default; auto → default, or auto when the `/keeper`
-  setting (`autoSubagents` in `<agent dir>/pi-keeper.json`, default
+  setting (`subagentsFollowAuto` in `<agent dir>/pi-keeper.json`, default
   off) enables it — and then only where the child's asks can reach the
   user: `child-auto.ts` checks whether the child's asks can reach a user (the
   parent's UI relay, or the parent's mailbox for a background child, see
@@ -556,7 +559,7 @@ Code: `extensions/subagents-bridge.ts` (`registerChildMode`, `childModeFor`,
   watching; a child whose asks would be denied, not asked (background asks
   off, a parent without a UI, which never listens), must not run with that little oversight. A
   child can't switch modes.
-- The `background-auto` setting (default off) deliberately lifts that last
+- The `background-auto-fallback` setting (default off) deliberately lifts that last
   rule for children with no way to ask: with it on, such a child runs in
   auto mode instead of default, whichever entry loaded it
   (`child-default.ts` and `child-auto.ts` share `relaylessChildMode`). With
@@ -627,7 +630,7 @@ parent), `remote-relay.ts` (the child), `ask-heartbeat.ts`, `secure-file.ts`,
 `tests/integration/background-asks.test.ts`.
 
 A background child (`async: true`) is a detached pi-subagents runner with no
-UI. Denying everything it cannot decide made it useless (see `background-auto`
+UI. Denying everything it cannot decide made it useless (see `background-auto-fallback`
 above) and handing it auto mode made it unsupervised; neither answers the
 real question, which is *what does the user say about this call*. So the child
 files the raw tool call and waits, and the parent's user answers in the
@@ -648,7 +651,7 @@ directory, a display label and a pid:
   snapshot (`session-grants.ts`) on its next call.
 - The mode is the parent's choice, not the child's claim: a call is judged in
   the **stricter** of the mode the parent assigns that child
-  (`backgroundChildMode`: the registered mode, with `autoSubagents` and the
+  (`backgroundChildMode`: the registered mode, with `subagentsFollowAuto` and the
   relay-less rules applied) and the mode the request says (plan > default >
   auto). A child that fell back to default is never judged as auto, one that
   claims auto under a default parent is clamped, and the mismatch is logged
@@ -743,8 +746,9 @@ the server, hence the heartbeat, hence the fast deny.
 typing or interleave with another dialog. One dialog is open at a time
 (`dialog-lock.ts`: pi has a single editor slot and a second dialog would
 replace the first, leaving its promise unsettled). `backgroundAskPopup`
-(`idle` by default) opens a dialog, with the bell, only when the session is
-idle and the editor empty; otherwise a footer badge says `N background
+(`always` by default) opens a dialog, with the bell, as soon as no other dialog
+is open. `idle` opens it only when the session is idle and the editor empty;
+otherwise a footer badge says `N background
 approvals waiting · /approvals`, and the queue opens at the next idle point
 (`agent_end`). `always` and `badge` are the two ends; `/approvals` opens
 waiting asks on demand. Esc denies that one call; the child carries on
@@ -765,7 +769,7 @@ parent; `idle` suits a parent that mostly sits between turns.
 **Known limits.**
 
 - Latency: a reply is seen after up to about 0.5 s (both ends poll), plus the
-  wait for an idle point under the default popup policy.
+  wait for an idle point under the `idle` popup policy.
 - A parent whose event loop is blocked synchronously for more than 15 s stops
   refreshing its heartbeat, so its children see it as gone and deny at once,
   even though the user could still answer afterwards.
@@ -962,7 +966,7 @@ typed pattern. Why:
 
 The "exact command" option (no prefix possible — an interpreter such as
 `python3 x.py`) is session-only by default. The `/keeper` setting
-`persistent-project-rules` adds *Yes, and always allow this exact command in this
+`project-exact-commands` adds *Yes, and always allow this exact command in this
 project*: the same choice, saved as an exact rule (`Bash(python3 x.py)`) to
 the project file with the usual trust recording, so it loads silently on
 the next start. Code: `exactRuleTokens` and `isRememberableExact` in
@@ -1316,7 +1320,7 @@ session logs showed children burning dozens of turns probing edit → bash →
 write → path variants after a generic "no interactive user" denial; coupling
 the vocabulary is what makes the first denial final. Parents get the
 one-sentence `parentLaneHint` (agent roles + background-child behavior,
-reflecting `backgroundAuto`, plus the workflow-script form) in their mode
+reflecting `backgroundAutoFallback`, plus the workflow-script form) in their mode
 message, only while the `subagent` tool is active, so an orchestrator stops
 re-dispatching children into a wall it could have foreseen.
 
@@ -1340,10 +1344,10 @@ states it, together with the retry guidance:
 | --- | --- | --- | --- | --- |
 | L1 | plan | yes | foreground child of a plan parent with a UI | asks the parent's user |
 | L2 | plan | no | child of a plan parent that cannot ask (background asks off, UI-less parent) | denied, do not retry |
-| L3 | default | yes | foreground child of a default parent, or of an auto parent without `autoSubagents` | asks the parent's user |
-| L4 | default | no | child that cannot ask, `backgroundAuto` off | denied, do not retry |
-| L5 | auto | yes | foreground child of an auto parent with `autoSubagents` | asks the parent's user |
-| L6 | auto | no | child that cannot ask, `backgroundAuto` on | denied fail-closed, do not retry |
+| L3 | default | yes | foreground child of a default parent, or of an auto parent without `subagentsFollowAuto` | asks the parent's user |
+| L4 | default | no | child that cannot ask, `backgroundAutoFallback` off | denied, do not retry |
+| L5 | auto | yes | foreground child of an auto parent with `subagentsFollowAuto` | asks the parent's user |
+| L6 | auto | no | child that cannot ask, `backgroundAutoFallback` on | denied fail-closed, do not retry |
 | L7 | plan / default / auto | mailbox | background child whose parent is listening (background asks on) | asks the parent's user through the mailbox; a declined or unanswered ask is "continue without it" |
 
 Two tests lock the split. `tests/unit/child-prompts.test.ts` rejects
@@ -1411,10 +1415,10 @@ stays the parent's own; a child's exact grant is stored instead as an exact
 command's tokens can be written as one (`exactRuleTokens`). Secrets, dangerous
 commands and removals keep offering no lasting option: they must keep asking.
 
-**Project toggles** (`/keeper`). `projectCommands` (default on) offers
+**Project toggles** (`/keeper`). `projectCommandApprovals` (default on) offers
 "always allow `<prefix>` in this project", and "always allow fetching from
 `<host>` in this project" (an allow entry `Fetch(<host>)`, plain hostnames
-only, same trust gate). `projectReadDirs` (default off)
+only, same trust gate). `projectReadApprovals` (default off)
 offers "always allow reading from `<dir>/` in this project", saved as an allow
 entry `Read(<dir>/**)` under the same trust gate as command rules. `/`, the
 home directory, its ancestors and relative paths are refused; secrets inside

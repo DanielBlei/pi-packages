@@ -1377,3 +1377,43 @@ describe("flow: the plan file never asks, in any mode", () => {
 		assert.equal(h.dialogs.length, before + 1);
 	});
 });
+
+describe("flow: a broken project rules file", () => {
+	const sb = sandboxed();
+	it("a broken rules file asks even for a command remembered for the session", async () => {
+		const h = await startPi({ sandbox: sb });
+		await h.session();
+		h.answer(PERMISSION, /don't ask again for `git commit` this session/);
+		assert.equal((await h.tool("bash", { command: "git commit -m x" })).blocked, false);
+		assert.equal(h.dialogs.length, 1);
+
+		// the file is edited into invalid JSON: every shell command asks again
+		mkdirSync(join(sb.cwd, ".pi"), { recursive: true });
+		writeFileSync(rulesFile(sb), "{ nope");
+		h.answer(PERMISSION, "No");
+		const result = await h.tool("bash", { command: "git commit -m x" });
+		assert.equal(result.blocked, true);
+		assert.equal(h.dialogs.length, 2);
+	});
+});
+
+describe("flow: a failure while judging a call", () => {
+	const sb = sandboxed();
+	it("a throw inside decide blocks the call with a fixed message and never runs it", async () => {
+		const h = await startPi({ sandbox: sb });
+		await h.session();
+		const input: Record<string, unknown> = {};
+		// non-enumerable: the mock copies the input into its own records, which must not throw
+		Object.defineProperty(input, "command", {
+			enumerable: false,
+			get() {
+				throw new Error("internal-boom");
+			},
+		});
+		const result = await h.tool("bash", input);
+		assert.equal(result.blocked, true);
+		assert.match(result.reason ?? "", /pi-keeper could not judge this call/);
+		assert.doesNotMatch(result.reason ?? "", /internal-boom/);
+		assert.equal(h.dialogs.length, 0);
+	});
+});

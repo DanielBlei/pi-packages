@@ -380,9 +380,9 @@ describe("a request is judged on the parent's terms", () => {
 		assert.deepEqual([noted?.claimed, noted?.mode], ["auto", "default"]);
 	});
 
-	it("an auto parent with autoSubagents still judges a request from a child that says default as default", async () => {
+	it("an auto parent with subagentsFollowAuto still judges a request from a child that says default as default", async () => {
 		const sandbox = sandboxed();
-		const parent = await parentOf(sandbox, { autoSubagents: true });
+		const parent = await parentOf(sandbox, { subagentsFollowAuto: true });
 		await parent.command("mode", "auto");
 		// the child fell back to default (e.g. it loaded while the heartbeat was stale): its edit asks, it is not auto-allowed
 		parent.answer(BG, "esc");
@@ -395,7 +395,7 @@ describe("a request is judged on the parent's terms", () => {
 
 	it("a request that says plan is judged as plan even under an auto parent", async () => {
 		const sandbox = sandboxed();
-		const parent = await parentOf(sandbox, { autoSubagents: true });
+		const parent = await parentOf(sandbox, { subagentsFollowAuto: true });
 		await parent.command("mode", "auto");
 		const request = file(sandbox, parent, { childMode: "plan", call: edit("src/a.ts") });
 		parent.pollAsks();
@@ -542,7 +542,7 @@ describe("/keeper changes apply to asks already waiting", () => {
 describe("when the dialog opens", () => {
 	it("idle: an idle session with an empty editor opens it at once and rings", async () => {
 		const sandbox = sandboxed();
-		const parent = await parentOf(sandbox);
+		const parent = await parentOf(sandbox, { backgroundAskPopup: "idle" });
 		parent.answer(BG, ALLOW_ONCE);
 		parent.clearBells();
 		const request = file(sandbox, parent);
@@ -554,7 +554,7 @@ describe("when the dialog opens", () => {
 
 	it("idle: a busy session shows a badge; /approvals opens it, and the badge clears", async () => {
 		const sandbox = sandboxed();
-		const parent = await parentOf(sandbox);
+		const parent = await parentOf(sandbox, { backgroundAskPopup: "idle" });
 		parent.idle = false;
 		const request = file(sandbox, parent);
 		parent.pollAsks();
@@ -570,7 +570,7 @@ describe("when the dialog opens", () => {
 
 	it("idle: it opens when the run ends", async () => {
 		const sandbox = sandboxed();
-		const parent = await parentOf(sandbox);
+		const parent = await parentOf(sandbox, { backgroundAskPopup: "idle" });
 		parent.idle = false;
 		const request = file(sandbox, parent);
 		parent.pollAsks();
@@ -583,7 +583,7 @@ describe("when the dialog opens", () => {
 
 	it("idle: text in the editor holds it back, even when the run ends", async () => {
 		const sandbox = sandboxed();
-		const parent = await parentOf(sandbox);
+		const parent = await parentOf(sandbox, { backgroundAskPopup: "idle" });
 		parent.editorText = "half a thought";
 		const request = file(sandbox, parent);
 		parent.pollAsks();
@@ -633,7 +633,7 @@ describe("when the dialog opens", () => {
 		assert.equal(parent.dialogs.length, 0);
 	});
 
-	it("a bad popup value falls back to idle with a warning", async () => {
+	it("a bad popup value falls back to always with a warning", async () => {
 		const sandbox = sandboxed();
 		const parent = await parentOf(sandbox, { backgroundAskPopup: "sometimes" });
 		assert.ok(parent.notifications.some((n) => /backgroundAskPopup must be/.test(n.message)));
@@ -701,7 +701,7 @@ describe("dialogs never overlap", () => {
 describe("a parent without a UI", () => {
 	it("starts no server and writes no heartbeat; its background child of an auto parent falls back to default", async () => {
 		const sandbox = sandboxed();
-		const parent = await parentOf(sandbox, { autoSubagents: true }, "none");
+		const parent = await parentOf(sandbox, { subagentsFollowAuto: true }, "none");
 		await parent.command("mode", "auto");
 		assert.equal(existsSync(join(mailbox(sandbox, parent), "alive")), false);
 		const child = await backgroundChild(sandbox, parent, { entry: "child-auto" });
@@ -711,9 +711,9 @@ describe("a parent without a UI", () => {
 		assert.equal(filed(sandbox, parent).length, 0);
 	});
 
-	it("with background-auto the same child runs auto", async () => {
+	it("with background-auto-fallback the same child runs auto", async () => {
 		const sandbox = sandboxed();
-		const parent = await parentOf(sandbox, { autoSubagents: true, backgroundAuto: true }, "none");
+		const parent = await parentOf(sandbox, { subagentsFollowAuto: true, backgroundAutoFallback: true }, "none");
 		await parent.command("mode", "auto");
 		assert.equal(existsSync(join(mailbox(sandbox, parent), "alive")), false);
 		const child = await backgroundChild(sandbox, parent, { entry: "child-auto" });
@@ -1053,7 +1053,7 @@ describe("when the child does not ask", () => {
 	it("a parent that runs with the kill switch has no server: its child denies fast and falls back to default", async () => {
 		const sandbox = sandboxed();
 		process.env[BACKGROUND_ASKS_ENV] = "0";
-		const parent = await parentOf(sandbox, { autoSubagents: true });
+		const parent = await parentOf(sandbox, { subagentsFollowAuto: true });
 		await parent.command("mode", "auto");
 		delete process.env[BACKGROUND_ASKS_ENV]; // the child's env does not carry the switch: only the missing heartbeat tells it
 		assert.equal(existsSync(join(mailbox(sandbox, parent), "alive")), false);
@@ -1093,9 +1093,9 @@ describe("when the child does not ask", () => {
 });
 
 describe("the mode follows the parent", () => {
-	it("an auto parent with autoSubagents and background asks on: the background child runs auto, and the parent clamps to auto", async () => {
+	it("an auto parent with subagentsFollowAuto and background asks on: the background child runs auto, and the parent clamps to auto", async () => {
 		const sandbox = sandboxed();
-		const parent = await parentOf(sandbox, { autoSubagents: true });
+		const parent = await parentOf(sandbox, { subagentsFollowAuto: true });
 		await parent.command("mode", "auto");
 		const child = await backgroundChild(sandbox, parent, { entry: "child-auto" });
 		// an edit inside the project runs unasked in auto, in the child and in the parent's judgement of a request
@@ -1110,7 +1110,7 @@ describe("the mode follows the parent", () => {
 
 	it("a background child creates its own artifact dir with no ask at all, so nothing waits on the parent", async () => {
 		const sandbox = sandboxed();
-		const parent = await parentOf(sandbox, { autoSubagents: true });
+		const parent = await parentOf(sandbox, { subagentsFollowAuto: true });
 		await parent.command("mode", "auto");
 		const child = await backgroundChild(sandbox, parent, { entry: "child-auto" });
 		// the shape pi-subagents' report dir needs, and the one that used to file a
@@ -1127,23 +1127,23 @@ describe("the mode follows the parent", () => {
 		assert.match(other.reason ?? "", /is denied/);
 	});
 
-	it("with background asks off the same child is default, unless background-auto is on", async () => {
+	it("with background asks off the same child is default, unless background-auto-fallback is on", async () => {
 		const off = sandboxed();
-		const offParent = await parentOf(off, { autoSubagents: true, backgroundAsks: false });
+		const offParent = await parentOf(off, { subagentsFollowAuto: true, backgroundAsks: false });
 		await offParent.command("mode", "auto");
 		const defaultChild = await backgroundChild(off, offParent, { entry: "child-auto" });
 		assert.equal((await defaultChild.tool("edit", edit("src/a.ts").input)).blocked, true);
 
 		const on = sandboxed();
-		const onParent = await parentOf(on, { autoSubagents: true, backgroundAsks: false, backgroundAuto: true });
+		const onParent = await parentOf(on, { subagentsFollowAuto: true, backgroundAsks: false, backgroundAutoFallback: true });
 		await onParent.command("mode", "auto");
 		const autoChild = await backgroundChild(on, onParent, { entry: "child-auto" });
 		assert.equal((await autoChild.tool("edit", edit("src/a.ts").input)).blocked, false);
 	});
 
-	it("a default parent's background child stays default even with background-auto on, while asks are on", async () => {
+	it("a default parent's background child stays default even with background-auto-fallback on, while asks are on", async () => {
 		const sandbox = sandboxed();
-		const parent = await parentOf(sandbox, { backgroundAuto: true });
+		const parent = await parentOf(sandbox, { backgroundAutoFallback: true });
 		const child = await backgroundChild(sandbox, parent);
 		parent.answer(CHILD_BG, "esc");
 		const call = child.tool("edit", edit("src/a.ts").input);

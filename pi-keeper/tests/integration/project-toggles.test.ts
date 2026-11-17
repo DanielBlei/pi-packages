@@ -1,7 +1,7 @@
 /**
  * What the dialogs may save to the project (.pi/settings.local.json), per the
- * `/keeper` settings: `projectCommands` (default on) offers "always
- * allow <prefix> in this project"; `projectReadDirs` (default off) offers
+ * `/keeper` settings: `projectCommandApprovals` (default on) offers "always
+ * allow <prefix> in this project"; `projectReadApprovals` (default off) offers
  * "always allow reading from <dir>/ in this project", saved as a
  * `Read(<dir>/**)` allow rule that every later session and every subagent
  * honours (secrets inside still ask). Off, approvals stay once/session.
@@ -60,7 +60,7 @@ async function parentOf(sandbox: Sandbox): Promise<Harness> {
 	return h;
 }
 
-describe("projectCommands", () => {
+describe("projectCommandApprovals", () => {
 	it("on by default: the command dialog offers the project rule", async () => {
 		const h = await parentOf(sandboxed());
 		h.answer(/Permission required/, "Yes");
@@ -69,7 +69,7 @@ describe("projectCommands", () => {
 	});
 
 	it("off: no project option, the session option stays", async () => {
-		const h = await parentOf(sandboxed({ projectCommands: false }));
+		const h = await parentOf(sandboxed({ projectCommandApprovals: false }));
 		h.answer(/Permission required/, "Yes");
 		await h.tool("bash", { command: "npm test" });
 		assert.equal(h.dialogs[0].options.some((o) => NPM_PROJECT.test(o)), false);
@@ -77,7 +77,7 @@ describe("projectCommands", () => {
 	});
 });
 
-describe("projectReadDirs", () => {
+describe("projectReadApprovals", () => {
 	it("off by default: outside reads offer once/session only", async () => {
 		const sandbox = sandboxed();
 		const dir = outsideDir(sandbox);
@@ -88,7 +88,7 @@ describe("projectReadDirs", () => {
 	});
 
 	it("on: the saved directory holds across sessions and for background subagents; secrets still ask", async () => {
-		const sandbox = sandboxed({ projectReadDirs: true });
+		const sandbox = sandboxed({ projectReadApprovals: true });
 		const dir = outsideDir(sandbox);
 		// the option is offered; its label names the directory
 		const probe = await parentOf(sandbox);

@@ -15,27 +15,27 @@ import { childModeFor, relaylessChildMode } from "../../extensions/subagents-bri
 import { ASK_TTL_MS, askTtlMs, backgroundChildMode, badgeText, MAX_QUEUE, mayPopUp, startAskServer, stricterMode, type AskServer, type AskServerOptions, type PopupState, type ServerEvent, type Verdict } from "../../extensions/ask-server.ts";
 
 describe("backgroundChildMode: the mode this parent gives a background child", () => {
-	// every combination: 3 parent modes x autoSubagents x backgroundAuto x asks (a parent whose server runs has asks on, but the formula is shared with the child)
-	// with asks reachable the child follows its parent like a foreground one (backgroundAuto is moot); otherwise backgroundAuto decides
-	const expectedFor = (parent: "default" | "auto" | "plan", autoSubagents: boolean, backgroundAuto: boolean, asks: boolean): string => {
+	// every combination: 3 parent modes x subagentsFollowAuto x backgroundAutoFallback x asks (a parent whose server runs has asks on, but the formula is shared with the child)
+	// with asks reachable the child follows its parent like a foreground one (backgroundAutoFallback is moot); otherwise backgroundAutoFallback decides
+	const expectedFor = (parent: "default" | "auto" | "plan", subagentsFollowAuto: boolean, backgroundAutoFallback: boolean, asks: boolean): string => {
 		if (parent === "plan") return "plan";
-		const registered = parent === "auto" && autoSubagents ? "auto" : "default";
+		const registered = parent === "auto" && subagentsFollowAuto ? "auto" : "default";
 		if (asks) return registered;
-		return backgroundAuto ? "auto" : "default";
+		return backgroundAutoFallback ? "auto" : "default";
 	};
 	let count = 0;
 	for (const parent of ["plan", "default", "auto"] as const) {
-		for (const autoSubagents of [false, true]) {
-			for (const backgroundAuto of [false, true]) {
+		for (const subagentsFollowAuto of [false, true]) {
+			for (const backgroundAutoFallback of [false, true]) {
 				for (const backgroundAsks of [false, true]) {
 					count++;
-					it(`${parent} parent, autoSubagents ${autoSubagents}, backgroundAuto ${backgroundAuto}, asks ${backgroundAsks}`, () => {
-						const expected = expectedFor(parent, autoSubagents, backgroundAuto, backgroundAsks);
-						assert.equal(backgroundChildMode(parent, { autoSubagents, backgroundAuto, backgroundAsks }), expected);
+					it(`${parent} parent, subagentsFollowAuto ${subagentsFollowAuto}, backgroundAutoFallback ${backgroundAutoFallback}, asks ${backgroundAsks}`, () => {
+						const expected = expectedFor(parent, subagentsFollowAuto, backgroundAutoFallback, backgroundAsks);
+						assert.equal(backgroundChildMode(parent, { subagentsFollowAuto, backgroundAutoFallback, backgroundAsks }), expected);
 						// the child side: the same formula over the entry file the bridge registered
 						if (parent !== "plan") {
-							const registered = childModeFor(parent, autoSubagents) as "default" | "auto";
-							assert.equal(relaylessChildMode(registered, { backgroundAsks, backgroundAuto }), expected);
+							const registered = childModeFor(parent, subagentsFollowAuto) as "default" | "auto";
+							assert.equal(relaylessChildMode(registered, { backgroundAsks, backgroundAutoFallback }), expected);
 						}
 					});
 				}

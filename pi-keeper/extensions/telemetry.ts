@@ -7,6 +7,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ModeName } from "./modes.ts";
 import { commandOf, pathOf, type Decision, type ToolCall } from "./rules.ts";
+import { SECRET_ENV_NAME } from "./utils.ts";
 
 export const TELEMETRY_ENTRY = "pi-keeper-permission";
 
@@ -15,6 +16,27 @@ const TARGET_HEAD = 120;
 const LABEL_LIMIT = 160;
 export const TEXT_LIMIT = 200;
 const TEXT_HEAD = 120;
+
+/** A value in a shell word: a double-quoted, single-quoted or bare run. */
+const VALUE = String.raw`"[^"]*"|'[^']*'|[^\s"']+`;
+/** Credential-like flag names: whole `-`/`_`-separated parts (`--token`, `--api-key`, `--password`), not `--author`. */
+const SECRET_FLAG = /^--(?:[\w-]*[-_])?(?:token|tokens|password|passwd|pass|secret|secrets|credentials?|auth|apikey|api[-_]key)(?:[-_][\w-]*)?$/i;
+
+/**
+ * The command text as the session log keeps it: the values of `Authorization:`
+ * headers, `Bearer` tokens, credential-like `--flag value` / `--flag=value`
+ * options and credential-like `NAME=value` assignments become `***`; the rest
+ * of the command is kept. Judged by the same secret names as the rules
+ * (SECRET_ENV_NAME), so a plain `--author` or `GIT_AUTHOR_NAME` is untouched.
+ */
+export function redactCommand(command: string): string {
+	return command
+		.replace(new RegExp(String.raw`(authorization:\s*)(?:(?:bearer|basic|token)\s+)?(?:${VALUE})`, "gi"), "$1***")
+		.replace(new RegExp(String.raw`(\bbearer\s+)(?:${VALUE})`, "gi"), "$1***")
+		.replace(/(--[\w-]+)(=|\s+)(?:"[^"]*"|'[^']*'|[^\s"'-][^\s"']*)/g, (match, flag: string, sep: string) => (SECRET_FLAG.test(flag) ? `${flag}${sep}***` : match))
+		// not after `-` (that is a flag's `--name=value`, judged above)
+		.replace(new RegExp(String.raw`(?<![\w-])([A-Za-z_][A-Za-z0-9_]*)=(?:${VALUE})`, "g"), (match, name: string) => (SECRET_ENV_NAME.test(name) ? `${name}=***` : match));
+}
 
 function shrink(text: string, limit: number): string {
 	return text.length > limit ? `${text.slice(0, limit)}…` : text;
@@ -33,7 +55,7 @@ function shrinkOptional(text: string | undefined, limit: number, head?: number):
 
 /** Command of a bash call, path of a file call, else a JSON snippet. */
 export function targetOf(call: ToolCall): string {
-	if (call.toolName === "bash" || call.toolName === "powershell") return commandOf(call.input);
+	if (call.toolName === "bash" || call.toolName === "powershell") return redactCommand(commandOf(call.input));
 	const path = pathOf(call.input);
 	if (path !== "") return path;
 	return JSON.stringify(call.input ?? {});
@@ -79,7 +101,7 @@ export type ChoiceOutcome =
 	| "switch-auto"
 	| "outside-reads"
 	| "outside-read-dirs"
-	| "project-read-dirs"
+	| "project-read-approvals"
 	| "fetch-hosts"
 	| "project-fetch-hosts"
 	| "remember-session"
@@ -150,7 +172,7 @@ export function logRemoteMode(pi: ExtensionAPI, requestId: string, claimed: stri
 
 /** A pattern picked in "Allow a different command pattern…", and the scope it was saved to. */
 export function logPattern(pi: ExtensionAPI, toolCallId: string, pattern: string, scope: "session" | "project"): void {
-	append(pi, { phase: "pattern", toolCallId, pattern: shrink(pattern, LABEL_LIMIT), scope });
+	append(pi, { phase: "pattern", toolCallId, pattern: shrink(redactCommand(pattern), LABEL_LIMIT), scope });
 }
 
 export type PlanOutcome = "execute-auto" | "execute-manual" | "execute-manual-commands" | "execute-manual-feedback" | "keep-planning" | "rejected" | "aborted";
@@ -171,7 +193,7 @@ export function logPlanApproval(
 		options: options.map((o) => shrink(o, LABEL_LIMIT)),
 		choice: choice === null ? null : shrink(choice, LABEL_LIMIT),
 		outcome,
-		commands: commands.map((c) => shrink(c, LABEL_LIMIT)),
+		commands: commands.map((c) => shrink(redactCommand(c), LABEL_LIMIT)),
 		feedback: shrinkOptional(feedback, TEXT_LIMIT, TEXT_HEAD),
 	});
 }

@@ -162,6 +162,27 @@ test("a body is read for what it looks like when nothing names its language", ()
 	for (const [body, expected] of cases) assert.equal(guessHeredocLanguage(body), expected, JSON.stringify(body));
 });
 
+test("prose that starts with a SQL word is not read as SQL", () => {
+	const prose: string[][] = [["Select the best option here"], ["Update the set of tests"], ["With a note as follows"]];
+	for (const body of prose) assert.equal(guessHeredocLanguage(body), undefined, JSON.stringify(body));
+});
+
+test("real SQL is still read as SQL when nothing names its language", () => {
+	const sql = [
+		"select name from t",
+		"SELECT * FROM t",
+		"select 1",
+		"select count(*) from t",
+		"select distinct a from t",
+		"with x as (select 1) select * from x",
+		"update users set x = 1",
+		"insert into t values (1)",
+		"delete from t where id = 1",
+		"create table t (id int)",
+	];
+	for (const line of sql) assert.equal(guessHeredocLanguage([line]), "sql", line);
+});
+
 test("<<- strips tabs from the terminator, and an unclosed heredoc takes the rest", () => {
 	const shown = lines("ssh host <<-EOF\n\techo hi\n\tEOF");
 	assert.equal(shown.length, 3);

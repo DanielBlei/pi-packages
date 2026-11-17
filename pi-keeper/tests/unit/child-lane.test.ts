@@ -89,7 +89,7 @@ test("auto child: inside cwd runs unasked, the guarded list depends on the relay
 	assert.match(relayless, /contact_supervisor \(reason "need_decision"\)/);
 });
 
-test("parent hint: one sentence per mode, reflecting backgroundAuto", () => {
+test("parent hint: one sentence per mode, reflecting backgroundAutoFallback", () => {
 	assert.match(parentLaneHint("plan", true), /stay read-only like you/);
 	assert.match(parentLaneHint("default", true), /background \(async\) children run in the auto lane and can write inside this directory/);
 	assert.match(parentLaneHint("auto", true), /reviewer = checker/);
@@ -101,9 +101,9 @@ test("parent hint: one sentence per mode, reflecting backgroundAuto", () => {
 		assert.match(parentLaneHint(mode, true), /fenced ```js workflow block is dropped/, mode);
 	}
 	for (const mode of ["plan", "default", "auto"] as const) {
-		for (const backgroundAuto of [true, false]) {
+		for (const backgroundAutoFallback of [true, false]) {
 			// one sentence: exactly one terminating period
-			assert.equal((parentLaneHint(mode, backgroundAuto).match(/\./g) ?? []).length, 1, `${mode}/${backgroundAuto}`);
+			assert.equal((parentLaneHint(mode, backgroundAutoFallback).match(/\./g) ?? []).length, 1, `${mode}/${backgroundAutoFallback}`);
 		}
 	}
 });
@@ -152,9 +152,9 @@ test("background child with parent asks: relayed wording, decline guidance, neve
 	assert.match(childLaneLine({ mode: "default", relay: true, activeTools: WORKER_TOOLS }), /The user may approve or decline each ask\. If an ask is rejected, do not retry it or probe variants/);
 });
 
-test("parent hint with background asks on: children ask the user, nothing about denial or backgroundAuto", () => {
-	for (const backgroundAuto of [true, false]) {
-		const hint = parentLaneHint("default", backgroundAuto, true);
+test("parent hint with background asks on: children ask the user, nothing about denial or backgroundAutoFallback", () => {
+	for (const backgroundAutoFallback of [true, false]) {
+		const hint = parentLaneHint("default", backgroundAutoFallback, true);
 		assert.match(hint, /background \(async\) children ask the user through this session like foreground ones/);
 		assert.doesNotMatch(hint, /denied|auto lane/);
 		assert.equal((hint.match(/\./g) ?? []).length, 1);

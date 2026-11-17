@@ -9,8 +9,9 @@ the ask server or the popup policy. Each step says what you should see.
 1. Install pi-subagents. In a scratch git repo run
    `pi -e <path>/pi-keeper` (add `-e <pi-subagents>` if it is not
    already loaded). Start in `default` mode.
-2. `/keeper`: *Background subagent asks reach you* is **on**. If not,
-   switch it on.
+2. `/keeper`: *Background subagents can ask you* is **on**. If not,
+   switch it on. Set *When background asks pop up* to `idle`: the default
+   `always` opens the dialog at once, and the checks below assume `idle`.
 3. Ask the agent to launch a subagent with the `subagent` tool's `async: true`
    parameter (run it in the background), using an agent that has bash, such
    as `worker`, for a task that needs a gated call: "Launch the `worker`
@@ -43,7 +44,7 @@ the ask server or the popup policy. Each step says what you should see.
 7. **Kill switch.** Start pi with `PI_KEEPER_BACKGROUND_ASKS=0` (or switch
    the setting off in `/keeper`) and launch the same worker. No dialog
    opens; the worker's `touch` is denied at once and it says so in its report.
-8. **Mode follows the parent.** Enable *Allow subagents in auto mode* in
+8. **Mode follows the parent.** Enable *Subagents follow auto mode* in
    `/keeper`, switch the parent to `auto` (Alt+M) and launch a background
    worker that edits a file inside the project. It runs the edit with no
    dialog (auto). Have it also run `git push` or read `.env`: that one opens

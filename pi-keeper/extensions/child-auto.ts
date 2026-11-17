@@ -9,7 +9,7 @@
  * on (the default) it files its asks in the parent's mailbox, so it runs auto
  * too. Without a way to ask, a relay-less child falls back to default mode,
  * exactly as before background asks existed, unless the `/keeper`
- * setting `background-auto` opts it into auto: edits and commands inside the
+ * setting `background-auto-fallback` opts it into auto: edits and commands inside the
  * project run unasked, while dangerous commands, secrets and protected paths
  * still ask (and are denied, fail-closed). The choice is relaylessChildMode.
  */
@@ -26,7 +26,7 @@ export default function childAuto(pi: ExtensionAPI): void {
 	let childMode: "default" | "auto" = "auto";
 	if (findUiRelay() === undefined) {
 		const config = loadConfig(getAgentDir());
-		childMode = relaylessChildMode("auto", { backgroundAsks: canAskParent(config, getAgentDir()), backgroundAuto: config.backgroundAuto });
+		childMode = relaylessChildMode("auto", { backgroundAsks: canAskParent(config, getAgentDir()), backgroundAutoFallback: config.backgroundAutoFallback });
 	}
 	keeperExtension(pi, { childMode });
 }

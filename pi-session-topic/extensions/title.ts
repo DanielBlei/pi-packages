@@ -7,6 +7,22 @@
 /** Default budget for a title, in terminal cells (see displayWidth). */
 export const DEFAULT_MAX_WIDTH = 48
 
+/** Deterministic failures (empty title, 4xx) stop retrying after this many per session. */
+export const MAX_DETERMINISTIC_FAILURES = 2
+/** Transient failures (network, timeout, 429, 5xx) stop after this many per session. */
+export const MAX_TRANSIENT_FAILURES = 5
+
+/** Per-session failure counts; `/topic` does not consult them. */
+export interface FailureCounts {
+	attempts: number
+	transientFailures: number
+}
+
+/** Whether automatic naming may still try for this session. */
+export function canAttempt(counts: FailureCounts): boolean {
+	return counts.attempts < MAX_DETERMINISTIC_FAILURES && counts.transientFailures < MAX_TRANSIENT_FAILURES
+}
+
 /** Long first prompts keep their beginning and end; the middle is dropped. */
 const HEAD_CHARS = 600
 const TAIL_CHARS = 2400
@@ -14,7 +30,9 @@ const TAIL_CHARS = 2400
 const TRUNCATION_MARK = "\n[... clipped ...]\n"
 
 /** Leading labels some models add despite the instruction not to. */
-const LABEL_PATTERN = /^(?:session\s+)?(?:title|name|topic|标题|名称|主题)\s*[:：\-]\s*/i
+// A hyphen counts as a separator only when spaced ("Topic - X"), so a real
+// leading word such as "Topic-based routing" is kept.
+const LABEL_PATTERN = /^(?:session\s+)?(?:title|name|topic|标题|名称|主题)\s*(?:[:：]\s*|\s+-\s+)/i
 
 /** Characters that never survive as real title content. */
 const EDGE_PATTERN = /^[\s"'`*_#>~\-–—•]+|[\s"'`*_#>~\-–—•]+$/g
@@ -88,20 +106,36 @@ export function normalizeTitle(raw: string, maxWidth = DEFAULT_MAX_WIDTH): strin
 function clipToWidth(text: string, maxWidth: number): string {
 	let width = 0
 	let cut = text.length
-	let offset = 0
-	// Iterate by code point so a surrogate pair is never split.
-	for (const char of text) {
-		width += displayWidth(char)
+	// Cut between graphemes so a ZWJ sequence or a combining mark stays with its
+	// base. A grapheme's width is the sum of its code points, which over-counts a
+	// ZWJ sequence and so never lets a title run past the budget.
+	for (const { segment, index } of graphemes(text)) {
+		width += displayWidth(segment)
 		if (width > maxWidth) {
-			cut = offset
+			cut = index
 			break
 		}
-		offset += char.length
 	}
 	const candidate = text.slice(0, cut)
 	const lastSpace = candidate.lastIndexOf(" ")
 	// Only honour a word boundary when it keeps most of the budget.
 	return lastSpace > candidate.length / 2 ? candidate.slice(0, lastSpace) : candidate
+}
+
+/** Grapheme clusters with their offsets; code points when Intl.Segmenter is absent. */
+function graphemes(text: string): Array<{ segment: string; index: number }> {
+	const out: Array<{ segment: string; index: number }> = []
+	if (typeof Intl.Segmenter === "function") {
+		const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" })
+		for (const data of segmenter.segment(text)) out.push({ segment: data.segment, index: data.index })
+		return out
+	}
+	let index = 0
+	for (const char of text) {
+		out.push({ segment: char, index })
+		index += char.length
+	}
+	return out
 }
 
 /** The instruction and the clipped prompt sent to the title model. */

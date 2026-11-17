@@ -559,6 +559,9 @@ export async function startPi(options: StartOptions): Promise<Harness> {
 			harness.statusByKey.set(key, text);
 		},
 		getEditorText: (): string => harness.editorText,
+		setEditorText(text: string): void {
+			harness.editorText = text;
+		},
 		setWorkingMessage(message?: string): void {
 			harness.workingMessages.push(message);
 		},
@@ -659,7 +662,7 @@ export async function startPi(options: StartOptions): Promise<Harness> {
 	// child its own module instance, so a shared cached one would not match it).
 	// child-default.ts / child-auto.ts pick their mode by whether a UI relay
 	// is reachable and (relay-less) whether the child can ask its parent or the
-	// background-auto setting says auto, so the mock makes the same decisions
+	// background-auto-fallback setting says auto, so the mock makes the same decisions
 	// (relaylessChildMode, canAskParent) instead of fixed modes.
 	const childModes = { "child-plan": "plan" } as const;
 	const mod = (await import(`${new URL("index.ts", EXTENSION_DIR).href}?fresh=${++instances}`)) as {
@@ -667,7 +670,7 @@ export async function startPi(options: StartOptions): Promise<Harness> {
 	};
 	const relayless = (registered: "default" | "auto"): "default" | "auto" => {
 		const config = loadConfig(sandbox.agentDir);
-		return relaylessChildMode(registered, { backgroundAsks: canAskParent(config, sandbox.agentDir), backgroundAuto: config.backgroundAuto });
+		return relaylessChildMode(registered, { backgroundAsks: canAskParent(config, sandbox.agentDir), backgroundAutoFallback: config.backgroundAutoFallback });
 	};
 	if (options.runnerWithAmbientCopy) {
 		process.env.PI_SUBAGENT_CHILD = "1";

@@ -55,12 +55,12 @@ export const MAX_QUEUE = 100;
  * its registered entry file gives (subagents-bridge.ts), and for a child with
  * no UI relay what child-default.ts / child-auto.ts pick (relaylessChildMode):
  * with background asks on the registered mode itself (an auto parent with
- * `autoSubagents` gives auto), else default, or auto with `background-auto`.
+ * `subagentsFollowAuto` gives auto), else default, or auto with `background-auto-fallback`.
  * Plan stays plan. `backgroundAsks` is the effective flag (the setting and
  * the env kill switch).
  */
-export function backgroundChildMode(mode: ModeName, settings: { autoSubagents: boolean; backgroundAuto: boolean; backgroundAsks: boolean }): ChildMode {
-	const registered = childModeFor(mode, settings.autoSubagents);
+export function backgroundChildMode(mode: ModeName, settings: { subagentsFollowAuto: boolean; backgroundAutoFallback: boolean; backgroundAsks: boolean }): ChildMode {
+	const registered = childModeFor(mode, settings.subagentsFollowAuto);
 	if (registered === "plan") return "plan";
 	return relaylessChildMode(registered, settings);
 }

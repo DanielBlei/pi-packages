@@ -36,6 +36,12 @@ export interface UiRelaySelectRequest {
 	escLabel?: string;
 	/** The child's abort signal; aborting closes the dialog like Esc. */
 	signal?: AbortSignal;
+	/**
+	 * Re-checks the ask once the parent's dialog lock is reached: true when the call is now allowed
+	 * (a grant another dialog just made), and the dialog is then skipped. In-process only, since a
+	 * function does not cross a process; a background child never sends one.
+	 */
+	recheck?: () => boolean;
 }
 
 /** A text input to show in the parent's UI. */

@@ -10,3 +10,7 @@ First public release.
 - Colors the word in command position (start of line, after `|`, `&&`, `;`, and
   after a precommand such as `sudo`, `env`, `rtk`), options, and a heredoc body
   by its language.
+- `<<<` here-strings are not read as heredocs, so the lines after them are
+  shell.
+- Prose that begins with Select or Update is not coloured as SQL unless it has
+  a SQL shape, such as a `from` clause.

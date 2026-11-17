@@ -48,7 +48,7 @@ interface Lane {
 	name: string;
 	entry: "child-plan" | "child-default" | "child-auto";
 	relay: boolean;
-	backgroundAuto: boolean;
+	backgroundAutoFallback: boolean;
 	header: RegExp;
 	laneLine: RegExp;
 	/** A call this lane gates: asked through the parent's user with a relay, denied without. */
@@ -61,17 +61,17 @@ const INSTALL = { tool: "bash", input: { command: "npm install left-pad" } };
 
 /** Every lane a child can run in (subagents-bridge.ts childModeFor + the child-*.ts entries). */
 const LANES: Lane[] = [
-	{ name: "L1 plan, relay", entry: "child-plan", relay: true, backgroundAuto: false, header: /# Subagent under plan mode/, laneLine: /Your lane: read-only plan child\./, gated: INSTALL },
-	{ name: "L2 plan, no relay", entry: "child-plan", relay: false, backgroundAuto: false, header: /# Subagent under plan mode/, laneLine: /Your lane: read-only plan child\./, gated: INSTALL },
-	{ name: "L3 default, relay", entry: "child-default", relay: true, backgroundAuto: false, header: /# Subagent permissions/, laneLine: /Your lane: default child with a relay\./, gated: EDIT },
-	{ name: "L4 default, no relay", entry: "child-default", relay: false, backgroundAuto: false, header: /# Subagent permissions/, laneLine: /Your lane: default child with no relay\./, gated: EDIT },
-	{ name: "L5 auto, relay", entry: "child-auto", relay: true, backgroundAuto: false, header: /# Subagent under auto mode/, laneLine: /Your lane: auto child with a relay\./, gated: PUSH },
-	{ name: "L6 auto, no relay", entry: "child-default", relay: false, backgroundAuto: true, header: /# Subagent under auto mode/, laneLine: /Your lane: auto child with no relay\./, gated: PUSH },
+	{ name: "L1 plan, relay", entry: "child-plan", relay: true, backgroundAutoFallback: false, header: /# Subagent under plan mode/, laneLine: /Your lane: read-only plan child\./, gated: INSTALL },
+	{ name: "L2 plan, no relay", entry: "child-plan", relay: false, backgroundAutoFallback: false, header: /# Subagent under plan mode/, laneLine: /Your lane: read-only plan child\./, gated: INSTALL },
+	{ name: "L3 default, relay", entry: "child-default", relay: true, backgroundAutoFallback: false, header: /# Subagent permissions/, laneLine: /Your lane: default child with a relay\./, gated: EDIT },
+	{ name: "L4 default, no relay", entry: "child-default", relay: false, backgroundAutoFallback: false, header: /# Subagent permissions/, laneLine: /Your lane: default child with no relay\./, gated: EDIT },
+	{ name: "L5 auto, relay", entry: "child-auto", relay: true, backgroundAutoFallback: false, header: /# Subagent under auto mode/, laneLine: /Your lane: auto child with a relay\./, gated: PUSH },
+	{ name: "L6 auto, no relay", entry: "child-default", relay: false, backgroundAutoFallback: true, header: /# Subagent under auto mode/, laneLine: /Your lane: auto child with no relay\./, gated: PUSH },
 ];
 
 async function start(lane: Lane): Promise<{ parent?: Harness; child: Harness }> {
 	const sandbox = sandboxed();
-	if (lane.backgroundAuto) writeFileSync(join(sandbox.agentDir, "pi-keeper.json"), '{"backgroundAuto": true}');
+	if (lane.backgroundAutoFallback) writeFileSync(join(sandbox.agentDir, "pi-keeper.json"), '{"backgroundAutoFallback": true}');
 	let parent: Harness | undefined;
 	if (lane.relay) {
 		// a parent with a TUI publishes the relay the child finds
@@ -196,9 +196,9 @@ describe("a runner process with the ambient top-level copy loaded too", () => {
 		assert.doesNotMatch(composed, /# Default Mode/, "no parent mode prompt from the ambient copy");
 	});
 
-	it("a background-auto child's edits run: the ambient copy does not deny them", async () => {
+	it("a background-auto-fallback child's edits run: the ambient copy does not deny them", async () => {
 		const sandbox = sandboxed();
-		writeFileSync(join(sandbox.agentDir, "pi-keeper.json"), '{"backgroundAuto": true}');
+		writeFileSync(join(sandbox.agentDir, "pi-keeper.json"), '{"backgroundAutoFallback": true}');
 		const child = await startPi({ sandbox, entry: "child-default", runnerWithAmbientCopy: true });
 		await child.session();
 		assert.equal((await child.tool(EDIT.tool, EDIT.input)).blocked, false);

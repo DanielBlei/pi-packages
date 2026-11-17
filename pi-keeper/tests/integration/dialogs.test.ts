@@ -95,14 +95,14 @@ const CATALOGUE: Row[] = [
 		expect: { options: ["Yes", EXACT, REJECT, MORE], more: [FEEDBACK, SWITCH] },
 	},
 	{
-		name: "4d. default bash, no prefix possible (python3), persistent-project-rules setting on: the exact command can be allowed in the project",
-		setup: (sb) => writeFileSync(join(sb.agentDir, "pi-keeper.json"), '{"persistentProjectRules": true}'),
+		name: "4d. default bash, no prefix possible (python3), project-exact-commands setting on: the exact command can be allowed in the project",
+		setup: (sb) => writeFileSync(join(sb.agentDir, "pi-keeper.json"), '{"projectExactCommands": true}'),
 		trigger: bash("python3 x.py"),
 		expect: { options: ["Yes", EXACT, "Yes, and always allow this exact command in this project", REJECT, MORE], more: [FEEDBACK, SWITCH] },
 	},
 	{
-		name: "4e. default bash, quoted argument (bash -c …), persistent-project-rules setting on: no rule body possible, session option only",
-		setup: (sb) => writeFileSync(join(sb.agentDir, "pi-keeper.json"), '{"persistentProjectRules": true}'),
+		name: "4e. default bash, quoted argument (bash -c …), project-exact-commands setting on: no rule body possible, session option only",
+		setup: (sb) => writeFileSync(join(sb.agentDir, "pi-keeper.json"), '{"projectExactCommands": true}'),
 		trigger: bash("bash -c 'npm test'"),
 		expect: { options: ["Yes", EXACT, REJECT, MORE], more: [FEEDBACK, SWITCH] },
 	},

@@ -27,7 +27,7 @@
  * pi-subagents children: the parent registers child-plan.ts or
  * child-default.ts as a required child extension (subagents-bridge.ts), which
  * loads this file with `childMode` set. A child has a forced mode (plan or
- * default; the background-auto setting can make a relay-less child auto), no
+ * default; the background-auto-fallback setting can make a relay-less child auto), no
  * switching, no plan file and no prompts. A child has
  * no UI of its own: its asks are relayed to the parent's user through the UI
  * relay (ui-relay.ts) when the parent has one, and denied when it doesn't (a
@@ -37,7 +37,7 @@
  * unless that bridge works.
  */
 
-import type { ExtensionAPI, ExtensionContext, SessionBoundaryDraft } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, SessionBoundaryDraft, ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -52,6 +52,7 @@ import {
 	GLOBAL_RULES,
 	MANAGED_TOOLS,
 	MODE_ANNOUNCEMENTS,
+	CHILD_PROTOCOL_TOOLS,
 	MODE_CHANGE_NOTICES,
 	MODE_CYCLE,
 	MODES,
@@ -159,7 +160,9 @@ import { createRtkRewriter, type CommandRewriter } from "./rtk-rewrite.ts";
 import { countWork } from "./perf.ts";
 import { isDialogLocked, withDialogLock } from "./dialog-lock.ts";
 import { permissionDialog, selectModeDialog, setPreviewTextColor } from "./dialog.ts";
-import { backgroundAsksEnabled, CONFIG_FILE, formatDuration, loadConfig, MAX_BACKGROUND_ASK_TIMEOUT_MS, MIN_BACKGROUND_ASK_TIMEOUT_MS, parseDuration, POPUP_MODES, PREVIEW_TEXT_COLORS, saveConfig, type BackgroundAskPopup, type KeeperConfig, type PreviewTextColor } from "./config.ts";
+import { ccExtensionsStatus, ccSettingsPath, excludeExitPlanMode, type CcExtensionsStatus } from "./cc-extensions-compat.ts";
+import { commandHighlighter } from "./shell-highlight-bridge.ts";
+import { backgroundAsksEnabled, CONFIG_FILE, effectiveCommandColors, formatDuration, loadConfig, MAX_BACKGROUND_ASK_TIMEOUT_MS, MIN_BACKGROUND_ASK_TIMEOUT_MS, parseDuration, POPUP_MODES, PREVIEW_TEXT_COLORS, saveConfig, type BackgroundAskPopup, type KeeperConfig, type PreviewTextColor } from "./config.ts";
 import { settingsPanel, type PanelItem, type PanelResult } from "./settings-panel.ts";
 import { asPlanDetails, PLAN_KEEP, PlanView, selectPlanAction, type PlanChoice, type PlanDetails } from "./plan-approval.ts";
 import { childCwdProblem } from "./child-cwd.ts";
@@ -356,7 +359,7 @@ const ASK_HINTS: Partial<Record<string, string>> = {
 	secretSearch: "A recursive search could read secret files (.env, private keys, credential files) that git does not track.",
 	secretUpload: "Uploads a secret file (.env, private key, credential file).",
 	unapprovedBash: "Plan mode: approve only if it is needed to gather context for the plan.",
-	projectAsk: `Matches an ask rule in ${RULES_FILE}.`,
+	projectAsk: `Matches an ask rule in ${RULES_FILE}, or the file cannot be read or is not valid JSON (then every shell command asks until it is fixed).`,
 	secretFile: "May expose secrets (.env, private keys, credential files).",
 	secretBash: "May expose secrets (.env, private keys, credential files).",
 };
@@ -459,7 +462,7 @@ export interface ExtensionOptions {
  * process (PI_SUBAGENT_CHILD=1) pi also loads this package's index.ts as an
  * ambient extension when it is installed globally: that copy would gate the
  * child's calls a second time as a UI-less default-mode parent (denying
- * contact_supervisor, and every edit in a background-auto child). It stands
+ * contact_supervisor, and every edit in a background-auto-fallback child). It stands
  * down while a child entry is loaded; without one it keeps gating (fail-closed).
  */
 export const CHILD_GATE_KEY = Symbol.for("pi-keeper.child-gate.v1");
@@ -538,7 +541,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 	let hintsCache = new Map<string, ToolHints | undefined>();
 	/** `<agent dir>/pi-keeper.json`, re-read on session_start (defaults when absent). */
 	let config: KeeperConfig = loadConfig(getAgentDir());
-	setPreviewTextColor(config.previewTextColor);
+	setPreviewTextColor(config.commandColors);
 
 	/**
 	 * Who a call is judged and asked as. The session's own calls, and the calls of
@@ -636,8 +639,12 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 	function cwdProblem(ctx: ExtensionContext): string | undefined {
 		if (childMode === undefined) return undefined;
 		const anchor = sharedRules()?.cwd;
-		const key = `${ctx.cwd}\0${anchor ?? ""}`;
-		if (cwdCheck?.key !== key) cwdCheck = { key, problem: childCwdProblem(ctx.cwd, anchor) };
+		// the env names a parent session: a missing anchor then means its grants are unreadable. Fail closed
+		// only in auto, where nothing else stops work outside the project; in default and plan the child's
+		// asks are denied anyway, and a nested child (whose parent publishes no snapshot) keeps reading.
+		const parentExpected = currentMode === "auto" && (process.env[PARENT_SESSION_ENV] ?? "") !== "";
+		const key = `${ctx.cwd}\0${anchor ?? ""}\0${parentExpected}`;
+		if (cwdCheck?.key !== key) cwdCheck = { key, problem: childCwdProblem(ctx.cwd, anchor, undefined, parentExpected) };
 		return cwdCheck.problem;
 	}
 
@@ -659,8 +666,8 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 	function laneHint(): string {
 		if (childMode !== undefined || !pi.getActiveTools().includes(SUBAGENT_TOOL)) return "";
 		const asks = backgroundAsksEnabled(config);
-		const key = `${currentMode}:${config.backgroundAuto}:${asks}`;
-		if (hintCache?.key !== key) hintCache = { key, line: parentLaneHint(currentMode, config.backgroundAuto, asks) };
+		const key = `${currentMode}:${config.backgroundAutoFallback}:${asks}`;
+		if (hintCache?.key !== key) hintCache = { key, line: parentLaneHint(currentMode, config.backgroundAutoFallback, asks) };
 		return hintCache.line;
 	}
 
@@ -674,7 +681,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		const signature = fileSignature(file);
 		if (projectState?.file === file && projectState.signature === signature) return projectState;
 		const loaded = loadProjectRules(ctx.cwd, getAgentDir());
-		projectState = { file, signature, loaded, permissions: compilePermissions(loaded.rules, allowActive(loaded)) };
+		projectState = { file, signature, loaded, permissions: compilePermissions(loaded.rules, allowActive(loaded), loaded.broken) };
 		return projectState;
 	}
 
@@ -682,9 +689,13 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 	async function reviewProject(ctx: ExtensionContext): Promise<void> {
 		const { loaded } = syncProject(ctx);
 		const key = keyOf(loaded);
-		if (ctx.hasUI && loaded.rules.warnings.length > 0 && warnedKey !== key) {
+		const problems = [
+			...loaded.rules.warnings,
+			...(loaded.broken === undefined ? [] : [`every shell command asks until the file is fixed: ${loaded.broken}`]),
+		];
+		if (ctx.hasUI && problems.length > 0 && warnedKey !== key) {
 			warnedKey = key;
-			ctx.ui.notify(sanitizeForTerminal(`pi-keeper: ignored in ${loaded.file}:\n${loaded.rules.warnings.join("\n")}`), "warning");
+			ctx.ui.notify(sanitizeForTerminal(`pi-keeper: ignored in ${loaded.file}:\n${problems.join("\n")}`), "warning");
 		}
 		// command, read and fetch rules all take effect only once the file is trusted
 		const allow = [...loaded.rules.allow, ...loaded.rules.readDirs, ...loaded.rules.fetchHosts];
@@ -863,7 +874,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 	 */
 	function syncBridge(ctx: ExtensionContext): void {
 		if (childMode !== undefined) return;
-		const wanted = childModeFor(currentMode, config.autoSubagents);
+		const wanted = childModeFor(currentMode, config.subagentsFollowAuto);
 		if (bridge?.childMode === wanted && bridge.isCurrent()) return;
 		bridge?.dispose();
 		bridge = undefined;
@@ -915,7 +926,8 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 
 	/** The dialog surface a permission ask uses: this session's own UI, or the parent's via the relay. */
 	interface AskUI {
-		dialog(title: DialogTitle, preview: Preview | undefined, options: string[], escLabel: string): Promise<string | undefined>;
+		/** `recheck` runs once the dialog lock is reached: true when the call is now allowed, and the dialog is skipped (see permissionDialog). */
+		dialog(title: DialogTitle, preview: Preview | undefined, options: string[], escLabel: string, recheck?: () => boolean): Promise<string | undefined>;
 		input(title: string): Promise<string | undefined>;
 		notify(message: string, type: "info" | "warning" | "error"): void;
 	}
@@ -923,7 +935,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 	/** The session's own UI. */
 	function ctxUi(ctx: ExtensionContext): AskUI {
 		return {
-			dialog: (title, preview, options, escLabel) => permissionDialog(ctx, title, preview, options, escLabel, undefined, (data) => runModeShortcut(data, ctx)),
+			dialog: (title, preview, options, escLabel, recheck) => permissionDialog(ctx, title, preview, options, escLabel, undefined, (data) => runModeShortcut(data, ctx), recheck),
 			input: (title) => withDialogLock(() => ctx.ui.input(title, undefined, { signal: ctx.signal }), ctx.signal),
 			notify: (message, type) => ctx.ui.notify(message, type),
 		};
@@ -932,8 +944,8 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 	/** A child's dialogs, relayed to the parent's UI. Every call fails closed: a relay error is an unanswered dialog (reject), notifications are dropped. */
 	function relayUi(relay: UiRelay, ctx: ExtensionContext): AskUI {
 		return {
-			dialog: (title, preview, options, escLabel) =>
-				relay.select({ title: title.plain, lines: title.lines, options, preview, escLabel, signal: ctx.signal }).catch(() => undefined),
+			dialog: (title, preview, options, escLabel, recheck) =>
+				relay.select({ title: title.plain, lines: title.lines, options, preview, escLabel, signal: ctx.signal, recheck }).catch(() => undefined),
 			input: (title) => relay.input({ title, signal: ctx.signal }).catch(() => undefined),
 			notify: (message, type) => {
 				try {
@@ -967,7 +979,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 					const title: DialogTitle =
 						request.lines !== undefined ? { lines: request.lines, plain: request.title } : titleFromPlain(request.title);
 					// the mode shortcut cycles this (the parent's) mode: the child's ask is unaffected, and the child's own mode is fixed
-					return permissionDialog(ctx, title, request.preview, [...request.options], request.escLabel ?? "reject", signal, (data) => runModeShortcut(data, ctx));
+					return permissionDialog(ctx, title, request.preview, [...request.options], request.escLabel ?? "reject", signal, (data) => runModeShortcut(data, ctx), request.recheck);
 				});
 			},
 			async input(request) {
@@ -1445,7 +1457,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 	}
 
 	/** Permission dialog for an "ask" decision. Runs serialized. */
-	async function ask(call: ToolCall, decision: Decision, ctx: ExtensionContext, toolCallId: string, subject: AskSubject = selfSubject(ctx)): Promise<ToolCallBlock | undefined> {
+	async function ask(call: ToolCall, decision: Decision, ctx: ExtensionContext, toolCallId: string, subject: AskSubject = selfSubject(ctx), recheck?: () => boolean): Promise<ToolCallBlock | undefined> {
 		const description = describe(call);
 		const mode = subject.mode;
 		const matcher = decision.rule?.match ?? null;
@@ -1481,7 +1493,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		const scope = prefixes === undefined ? "" : scopeSuffix(commandOf(call.input), pathContext(ctx, subject));
 		const sessionLabel = prefixes === undefined ? undefined : `Yes, and don't ask again for ${commands} this session${subject.child ? ", for me and my subagents" : ""}${prefixes.some(viaRtkToo) ? " (also via rtk)" : ""}${scope}`;
 		// project allow rules don't apply in plan mode, so only default offers them
-		const projectLabel = config.projectCommands && prefixes !== undefined && subject.mode === "default" ? `Yes, and always allow ${commands} in this project${scope}` : undefined;
+		const projectLabel = config.projectCommandApprovals && prefixes !== undefined && subject.mode === "default" ? `Yes, and always allow ${commands} in this project${scope}` : undefined;
 		// one segment needing approval: let the user pick the granularity (same conditions as the session option)
 		const ladder = sessionLabel !== undefined ? patternLadder(commandOf(call.input), pathContext(ctx, subject)) : undefined;
 		// no prefix can cover it (an interpreter, a script inside a compound): offer this exact text for the session (not in plan mode)
@@ -1498,9 +1510,9 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		// must also be representable in the project file (single segment, safe
 		// tokens, nothing a rule may never cover). Offered to children too: like
 		// the prefix project option, it saves to the child's own project.
-		const persistentProjectRulesTokens =
-			config.persistentProjectRules && notReadOnly && prefixes === undefined && subject.mode === "default" && !hasRemoval(commandOf(call.input))
-				? persistentProjectRulesTokensOf(commandOf(call.input), ctx, subject)
+		const projectExactCommandsTokens =
+			config.projectExactCommands && notReadOnly && prefixes === undefined && subject.mode === "default" && !hasRemoval(commandOf(call.input))
+				? projectExactCommandsTokensOf(commandOf(call.input), ctx, subject)
 				: undefined;
 		// an outside read: offer to allow the directories (not for "/" or the home dir; those take the all-reads option)
 		const grantDirs = decision.rule?.match === "outsideCwdRead" ? readGrantDirsOf(call, pathContext(ctx, subject)) : undefined;
@@ -1515,11 +1527,11 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			sessionLabel,
 			projectLabel,
 			exactCommand,
-			persistentProjectRules: persistentProjectRulesTokens !== undefined,
+			projectExactCommands: projectExactCommandsTokens !== undefined,
 			readGrantLabel: grantDirs === undefined ? undefined : readGrantLabel(grantDirs),
-			projectReadGrantLabel: grantDirs === undefined || !config.projectReadDirs ? undefined : projectReadGrantLabel(grantDirs),
+			projectReadGrantLabel: grantDirs === undefined || !config.projectReadApprovals ? undefined : projectReadGrantLabel(grantDirs),
 			fetchGrantLabel: hostGrant === undefined ? undefined : fetchGrantLabel(hostGrant),
-			projectFetchGrantLabel: hostGrant === undefined || !config.projectCommands ? undefined : projectFetchGrantLabel(hostGrant),
+			projectFetchGrantLabel: hostGrant === undefined || !config.projectCommandApprovals ? undefined : projectFetchGrantLabel(hostGrant),
 			hasLadder: ladder !== undefined,
 			child: subject.child,
 			// a background child's reply carries no text back, so there is nowhere for feedback to go
@@ -1551,7 +1563,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		]);
 		// With a preview the dialog is re-opened for the "More…" list, so the diff or command stays visible
 		const show = (options: string[], back: boolean): Promise<string | undefined> =>
-			ui.dialog(back ? backTitle() : title, preview, options, back ? "back" : "reject");
+			ui.dialog(back ? backTitle() : title, preview, options, back ? "back" : "reject", recheck);
 		// The relayed dialog rings and sets the parent's working row itself; a background request
 		// rings from the ask server, when it decides to open
 		if (!subject.child && subject.remote === undefined) attention(ctx, "pi: permission needed");
@@ -1630,8 +1642,8 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			ui.notify(`Reads from ${grantDirs.map((d) => sanitizeForTerminal(`${d}/`)).join(", ")} allowed for this session. Secrets still ask; /permissions lists and removes it.`, "info");
 			return undefined;
 		}
-		if (grantDirs !== undefined && config.projectReadDirs && choice === projectReadGrantLabel(grantDirs)) {
-			report("project-read-dirs");
+		if (grantDirs !== undefined && config.projectReadApprovals && choice === projectReadGrantLabel(grantDirs)) {
+			report("project-read-approvals");
 			saveReadDirsToProject(subject, ui, grantDirs);
 			return undefined;
 		}
@@ -1648,7 +1660,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			ui.notify(`Fetches (curl/wget GET) from ${hostGrant.map((h) => sanitizeForTerminal(h)).join(", ")} allowed for this session; /permissions lists and removes it.`, "info");
 			return undefined;
 		}
-		if (hostGrant !== undefined && config.projectCommands && choice === projectFetchGrantLabel(hostGrant)) {
+		if (hostGrant !== undefined && config.projectCommandApprovals && choice === projectFetchGrantLabel(hostGrant)) {
 			report("project-fetch-hosts");
 			saveFetchHostsToProject(subject, ui, hostGrant);
 			return undefined;
@@ -1676,10 +1688,10 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			ui.notify("Allowed for this session: this exact command, character for character. Plan mode still asks; /permissions lists and removes it.", "warning");
 			return undefined;
 		}
-		if (choice === PROJECT_EXACT && persistentProjectRulesTokens !== undefined) {
+		if (choice === PROJECT_EXACT && projectExactCommandsTokens !== undefined) {
 			const command = commandOf(call.input);
 			report("remember-project", { remembered: `exact: ${command.length > 80 ? `${command.slice(0, 80)}\u2026` : command}`, scope: "project" });
-			saveToProject(subject, ui, [{ tokens: persistentProjectRulesTokens, exact: true }]);
+			saveToProject(subject, ui, [{ tokens: projectExactCommandsTokens, exact: true }]);
 			return undefined;
 		}
 		if (choice !== undefined && choice === sessionLabel && prefixes !== undefined) {
@@ -1771,7 +1783,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 	 * will). Undefined otherwise — the dialog then offers the session option
 	 * only.
 	 */
-	function persistentProjectRulesTokensOf(command: string, ctx: ExtensionContext, subject: AskSubject): string[] | undefined {
+	function projectExactCommandsTokensOf(command: string, ctx: ExtensionContext, subject: AskSubject): string[] | undefined {
 		const tokens = exactRuleTokens(command, pathContext(ctx, subject));
 		if (tokens === undefined || tokens.length === 0) return undefined;
 		const parsed = parseRule(exactRuleFor(tokens), "allow");
@@ -1897,13 +1909,15 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		return typeof command === "string" && Object.isExtensible(input);
 	}
 
-	pi.on("tool_call", async (event, ctx) => {
+	const judgeToolCall = async (event: ToolCallEvent, ctx: ExtensionContext): Promise<ToolCallBlock | undefined> => {
 		const call: ToolCall = { toolName: event.toolName, input: event.input };
 		const decideAt = performance.now();
 		const decided = decide(call, ctx);
 		// a child launched outside its parent's project: only the escalation channel and its report
 		const locked = cwdProblem(ctx);
-		const lockedOut = locked !== undefined && !(decided.action === "allow" && (decided.rule?.match === "childSession" || decided.rule?.match === "subagentArtifact"));
+		// the escalation channel is matched by name: auto mode allows it by fallback, with no childSession rule
+		const escapeHatch = CHILD_PROTOCOL_TOOLS.includes(call.toolName) || decided.rule?.match === "subagentArtifact";
+		const lockedOut = locked !== undefined && !(decided.action === "allow" && escapeHatch);
 		const decision: Decision = lockedOut ? { action: "deny", rule: { tools: [call.toolName], match: "childCwdLocked", action: "deny" } } : decided;
 		logDecision(pi, "decide", event.toolCallId, call, currentMode, decision, performance.now() - decideAt);
 		if (lockedOut) {
@@ -1956,7 +1970,15 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				rewriter !== null && call.toolName === "bash" && rewritableBashInput(event.input)
 					? rewriter.rewrite(commandOf(call.input), ctx.signal).catch(() => null)
 					: null;
-			const verdict = await ask(call, current, ctx, event.toolCallId);
+			// Inside the dialog lock, a parallel call (a child's, relayed here) may have just been granted
+			// for this session or project: judge again, and skip the dialog when it is now allowed.
+			const recheck = (): boolean => {
+				const again = decide(call, ctx);
+				if (again.action !== "allow") return false;
+				logDecision(pi, "redecide", event.toolCallId, call, currentMode, again);
+				return true;
+			};
+			const verdict = await ask(call, current, ctx, event.toolCallId, undefined, recheck);
 			// What the user approved is what runs: later tool_call handlers
 			// (other extensions) can't change it any more. rtk is a trusted
 			// optimizer (rtk ls is within approving ls), so this package
@@ -1979,6 +2001,18 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		});
 		dialogQueue = run.catch(() => undefined);
 		return run;
+	};
+
+	pi.on("tool_call", async (event, ctx) => {
+		try {
+			return await judgeToolCall(event, ctx);
+		} catch (error) {
+			// an abort (Esc) is not a judgement failure: pi reports it as before
+			if (ctx.signal?.aborted) throw error;
+			const detail = error instanceof Error ? error.message : String(error);
+			if (ctx.hasUI) ctx.ui.notify(sanitizeForTerminal(`pi-keeper could not check a call: ${detail}`), "warning");
+			return deny("pi-keeper could not judge this call; it was blocked. Do not retry it.");
+		}
 	});
 
 	/** The bash call row plus a dim line saying why it ran without asking; the note is read at render time. */
@@ -2608,6 +2642,10 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				readonly kind: "choice";
 				readonly choices: readonly string[];
 				value(): string;
+				/** The panel row's label when it carries more than name() (command colors: the value in effect and its note). */
+				panelLabel?(): string;
+				/** True while the value is the built-in default, so choosing that same value still saves it. */
+				unsaved?(): boolean;
 				set(value: string, ctx: ExtensionContext): string | undefined;
 		  }
 		| {
@@ -2632,63 +2670,119 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		return setting.kind === "duration" ? `<duration: ${formatDuration(setting.min)} to ${formatDuration(setting.max)}, e.g. 90s, 5m, 2m30s>` : `<${settingValues(setting).join("|")}>`;
 	}
 
+	/** Whether pi-shell-highlight's highlighter is registered now (read at each use, so a later load counts). */
+	const highlighterLoaded = (): boolean => commandHighlighter() !== undefined;
+
+	/** The command color as the panel and the listings show it: the value in effect, and how it got there. */
+	function commandColorsNote(): string {
+		const loaded = highlighterLoaded();
+		if (config.commandColors === undefined) return loaded ? "shell-highlight (default)" : "dim (default; pi-shell-highlight not installed)";
+		if (config.commandColors === "shell-highlight" && !loaded) return "shell-highlight (not installed: using dim)";
+		return config.commandColors;
+	}
+
+	/** pi-cc-extensions: pi lists its `/ccstyle` command (the fact the status check trusts most). */
+	function ccExtensionsStatusNow(): CcExtensionsStatus {
+		return ccExtensionsStatus(getAgentDir(), pi.getCommands().some((command) => command.source === "extension" && command.name === "ccstyle"));
+	}
+
+	/** Once per session: the id of the session the pi-cc-extensions dialog was offered in. */
+	let ccPromptSession: string | undefined;
+
+	/**
+	 * Parent sessions with a UI, once per session: a dialog when pi-cc-extensions hides the plan
+	 * approval and nothing has fixed it. It takes the dialog lock, so it never replaces an open
+	 * permission dialog. Scheduled from session_start, so startup does not wait for the user.
+	 */
+	async function offerCcExtensionsFix(ctx: ExtensionContext): Promise<void> {
+		if (!config.ccExtensionsPrompt) return;
+		const id = ctx.sessionManager.getSessionId();
+		if (ccPromptSession === id || ccExtensionsStatusNow() !== "needs-fix") return;
+		ccPromptSession = id;
+		const path = sanitizeForTerminal(ccSettingsPath(getAgentDir()));
+		const APPLY = `Apply the fix to ${path}`;
+		const EDITOR = "Put a prompt for the agent in the editor";
+		const LATER = "Not now";
+		const NEVER = "Don't ask again";
+		const picked = await withDialogLock(
+			() =>
+				ctx.ui.select(
+					`pi-cc-extensions hides pi-keeper's plan approval\npi-cc-extensions restyles tool rows, so the plan in plan mode's approval dialog is not shown. Adding exit_plan_mode to excludeRenderers in ${path} fixes it.`,
+					[APPLY, EDITOR, LATER, NEVER],
+					ctx.signal === undefined ? undefined : { signal: ctx.signal },
+				),
+			ctx.signal,
+		);
+		if (picked === APPLY) {
+			const problem = excludeExitPlanMode(getAgentDir());
+			if (problem !== undefined) ctx.ui.notify(sanitizeForTerminal(problem), "error");
+			else ctx.ui.notify(`Added exit_plan_mode to excludeRenderers in ${path}. Run /reload (or restart pi) to apply it.`, "info");
+		} else if (picked === EDITOR) {
+			ctx.ui.setEditorText(`Add "exit_plan_mode" to the "excludeRenderers" list in ${path}, creating the list if it is missing and keeping every other setting unchanged. Then tell me to run /reload.`);
+		} else if (picked === NEVER) {
+			const problem = saveConfig(getAgentDir(), { ccExtensionsPrompt: false });
+			if (problem !== undefined) ctx.ui.notify(sanitizeForTerminal(problem), "error");
+			else config = { ...config, ccExtensionsPrompt: false };
+		}
+	}
+
 	/** The settings table: the permission toggles, the subagent toggles, the background-ask popup and timeout, and the dialog's command colors. */
 	function flowSettings(): FlowSetting[] {
 		return [
 			{
 				kind: "toggle",
-				key: "auto-subagents",
-				value: () => config.autoSubagents,
-				name: () => "Allow subagents in auto mode",
-				label: () => `Allow subagents in auto mode: ${config.autoSubagents ? "on" : "off"}`,
-				summary: "on: subagents of an auto parent run in auto mode too, but only when their asks can reach your dialog (a background child's do when background-asks is on; with it off it stays in default mode unless background-auto is on). off: they run in default mode.",
+				key: "subagents-follow-auto",
+				value: () => config.subagentsFollowAuto,
+				name: () => "Subagents follow auto mode",
+				label: () => `Subagents follow auto mode: ${config.subagentsFollowAuto ? "on" : "off"}`,
+				summary: "On: when this session is in auto, subagents run in auto too, as long as they can ask you. Off: they run in default. In plan mode subagents are always read-only.",
 				set(value, ctx) {
-					const problem = saveConfig(getAgentDir(), { autoSubagents: value });
+					const problem = saveConfig(getAgentDir(), { subagentsFollowAuto: value });
 					if (problem !== undefined) return problem;
-					config = { ...config, autoSubagents: value };
+					config = { ...config, subagentsFollowAuto: value };
 					syncBridge(ctx); // the next launch picks up the new child mode
 					return undefined;
 				},
 			},
 			{
 				kind: "toggle",
-				key: "persistent-project-rules",
-				value: () => config.persistentProjectRules,
-				name: () => "Persistent project command rules",
-				label: () => `Persistent project command rules: ${config.persistentProjectRules ? "on" : "off"}`,
-				summary: "on: the approval dialog for a command no prefix can cover (an interpreter such as `python3 x.py`) also offers to always allow that exact command in this project, saved to .pi/settings.local.json. off: that option is session-only.",
+				key: "project-exact-commands",
+				value: () => config.projectExactCommands,
+				name: () => 'Offer "always allow in this project" for exact commands',
+				label: () => `Offer "always allow in this project" for exact commands: ${config.projectExactCommands ? "on" : "off"}`,
+				summary: "On: for a command no prefix can safely cover (an interpreter call such as `python3 x.py`), the dialog also offers \"always allow\" for that exact command, in the current project only, saved to .pi/settings.local.json. Off: such a command can be allowed for this session at most.",
 				set(value, ctx) {
-					const problem = saveConfig(getAgentDir(), { persistentProjectRules: value });
+					const problem = saveConfig(getAgentDir(), { projectExactCommands: value });
 					if (problem !== undefined) return problem;
-					config = { ...config, persistentProjectRules: value };
+					config = { ...config, projectExactCommands: value };
 					return undefined;
 				},
 			},
 			{
 				kind: "toggle",
-				key: "project-commands",
-				value: () => config.projectCommands,
-				name: () => "Project command rules",
-				label: () => `Project command rules: ${config.projectCommands ? "on" : "off"}`,
-				summary: "on: the approval dialog for a command also offers to always allow its prefix in this project, saved to .pi/settings.local.json. off: command approvals are once or this session only.",
+				key: "project-command-approvals",
+				value: () => config.projectCommandApprovals,
+				name: () => 'Offer "always allow in this project" for commands',
+				label: () => `Offer "always allow in this project" for commands: ${config.projectCommandApprovals ? "on" : "off"}`,
+				summary: "On: the command dialog also offers \"always allow\" for the command's prefix (for example `npm test *`) and for fetch hosts, in the current project only. It is saved to this project's .pi/settings.local.json; other projects still ask. Off: command approvals last for one call or this session.",
 				set(value) {
-					const problem = saveConfig(getAgentDir(), { projectCommands: value });
+					const problem = saveConfig(getAgentDir(), { projectCommandApprovals: value });
 					if (problem !== undefined) return problem;
-					config = { ...config, projectCommands: value };
+					config = { ...config, projectCommandApprovals: value };
 					return undefined;
 				},
 			},
 			{
 				kind: "toggle",
-				key: "project-read-dirs",
-				value: () => config.projectReadDirs,
-				name: () => "Project read directories",
-				label: () => `Project read directories: ${config.projectReadDirs ? "on" : "off"}`,
-				summary: "on: the dialog for a read outside the working directory also offers to always allow reading from that directory in this project, saved to .pi/settings.local.json (secrets still ask). off: read grants are once or this session only.",
+				key: "project-read-approvals",
+				value: () => config.projectReadApprovals,
+				name: () => 'Offer "always allow in this project" for outside read directories',
+				label: () => `Offer "always allow in this project" for outside read directories: ${config.projectReadApprovals ? "on" : "off"}`,
+				summary: "Reads inside the current project never ask. On: when the agent reads a directory outside the project, the dialog also offers \"always allow reading from that directory while working in this project\", saved to this project's .pi/settings.local.json; other projects still ask, and secret files still ask. Off: an outside directory can be allowed once or for this session.",
 				set(value) {
-					const problem = saveConfig(getAgentDir(), { projectReadDirs: value });
+					const problem = saveConfig(getAgentDir(), { projectReadApprovals: value });
 					if (problem !== undefined) return problem;
-					config = { ...config, projectReadDirs: value };
+					config = { ...config, projectReadApprovals: value };
 					return undefined;
 				},
 			},
@@ -2696,9 +2790,9 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				kind: "toggle",
 				key: "background-asks",
 				value: () => config.backgroundAsks,
-				name: () => "Background subagent asks reach you",
-				label: () => `Background subagent asks reach you: ${config.backgroundAsks ? "on" : "off"}`,
-				summary: "on: a permission ask from a background subagent opens a dialog in this session, and the child runs in the mode a foreground child would (auto under an auto parent with auto-subagents). off: such asks are denied, and background-auto decides whether the child runs auto. Applies to the next launched child; no re-registration needed.",
+				name: () => "Background subagents can ask you",
+				label: () => `Background subagents can ask you: ${config.backgroundAsks ? "on" : "off"}`,
+				summary: "On: a background subagent's permission ask opens a dialog here. Off: its asks are denied, and \"Run auto when a background subagent can't ask\" sets its mode.",
 				set(value, ctx) {
 					const problem = saveConfig(getAgentDir(), { backgroundAsks: value });
 					if (problem !== undefined) return problem;
@@ -2716,7 +2810,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				value: () => config.subagentThinking,
 				name: () => "Subagent thinking",
 				label: () => `Subagent thinking: ${config.subagentThinking}`,
-				summary: "follow: a child runs at the higher of its own level (its agent file's thinking, or an agentOverrides value: scout is medium here, worker and reviewer high) and this session's current one, so raising this session to high lifts every child without editing an agent file; a role's level is never lowered. role: a child keeps the level its agent file or launch asked for and ignores this session. Applies to the next child run, including children already running.",
+				summary: "follow: each subagent thinks at its own level or this session's, whichever is higher. role: it keeps the level from its agent file.",
 				set(value, ctx) {
 					const problem = saveConfig(getAgentDir(), { subagentThinking: value as SubagentThinkingMode });
 					if (problem !== undefined) return problem;
@@ -2729,17 +2823,17 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			},
 			{
 				kind: "toggle",
-				key: "background-auto",
-				value: () => config.backgroundAuto,
-				name: () => "Background subagents run auto when asks cannot reach you",
-				label: () => `Background subagents run auto when asks cannot reach you: ${config.backgroundAuto ? "on" : "off"}`,
-				summary: "Applies only when a subagent\'s asks cannot reach you (background asks off, or a parent without a UI, which never listens). on: such a subagent runs in auto mode: edits and commands inside the project run unasked, while dangerous commands, secrets and protected paths are still denied. off: it runs in default mode, so every ask is denied. With background-asks on this setting has no effect. Applies to the next launched child; no re-registration needed.",
+				key: "background-auto-fallback",
+				value: () => config.backgroundAutoFallback,
+				name: () => "Run auto when a background subagent can't ask",
+				label: () => `Run auto when a background subagent can't ask: ${config.backgroundAutoFallback ? "on" : "off"}`,
+				summary: "Only for a background subagent that can't ask you. On: it runs in auto; dangerous commands, secrets and protected paths are still denied. Off: it runs in default, so its asks are denied.",
 				set(value, ctx) {
-					const problem = saveConfig(getAgentDir(), { backgroundAuto: value });
+					const problem = saveConfig(getAgentDir(), { backgroundAutoFallback: value });
 					if (problem !== undefined) return problem;
-					config = { ...config, backgroundAuto: value };
+					config = { ...config, backgroundAutoFallback: value };
 					// child-default.ts / child-auto.ts read the config at child
-					// launch, so no syncBridge here (unlike auto-subagents)
+					// launch, so no syncBridge here (unlike subagents-follow-auto)
 					return undefined;
 				},
 			},
@@ -2748,9 +2842,9 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				key: "background-ask-popup",
 				choices: POPUP_MODES,
 				value: () => config.backgroundAskPopup,
-				name: () => "Background ask popup",
-				label: () => `Background ask popup: ${config.backgroundAskPopup}`,
-				summary: "When a background subagent\'s ask opens its dialog here. idle: when the session is idle and the editor is empty; otherwise a status badge shows and /approvals opens it. always: as soon as no other dialog is open. badge: never on its own, only through /approvals. Takes effect at the next poll, asks already waiting included.",
+				name: () => "When background asks pop up",
+				label: () => `When background asks pop up: ${config.backgroundAskPopup}`,
+				summary: "always (default): as soon as no other dialog is open. idle: when this session is idle; until then a badge shows and /approvals opens it. badge: only through /approvals.",
 				set(value, ctx) {
 					const problem = saveConfig(getAgentDir(), { backgroundAskPopup: value as BackgroundAskPopup });
 					if (problem !== undefined) return problem;
@@ -2768,7 +2862,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				value: () => config.backgroundAskTimeoutMs,
 				name: () => "Background ask timeout",
 				label: () => `Background ask timeout: ${formatDuration(config.backgroundAskTimeoutMs)}`,
-				summary: "How long a background subagent waits for your answer to an ask before it is denied. Type minutes and/or seconds with their unit (90s, 5m, 2m30s), from 10 s to 30 min. Applies to the next launched child; no re-registration needed. Asks already waiting are judged against the new limit at the next poll, so lowering it can deny one that has waited longer. The limit here never goes below 15 min, so below about 14 min a lower setting mostly affects children launched afterwards.",
+				summary: "How long a background subagent waits for your answer before its ask is denied: 10s to 30m, for example 90s, 5m or 2m30s.",
 				set(value) {
 					const problem = saveConfig(getAgentDir(), { backgroundAskTimeoutMs: value });
 					if (problem !== undefined) return problem;
@@ -2779,17 +2873,19 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			},
 			{
 				kind: "choice",
-				key: "preview-text-color",
+				key: "command-colors",
 				choices: PREVIEW_TEXT_COLORS,
-				value: () => config.previewTextColor,
+				value: () => effectiveCommandColors(config.commandColors, highlighterLoaded()),
+				panelLabel: () => `Command colors in the dialog: ${commandColorsNote()}`,
+				unsaved: () => config.commandColors === undefined,
 				name: () => "Command colors in the dialog",
-				label: () => `Command colors in the dialog: ${config.previewTextColor}`,
-				summary: "How the permission dialog paints the full command of a long bash call. dim, muted and text are plain theme slots (dim is only just readable on some dark themes). builtin-syntax colors it with pi's own shell highlighter: strings, variables, keywords and comments, but not the name of an external command. shell-highlight adds that: a language or task runner (python, go, npm) reads apart from a plain tool, sudo and rtk recede as qualifiers, options get their own color, and a heredoc body is read for its language — it needs the pi-shell-highlight package installed, and without it this looks like builtin-syntax. shell-highlight also colors the one-line bash: <command> title of the dialog (what a short command shows) and a bash/sh fenced block in the plan view. A diff preview keeps its added/removed colors. Applies to the next dialog.",
+				label: () => `Command colors in the dialog: ${commandColorsNote()}`,
+				summary: "How the dialog colors long commands. shell-highlight colors command names and heredoc languages; it is the default when pi-shell-highlight is installed (pi install npm:pi-shell-highlight). builtin-syntax: pi's own highlighter. dim, muted, text: plain colors.",
 				set(value) {
-					const problem = saveConfig(getAgentDir(), { previewTextColor: value as PreviewTextColor });
+					const problem = saveConfig(getAgentDir(), { commandColors: value as PreviewTextColor });
 					if (problem !== undefined) return problem;
-					config = { ...config, previewTextColor: value as PreviewTextColor };
-					setPreviewTextColor(config.previewTextColor); // the next dialog uses it, no reload
+					config = { ...config, commandColors: value as PreviewTextColor };
+					setPreviewTextColor(config.commandColors); // the next dialog uses it, no reload
 					return undefined;
 				},
 			},
@@ -2803,13 +2899,13 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 	 */
 	function flowSections(): { id: string; label: string; keys: readonly string[] }[] {
 		return [
-			{ id: "permissions", label: "Permissions", keys: ["project-commands", "project-read-dirs", "persistent-project-rules"] },
+			{ id: "permissions", label: "Saving approvals to this project", keys: ["project-command-approvals", "project-read-approvals", "project-exact-commands"] },
 			{
 				id: "subagents",
 				label: "Subagents",
-				keys: ["auto-subagents", "background-asks", "background-auto", "subagent-thinking", "background-ask-popup", "background-ask-timeout"],
+				keys: ["subagents-follow-auto", "background-asks", "background-auto-fallback", "subagent-thinking", "background-ask-popup", "background-ask-timeout"],
 			},
-			{ id: "dialog", label: "Dialog", keys: ["preview-text-color"] },
+			{ id: "dialog", label: "Dialog", keys: ["command-colors"] },
 		];
 	}
 
@@ -2826,7 +2922,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				return [
 					{
 						id: setting.key,
-						label: setting.name(),
+						label: setting.kind === "choice" && setting.panelLabel !== undefined ? setting.panelLabel() : setting.name(),
 						description: setting.summary,
 						...(values === undefined ? { placeholder: `e.g. ${(setting as { presets: readonly string[] }).presets.slice(0, 3).join(", ")}` } : { values }),
 					},
@@ -2848,7 +2944,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 	 * caller decides where (a notification, or the panel's footer).
 	 */
 	function applyFlowSetting(setting: FlowSetting, value: boolean | string | number, ctx: ExtensionContext): PanelResult {
-		if (value === setting.value()) return { message: `${setting.label()} (unchanged)` };
+		if (value === setting.value() && (setting.kind !== "choice" || setting.unsaved?.() !== true)) return { message: `${setting.label()} (unchanged)` };
 		const problem = (setting.set as (value: boolean | string | number, ctx: ExtensionContext) => string | undefined)(value, ctx);
 		if (problem !== undefined) return { message: `Could not save the setting: ${problem}`, error: true };
 		return { message: `${setting.label()} — saved to ${CONFIG_FILE}` };
@@ -3159,8 +3255,10 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		callNotes.clear();
 		scratchDir = undefined; // ...and with a fresh scratch dir (the old one is left on disk)
 		config = loadConfig(getAgentDir());
-		setPreviewTextColor(config.previewTextColor);
+		setPreviewTextColor(config.commandColors);
 		if (ctx.hasUI && config.warnings.length > 0) ctx.ui.notify(sanitizeForTerminal(`pi-keeper: ${CONFIG_FILE}:\n${config.warnings.join("\n")}`), "warning");
+		// scheduled, not awaited: session_start returns first, and the dialog opens once startup has settled
+		if (childMode === undefined && ctx.hasUI) setTimeout(() => void offerCcExtensionsFix(ctx).catch(() => undefined), 0);
 		// once per session, not per event: what a later comparison needs and what never changes mid-session
 		logSession(pi, { model: ctx.model === undefined ? null : `${ctx.model.provider}/${ctx.model.id}`, promptVersion: PROMPT_VERSION });
 		restoreState(ctx);

@@ -7,8 +7,11 @@ pi-cc-extensions restyles every tool row and, while a tool runs, shows only
 never shows above the approval selector. This script adds "exit_plan_mode"
 to excludeRenderers in pi-cc-extensions' settings
 (~/.pi/agent/pi-cc-extensions.json), leaving every other setting alone, and
-is safe to run repeatedly. Restart pi afterwards: the file is read at
-startup.
+is safe to run repeatedly. Run /reload in pi (or restart it) afterwards: the file is read
+when pi loads extensions.
+
+/keeper → Compatibility in pi-keeper does the same edit (it is shown when
+pi-cc-extensions is in use); this script is kept for shell use.
 
 Usage:
   python3 scripts/exclude_exit_plan_mode.py [pi-cc-extensions.json]
@@ -65,7 +68,7 @@ def main() -> int:
     print("  why:    pi-cc-extensions otherwise replaces the tool row with")
     print('          "↳ Pending…", hiding the plan above the approval selector.')
     print("          Other settings in the file were left untouched.")
-    print("  next:   restart pi; the file is read at startup.")
+    print("  next:   run /reload in pi (or restart it); the file is read at load.")
     return 0
 
 

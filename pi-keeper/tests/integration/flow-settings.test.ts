@@ -61,7 +61,7 @@ describe("/keeper background-ask-popup", () => {
 		for (const policy of ["badge", "always", "idle"]) {
 			await h.command("keeper", `background-ask-popup ${policy}`);
 			assert.equal(saved(sb).backgroundAskPopup, policy);
-			assert.match(lastNote(h)?.message ?? "", new RegExp(`Background ask popup: ${policy} — saved`));
+			assert.match(lastNote(h)?.message ?? "", new RegExp(`When background asks pop up: ${policy} — saved`));
 		}
 	});
 
@@ -81,7 +81,7 @@ describe("/keeper background-ask-popup", () => {
 	it("completions offer the three values", async () => {
 		const h = await parentOf(sandboxed());
 		assert.deepEqual(h.complete("keeper", "background-ask-popup ")?.map((i) => i.label), ["idle", "always", "badge"]);
-		assert.deepEqual(h.complete("keeper", "background-ask-popup a"), [{ value: "background-ask-popup always", label: "always", description: "Background ask popup: idle" }]);
+		assert.deepEqual(h.complete("keeper", "background-ask-popup a"), [{ value: "background-ask-popup always", label: "always", description: "When background asks pop up: always" }]);
 	});
 });
 
@@ -138,27 +138,27 @@ describe("the no-UI listing and the panel", () => {
 		const h = await parentOf(sandboxed(), "none");
 		await h.command("keeper");
 		const text = lastNote(h)?.message ?? "";
-		assert.match(text, /Background ask popup: idle — /);
+		assert.match(text, /When background asks pop up: always — /);
 		assert.match(text, /Background ask timeout: 5 min — /);
-		assert.match(text, /Command colors in the dialog: dim — /);
-		assert.match(text, /auto-subagents <on\|off>/);
+		assert.match(text, /Command colors in the dialog: dim \(default; pi-shell-highlight not installed\) — /);
+		assert.match(text, /subagents-follow-auto <on\|off>/);
 		assert.match(text, /background-ask-popup <idle\|always\|badge>/);
 		assert.match(text, /background-ask-timeout <duration: 10 s to 30 min, e\.g\. 90s, 5m, 2m30s>/);
-		assert.match(text, /preview-text-color <dim\|muted\|text\|builtin-syntax\|shell-highlight>/);
+		assert.match(text, /command-colors <dim\|muted\|text\|builtin-syntax\|shell-highlight>/);
 		assert.doesNotMatch(text, /background-ask-popup <on\|off>|background-ask-timeout <on\|off>/);
 	});
 
-	it("the panel opens on the Permissions tab, with tabs, aligned rows and the values", async () => {
+	it("the panel opens on the Saving approvals tab, with tabs, aligned rows and the values", async () => {
 		const h = await parentOf(sandboxed());
 		h.answer(/pi-keeper settings/, "esc");
 		await h.command("keeper");
 		const shown = h.dialogs[0];
 		assert.equal(shown.kind, "custom");
 		// one tab line, in order, the active one first
-		assert.match(shown.title, /Permissions \/ Subagents \/ Dialog/);
+		assert.match(shown.title, /Saving approvals to this project \/ Subagents \/ Dialog/);
 		// rows are labels without the value; the value is the right-hand column
-		assert.deepEqual(shown.options, ["Project command rules", "Project read directories", "Persistent project command rules"]);
-		assert.match(shown.title, /Project command rules +on/);
+		assert.deepEqual(shown.options, ['Offer "always allow in this project" for commands', 'Offer "always allow in this project" for outside read directories', 'Offer "always allow in this project" for exact commands']);
+		assert.match(shown.title, /for commands +on/);
 		h.assertNoPendingAnswers();
 	});
 
@@ -168,17 +168,17 @@ describe("the no-UI listing and the panel", () => {
 		h.answer(/pi-keeper settings/, { keys: [KEY.tab, KEY.shiftTab, KEY.shiftTab, KEY.escape] });
 		await h.command("keeper");
 		const shown = h.dialogs[0];
-		assert.deepEqual(shown.options.slice(0, 2), ["Project command rules", "Project read directories"], "the first render lists the first tab");
+		assert.deepEqual(shown.options.slice(0, 2), ['Offer "always allow in this project" for commands', 'Offer "always allow in this project" for outside read directories'], "the first render lists the first tab");
 		h.assertNoPendingAnswers();
 	});
 
 	it("a choice cycles with Enter and saves each value", async () => {
 		const sb = sandboxed();
 		const h = await parentOf(sb);
-		// Subagents tab, then down 4 rows to Background ask popup: idle -> always -> badge
+		// Subagents tab, then down 4 rows to When background asks pop up (default always): always -> badge -> idle
 		h.answer(/pi-keeper settings/, { keys: [KEY.tab, ...down(4), KEY.enter, KEY.enter, KEY.escape] });
 		await h.command("keeper");
-		assert.equal(saved(sb).backgroundAskPopup, "badge");
+		assert.equal(saved(sb).backgroundAskPopup, "idle");
 		h.assertNoPendingAnswers();
 	});
 
@@ -200,10 +200,10 @@ describe("the no-UI listing and the panel", () => {
 	it("Esc in the input leaves the value alone; a toggle flips on Enter", async () => {
 		const sb = sandboxed();
 		const h = await parentOf(sb);
-		// Subagents tab, row 0 is Allow subagents in auto mode: Enter flips it
+		// Subagents tab, row 0 is Subagents follow auto mode: Enter flips it
 		h.answer(/pi-keeper settings/, { keys: [KEY.tab, KEY.enter, KEY.escape] });
 		await h.command("keeper");
-		assert.equal(saved(sb).autoSubagents, true);
+		assert.equal(saved(sb).subagentsFollowAuto, true);
 
 		// the timeout row again, but Esc inside the input: no second dialog, nothing saved
 		h.answer(/pi-keeper settings/, { keys: [KEY.tab, ...down(5), KEY.enter, KEY.escape, KEY.escape] });
@@ -219,7 +219,7 @@ describe("the no-UI listing and the panel", () => {
 		// Tab twice to Dialog, Enter once: dim -> muted
 		h.answer(/pi-keeper settings/, { keys: [KEY.tab, KEY.tab, KEY.enter, KEY.escape] });
 		await h.command("keeper");
-		assert.equal(saved(sb).previewTextColor, "muted");
+		assert.equal(saved(sb).commandColors, "muted");
 		h.assertNoPendingAnswers();
 	});
 });

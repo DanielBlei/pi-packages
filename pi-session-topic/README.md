@@ -60,8 +60,8 @@ larger budget.
   again at write time; a switch drops the result. pi's "ctx is stale" error after
   `/new`, `/resume`, `/fork` or `/reload` is treated as a drop, not a failure.
 - **Failures are silent and bounded.** Network errors, timeouts, 429 and 5xx
-  retry on your next message; an empty title or a 4xx counts toward a limit of
-  two attempts per session.
+  retry on your next message, up to 5 times per session. An empty title or a 4xx
+  counts toward a limit of two attempts per session. `/topic` is not limited.
 - **Titles are short by width, not length.** The budget counts terminal cells,
   so CJK titles are clipped correctly.
 
@@ -119,7 +119,8 @@ Environment variables stay as one-off overrides and win over the file:
 ## Limits
 
 - One title request per session on success; an empty reply is retried once with a
-  larger budget, and failed attempts retry on later messages (see Rules).
+  larger budget. Network errors, timeouts, 429 and 5xx retry on your next message,
+  up to 5 times per session; an empty title or 4xx stops after 2 attempts (see Rules).
 - The title comes from the first prompt; a session that changes topic keeps its
   first title. `/topic` regenerates it.
 - `--print` runs can end before the title lands, and `--no-session` runs are not

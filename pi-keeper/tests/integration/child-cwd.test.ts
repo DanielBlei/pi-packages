@@ -68,6 +68,12 @@ describe("childCwdProblem", () => {
 		assert.equal(childCwdProblem(sibling, undefined, home), undefined, "no parent: only the root/home check applies");
 	});
 
+	it("fails closed when the env names a parent but its grants (and cwd) cannot be read", () => {
+		assert.match(childCwdProblem(sibling, undefined, home, true) ?? "", /the parent session's grants could not be read/);
+		assert.match(childCwdProblem(repo, undefined, home, true) ?? "", /the parent session's grants could not be read/);
+		assert.match(childCwdProblem("/", undefined, home, true) ?? "", /is \/ or the home directory/, "the root/home refusal keeps its own reason");
+	});
+
 	it("accepts the parent's cwd, below it, and the parent's project root", () => {
 		assert.equal(childCwdProblem(repo, repo, home), undefined);
 		assert.equal(childCwdProblem(sub, repo, home), undefined);
@@ -83,7 +89,7 @@ describe("childCwdProblem", () => {
 });
 
 /** A child harness running in `cwd` (same agent dir and temp as the sandbox). */
-async function childIn(sandbox: Sandbox, cwd: string, options: { relay: boolean; parentSession?: string }): Promise<Harness> {
+async function childIn(sandbox: Sandbox, cwd: string, options: { relay: boolean; parentSession?: string}): Promise<Harness> {
 	const relay = root[RELAY_KEY];
 	if (!options.relay) delete root[RELAY_KEY];
 	if (options.parentSession === undefined) delete process.env[PARENT_SESSION_ENV];
@@ -146,6 +152,28 @@ describe("a child launched outside its parent's project is locked down", () => {
 
 	it("background child at the home dir with no parent information", async () => {
 		await assertLocked(await childIn(sandboxed(), homedir(), { relay: false }), false);
+	});
+
+	it("an auto background child whose parent env names a session with no readable snapshot is locked (fail closed)", async () => {
+		const sandbox = sandboxed();
+		const sibling = mkdtempSync(join(sandbox.root, "orphan-"));
+		// backgroundAutoFallback: a child whose asks cannot reach the parent runs in auto, where nothing else gates it
+		writeFileSync(join(sandbox.agentDir, "pi-keeper.json"), '{"backgroundAutoFallback": true}');
+		await assertLocked(await childIn(sandbox, sibling, { relay: false, parentSession: "no-such-parent-session" }), false);
+	});
+
+	it("a default background child with an unreadable parent snapshot is not locked: its asks are denied anyway", async () => {
+		const sandbox = sandboxed();
+		const sibling = mkdtempSync(join(sandbox.root, "nested-"));
+		const child = await childIn(sandbox, sibling, { relay: false, parentSession: "no-such-parent-session" });
+		assert.doesNotMatch((await child.prompt("go")).systemPrompt, /Your lane: locked/);
+	});
+
+	it("background child with no parent env and no snapshot keeps the root/home-only check", async () => {
+		const sandbox = sandboxed();
+		const sibling = mkdtempSync(join(sandbox.root, "plain-"));
+		const child = await childIn(sandbox, sibling, { relay: false });
+		assert.doesNotMatch((await child.prompt("go")).systemPrompt, /Your lane: locked/);
 	});
 
 	it("a child inside the parent's project is not locked", async () => {

@@ -23,6 +23,21 @@ function decide(mode: ModeName, toolName: string, input: unknown, remembered: st
 const bash = (command: string) => ({ command });
 const file = (path: string) => ({ path });
 
+test("a broken project rules file asks for every bash command in default and auto", () => {
+	// an allow rule that would otherwise run `ls` without a question
+	const project = { allow: { prefixes: [["ls"]], exact: [] }, ask: [], deny: [], readDirs: [], fetchHosts: [], broken: "not valid JSON" };
+	const run = (mode: ModeName, command: string, remembered: string[][] = []): Action =>
+		evaluate(MODES[mode].permissions, GLOBAL_RULES, { toolName: "bash", input: bash(command) }, { cwd: CWD, remembered, project }).action;	assert.equal(run("default", "ls"), "ask");
+	assert.equal(run("auto", "ls"), "ask");
+	assert.equal(run("auto", "git status"), "ask");
+	assert.equal(run("default", "ls", [["ls"]]), "ask", "a remembered command does not beat the broken file");
+	assert.equal(run("plan", "terraform destroy"), "deny", "deny still applies");
+	// without the broken file the same call is allowed: the ask comes from the broken file alone
+	assert.equal(evaluate(MODES.auto.permissions, GLOBAL_RULES, { toolName: "bash", input: bash("ls") }, { cwd: CWD, remembered: [], project: { ...project, broken: undefined } }).action, "allow");
+	// non-shell tools are not affected
+	assert.equal(evaluate(MODES.auto.permissions, GLOBAL_RULES, { toolName: "read", input: file("src/x.ts") }, { cwd: CWD, remembered: [], project }).action, "allow");
+});
+
 type Case = [tool: string, input: unknown, expected: Record<ModeName, Action>];
 
 const CASES: Case[] = [
@@ -345,7 +360,7 @@ test("scratch dir: writable in every mode, symlinks out are refused, bash redire
 			assert.equal(at(mode, "bash", bash(`cat ${scratch}/notes.md`)), "allow", mode);
 			assert.equal(at(mode, "bash", bash(`rg x ${scratch}/ref`)), "allow", mode);
 			assert.equal(at(mode, "read", file(`${scratch}/.env`)), "ask", mode);
-			assert.equal(at(mode, "read", file(base)), "ask", mode); // exists, outside the cwd
+			assert.equal(at(mode, "read", file("/etc/hosts")), "ask", mode); // exists, outside the cwd and the temp dir (base is in the temp dir: no ask)
 		}
 		// bash redirects and mkdir/touch into the scratch dir are read-only: no prompt in plan
 		assert.equal(at("plan", "bash", bash(`rg foo > ${scratch}/out.txt`)), "allow");
@@ -672,3 +687,22 @@ test("a secret-named file written into a child's artifact dir or the scratch dir
 	assert.equal(run("plan", "write", file(PLAN_FILE)), "allow");
 });
 
+
+test("secret variables in echo and printf ask in every mode; other variables still run", () => {
+	for (const command of ["echo $GITHUB_TOKEN", 'printf "%s" "$OPENAI_API_KEY"']) {
+		for (const mode of ["default", "auto", "plan"] as ModeName[]) {
+			assert.equal(decide(mode, "bash", bash(command)), "ask", `${mode} ${command}`);
+		}
+	}
+	for (const command of ["echo $HOME", "echo $GIT_AUTHOR_NAME", "printf '%s' \"$USER\""]) {
+		assert.notEqual(decide("default", "bash", bash(command)), "ask", command);
+	}
+});
+
+test("readOnlyTool: mcp and subagent never become read-only through annotations", () => {
+	const annotationsOf = () => ({ readOnlyHint: true });
+	for (const tool of ["mcp", "subagent"]) {
+		assert.notEqual(decideWith("default", tool, {}, { annotationsOf }), "allow", tool);
+		assert.notEqual(decideWith("plan", tool, {}, { annotationsOf }), "allow", tool);
+	}
+});

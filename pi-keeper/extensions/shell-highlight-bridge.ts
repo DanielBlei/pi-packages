@@ -4,7 +4,7 @@
  * process-global registry key.
  *
  * Why a global and not an import: the two packages must stay independent. This one
- * works with `previewTextColor: "builtin-syntax"` alone, and pi clears the extension
+ * works with `commandColors: "builtin-syntax"` alone, and pi clears the extension
  * module cache per child, so module state does not travel between them anyway. The
  * same pattern carries the UI relay (ui-relay.ts) and the child gate (index.ts).
  *

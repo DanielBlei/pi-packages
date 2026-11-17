@@ -173,3 +173,31 @@ test("normalizeTitle: clipping never leaves a lone surrogate from an emoji", () 
 	assert.equal(title, "ab")
 	assert.ok(displayWidth(title) <= 3)
 })
+
+test("normalizeTitle: keeps a real leading word joined by a hyphen", () => {
+	assert.equal(normalizeTitle("Topic-based routing"), "Topic-based routing")
+	assert.equal(normalizeTitle("Name-mangling in the linker"), "Name-mangling in the linker")
+	assert.equal(normalizeTitle("Title-case converter"), "Title-case converter")
+})
+
+test("normalizeTitle: still strips labels with a colon or a spaced dash", () => {
+	assert.equal(normalizeTitle("Topic - Refactor auth"), "Refactor auth")
+	assert.equal(normalizeTitle("Name - Speed up tests"), "Speed up tests")
+	assert.equal(normalizeTitle("Title: Refactor auth"), "Refactor auth")
+	assert.equal(normalizeTitle("Session title: Refactor auth"), "Refactor auth")
+	assert.equal(normalizeTitle("主题：重构"), "重构")
+})
+
+test("normalizeTitle: clipping never splits a ZWJ emoji sequence", () => {
+	// Family emoji: man, ZWJ, woman, ZWJ, girl. A budget of 5 falls inside it.
+	const family = "👨‍👩‍👧"
+	const title = normalizeTitle(`ab${family}cd`, 5)
+	assert.equal(title, "ab")
+})
+
+test("normalizeTitle: clipping never separates a combining mark from its base", () => {
+	// "é" written as e + U+0301. A budget of 9 would end after the bare "e".
+	const accented = "é"
+	const title = normalizeTitle(accented.repeat(30), 9)
+	assert.equal(title, accented.repeat(4))
+})

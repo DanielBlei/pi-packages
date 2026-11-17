@@ -5,7 +5,7 @@
  * not a repository, or a search root outside the working directory still does.
  * Run: npm test
  */
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -100,6 +100,33 @@ test("no repository, or a search root outside the project, still asks", { skip: 
 			"initialized but not added: untracked",
 		);
 	} finally {
+		rmSync(base, { recursive: true, force: true });
+	}
+});
+
+test("a tracked-file answer expires after 30 seconds (untracked later, the search asks again)", { skip: hasGit ? false : "git is not installed" }, () => {
+	const base = realpathSync(mkdtempSync(join(tmpdir(), "pdf-fixtures-")));
+	mock.timers.enable({ apis: ["Date"], now: Date.now() });
+	try {
+		const project = join(base, "project");
+		mkdirSync(project, { recursive: true });
+		writeFileSync(join(project, ".env"), "DEMO=1");
+		git(project, ["init", "--quiet"]);
+		git(project, ["add", "."]);
+		git(project, ["commit", "--quiet", "-m", "fixture"]);
+		const ctx: PathContext = { cwd: project };
+		assert.deepEqual(secretSearchHits("grep -r KEY .", ctx), [], "committed: no ask");
+		// untracked now, but the answer is still cached within the 30 seconds
+		git(project, ["rm", "--quiet", "--cached", ".env"]);
+		assert.deepEqual(secretSearchHits("grep -r KEY .", ctx), [], "cached answer within the window");
+		mock.timers.tick(31_000);
+		assert.deepEqual(
+			secretSearchHits("grep -r KEY .", ctx).map((hit) => hit.path),
+			[".env"],
+			"after 30 seconds the file is checked again",
+		);
+	} finally {
+		mock.timers.reset();
 		rmSync(base, { recursive: true, force: true });
 	}
 });

@@ -1049,12 +1049,12 @@ export const DANGEROUS_COMMANDS: Record<string, (args: string[]) => boolean> = {
 	npm: (args) => hasAny(args, ["publish", "unpublish", "deprecate"]) || isGlobalInstall(args),
 	pnpm: (args) => hasAny(args, ["publish"]) || isGlobalInstall(args),
 	yarn: (args) => hasAny(args, ["publish"]) || (args[0] === "global" && args[1] === "add"),
-	cargo: (args) => hasAny(args.slice(0, 1), ["publish", "yank"]),
-	gem: (args) => hasAny(args.slice(0, 1), ["push", "yank"]),
-	poetry: (args) => hasAny(args.slice(0, 1), ["publish"]),
-	twine: (args) => hasAny(args.slice(0, 1), ["upload"]),
-	docker: (args) => hasAny(args.slice(0, 2), ["push"]),
-	podman: (args) => hasAny(args.slice(0, 2), ["push"]),
+	cargo: (args) => hasAny(fromSubcommand(args, CARGO_GLOBAL_VALUE_FLAGS, true).slice(0, 1), ["publish", "yank"]),
+	gem: (args) => hasAny(fromSubcommand(args, GEM_GLOBAL_VALUE_FLAGS).slice(0, 1), ["push", "yank"]),
+	poetry: (args) => hasAny(fromSubcommand(args, POETRY_GLOBAL_VALUE_FLAGS).slice(0, 1), ["publish"]),
+	twine: (args) => hasAny(fromSubcommand(args, TWINE_GLOBAL_VALUE_FLAGS).slice(0, 1), ["upload"]),
+	docker: (args) => hasAny(fromSubcommand(args, DOCKER_GLOBAL_VALUE_FLAGS).slice(0, 2), ["push"]),
+	podman: (args) => hasAny(fromSubcommand(args, PODMAN_GLOBAL_VALUE_FLAGS).slice(0, 2), ["push"]),
 	gh: (args) => isDangerousGh(args),
 	terraform: (args) => hasAny(args, ["apply", "destroy"]),
 	tofu: (args) => hasAny(args, ["apply", "destroy"]),
@@ -1106,6 +1106,39 @@ export const DANGEROUS_RAW_PATTERNS: RegExp[] = [
 	// rm whose target comes from command substitution
 	/\brm\b[^;&|\n]*(\$\(|`)/,
 ];
+
+/** Global options that take a separate value, per tool, placed before the subcommand. */
+const DOCKER_GLOBAL_VALUE_FLAGS = new Set(["-H", "--host", "-c", "--context", "--config", "-l", "--log-level", "--tlscacert", "--tlscert", "--tlskey"]);
+const PODMAN_GLOBAL_VALUE_FLAGS = new Set(["-c", "--connection", "--url", "--identity", "--log-level", "--root", "--runroot", "--runtime", "--storage-driver", "--cgroup-manager", "--conmon", "--tmpdir", "--namespace"]);
+const CARGO_GLOBAL_VALUE_FLAGS = new Set(["-C", "--config", "-Z", "--color"]);
+const GEM_GLOBAL_VALUE_FLAGS = new Set(["-C", "--config-file"]);
+const POETRY_GLOBAL_VALUE_FLAGS = new Set(["--directory"]);
+const TWINE_GLOBAL_VALUE_FLAGS = new Set(["--config-file"]);
+/** gh options that take a value; `-R` is accepted before the group and between group and action. */
+const GH_VALUE_FLAGS = new Set(["-R", "--repo", "-H", "--hostname"]);
+
+/**
+ * The words from the subcommand on: leading options are skipped, and so is the
+ * separate value of each option in `valueFlags` (`-H tcp://x`). `--flag=value`
+ * is one word. With `skipToolchain`, a leading `+toolchain` word is skipped too.
+ */
+function fromSubcommand(args: string[], valueFlags: Set<string>, skipToolchain = false): string[] {
+	let i = 0;
+	while (i < args.length && (args[i].startsWith("-") || (skipToolchain && args[i].startsWith("+")))) {
+		i += valueFlags.has(args[i]) ? 2 : 1;
+	}
+	return args.slice(i);
+}
+
+/** The non-option words of a gh command, so the group and action can follow options. */
+function ghWords(args: string[]): string[] {
+	const words: string[] = [];
+	for (let i = 0; i < args.length; i++) {
+		if (!args[i].startsWith("-")) words.push(args[i]);
+		else if (GH_VALUE_FLAGS.has(args[i])) i++;
+	}
+	return words;
+}
 
 const KUBE_WRITE_VERBS = ["apply", "create", "delete", "replace", "patch", "edit", "scale", "drain", "cordon", "rollout", "taint"];
 
@@ -1205,7 +1238,7 @@ function setsCodeRunningConfig(rest: string[]): boolean {
 }
 
 function isDangerousGh(args: string[]): boolean {
-	const [group, action] = args;
+	const [group, action] = ghWords(args);
 	if (group === "release") return action === "create" || action === "delete" || action === "upload";
 	if (group === "pr") return action === "merge" || (action === "review" && hasAny(args, ["--approve", "-a"]));
 	if (group === "repo") return hasAny([action ?? ""], ["delete", "edit", "archive", "rename"]);

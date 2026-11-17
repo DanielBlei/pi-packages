@@ -766,7 +766,7 @@ def other_lines(phase: str, event: dict[str, Any]) -> list[str]:
 # Dialog outcomes by what the user decided: the rest (no-ui, auto-reject) never reached a person.
 APPROVING = {
     "allow-once", "remember-session", "remember-project", "pattern-flow", "allow-edits",
-    "switch-auto", "outside-reads", "outside-read-dirs", "project-read-dirs",
+    "switch-auto", "outside-reads", "outside-read-dirs", "project-read-approvals",
 }
 REJECTING = {"reject", "reject-feedback"}
 

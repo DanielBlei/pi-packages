@@ -22,7 +22,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
@@ -1350,7 +1350,10 @@ function containerBlocker(root: string, args: string[]): Blocker | undefined {
 const HOSTNAME_READ_FLAGS = new Set(["-s", "-f", "-d", "-i", "-I", "-a", "-A", "--short", "--fqdn", "--long", "--domain", "--ip-address", "--all-ip-addresses", "--alias", "--all-fqdns"]);
 
 /** Variable names that usually hold credentials. */
-const SECRET_ENV_NAME = /KEY|TOKEN|SECRET|PASS|CRED|AUTH/i;
+export const SECRET_ENV_NAME = /KEY|TOKEN|SECRET|PASS|CRED|AUTH/i;
+
+/** Stricter credential names for echo/printf: whole `_`-separated parts only, so `GIT_AUTHOR_NAME`, `MONKEY` and `PASSENGER` don't match. */
+const SECRET_PRINT_NAME = /(^|_)(KEY|TOKEN|SECRET|PASS(WORD|WD)?|CRED(ENTIALS?)?|AUTH(_TOKEN)?)(_|$)|API_?KEY/i;
 
 /** Commands whose read-only classification depends on every argument, so it can't hold behind xargs. */
 const XARGS_UNTRUSTED = new Set(["git", "rtk", "gh", "kubectl", "docker", "podman", "env", "printenv"]);
@@ -2448,7 +2451,48 @@ export function isDangerousCommand(command: string, ctx: PathContext): boolean {
  * directly or through a glob that can match a .env file (`.en*`, `.e[n]v`).
  */
 export function isSecretCommand(command: string, ctx?: SecretContext): boolean {
-	return scanUnits(command).some((unit) => unit.some((w) => isSecretFile(w, ctx) || globMatchesSecretFile(w)));
+	return scanUnits(command).some((unit) => unit.some((w) => isSecretFile(w, ctx) || globMatchesSecretFile(w))) || printsSecretVariable(command);
+}
+
+/**
+ * Copy of `command` where a `$` that single quotes or a backslash make literal
+ * is replaced by U+0001, so the scanner sees no variable reference there.
+ */
+function maskLiteralDollars(command: string): string {
+	let out = "";
+	let inSingle = false;
+	let inDouble = false;
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i] ?? "";
+		if (inSingle) {
+			if (ch === "'") inSingle = false;
+			out += ch === "$" ? "\u0001" : ch;
+			continue;
+		}
+		if (ch === "\\") {
+			const next = command[i + 1];
+			if (next === undefined) out += ch;
+			else {
+				out += `\\${next === "$" ? "\u0001" : next}`;
+				i++;
+			}
+			continue;
+		}
+		if (inDouble) {
+			if (ch === '"') inDouble = false;
+		} else if (ch === "'") inSingle = true;
+		else if (ch === '"') inDouble = true;
+		out += ch;
+	}
+	return out;
+}
+
+/** True when echo or printf is given a credential-named variable (`$NAME`, `${NAME}`) that the shell expands. */
+function printsSecretVariable(command: string): boolean {
+	return scanUnits(maskLiteralDollars(command)).some(([root = "", ...args]) => {
+		if (!["echo", "printf"].includes(basename(root))) return false;
+		return args.some((arg) => [...arg.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)].some((m) => SECRET_PRINT_NAME.test(m[1] ?? "")));
+	});
 }
 
 /** Commands whose arguments are not paths they read. */
@@ -2483,32 +2527,25 @@ export function outsideCwdReadPaths(command: string, ctx: PathContext): string[]
 		if (cwd !== undefined && !isSamePath(cwd, ctx.cwd, ctx.cwd) && isOutsideCwdRead(cwd, ctx)) found.add(cwd);
 		for (const arg of args) {
 			// $HOME is expanded first, so `$HOME/x` is judged like `~/x`; a `..` segment can climb out of the cwd anywhere in the word
-			const value = expandHome(arg.startsWith("-") ? arg.slice(arg.indexOf("=") + 1) : arg);
+			const value = expandHome(arg.startsWith("-") ? arg.slice(arg.indexOf("=") + 1) : arg, homedir(), cwd);
 			if (/^(\/|~|\.\.)|(^|\/)\.\.(\/|$)/.test(value) && isOutsideCwdRead(value, ctx)) found.add(value);
 		}
 	}
 	return [...found];
 }
 
-/** Names of the files pi writes for the model to read back (`<prefix>-<16 hex>.<ext>`): truncated tool output, MCP resources, codemode output. */
-const PI_OUTPUT_FILE = /^pi-(?:bash|powershell|output|mcp|codemode)-[0-9a-f]{16}\.[A-Za-z0-9]+$/;
-
 /**
- * True for a file pi itself wrote for this user in the OS temp dir (the full
- * text of truncated output; see pi's output-files.ts): a direct child of the
- * temp dir with pi's generated name, a regular file (not a link) owned by the
- * current user. Anything else in the temp dir is someone else's.
+ * True when `resolved` lies in the OS temp dir, judged by realpath, so a link
+ * in the temp dir to a file elsewhere is not in it (and a link from elsewhere
+ * into the temp dir is). Both spellings of the temp dir are compared (on macOS
+ * /var is /private/var), by path segment: /tmpfoo is not in /tmp. Reads there
+ * need no grant (pi's own output files, scratch files of other tools); writes,
+ * deletes and secret names are judged by their own rules.
  */
-export function isPiOutputFile(resolved: string): boolean {
-	try {
-		if (!PI_OUTPUT_FILE.test(basename(resolved))) return false;
-		const parent = dirname(resolved);
-		if (parent !== tmpdir() && parent !== realpathSync(tmpdir())) return false;
-		const info = lstatSync(resolved);
-		return info.isFile() && (typeof process.getuid !== "function" || info.uid === process.getuid());
-	} catch {
-		return false;
-	}
+export function isInTempDir(resolved: string): boolean {
+	const real = realpathLoose(resolved);
+	const temp = tmpdir();
+	return isInside(real, resolve(temp)) || isInside(real, realpathLoose(temp));
 }
 
 /**
@@ -2543,7 +2580,7 @@ export function isOutsideCwdRead(target: string, ctx: PathContext): boolean {
 	if (isInside(resolved, "/dev")) return false;
 	if (ctx.agentDir !== undefined && isInside(resolved, resolve(ctx.agentDir))) return false;
 	if (!existsSync(resolved)) return false;
-	if (isPiOutputFile(resolved)) return false;
+	if (isInTempDir(resolved)) return false;
 	if (ctx.outsideReadDirs !== undefined && ctx.outsideReadDirs.length > 0) {
 		const real = realpathLoose(resolved);
 		if (ctx.outsideReadDirs.some((dir) => isInside(real, dir))) return false;
@@ -2908,7 +2945,9 @@ function globMatches(glob: string, name: string): boolean {
  * How many "tracked by git" answers are cached (the check is one git process per file).
  */
 const TRACKED_CACHE_LIMIT = 200;
-const trackedFiles = new Map<string, boolean>();
+/** A cached answer is trusted for this long: a file untracked later (git rm --cached) is checked again. */
+const TRACKED_CACHE_TTL_MS = 30_000;
+const trackedFiles = new Map<string, { tracked: boolean; at: number }>();
 
 /**
  * True when git tracks `file` in the repository that holds it. That is how a
@@ -2919,8 +2958,9 @@ const trackedFiles = new Map<string, boolean>();
  * a timeout all answer false, so the search still asks.
  */
 function isTrackedFile(file: string): boolean {
+	const now = Date.now();
 	const cached = trackedFiles.get(file);
-	if (cached !== undefined) return cached;
+	if (cached !== undefined && now - cached.at < TRACKED_CACHE_TTL_MS) return cached.tracked;
 	let tracked = false;
 	try {
 		// the file's own name, from its own directory: no pattern a shell could expand
@@ -2930,7 +2970,7 @@ function isTrackedFile(file: string): boolean {
 		tracked = false;
 	}
 	if (trackedFiles.size >= TRACKED_CACHE_LIMIT) trackedFiles.clear();
-	trackedFiles.set(file, tracked);
+	trackedFiles.set(file, { tracked, at: now });
 	return tracked;
 }
 
@@ -3580,14 +3620,21 @@ function isCoveredSegment(segment: Segment, prefixes: readonly (readonly string[
 /**
  * Expands a leading `~`, `$HOME` or `${HOME}` (each followed by `/` or the end)
  * to the home dir, so `$HOME/.aws/credentials` is judged like `~/.aws/credentials`.
+ * With `pwd`, a leading `$PWD` or `${PWD}` expands to it the same way (the
+ * command's cwd); `${PWD:-x}` and `~user` are left as they are.
  */
-export function expandHome(path: string, home = homedir()): string {
+export function expandHome(path: string, home = homedir(), pwd?: string): string {
 	const prefix = /^(?:~|\$\{HOME\}|\$HOME)(?=\/|$)/.exec(path);
-	return prefix === null ? path : home + path.slice(prefix[0].length);
+	if (prefix !== null) return home + path.slice(prefix[0].length);
+	if (pwd !== undefined) {
+		const dir = /^(?:\$\{PWD\}|\$PWD)(?=\/|$)/.exec(path);
+		if (dir !== null) return pwd + path.slice(dir[0].length);
+	}
+	return path;
 }
 
 function resolvePath(path: string, cwd: string): string {
-	return resolve(cwd, expandHome(path));
+	return resolve(cwd, expandHome(path, homedir(), cwd));
 }
 
 function isInside(path: string, dir: string): boolean {
@@ -3676,6 +3723,25 @@ export function isSamePath(target: string, file: string, cwd: string): boolean {
 	return resolvePath(target, cwd) === resolve(file);
 }
 
+/**
+ * Where `resolved` really lands: its realpath, the target of a dangling link,
+ * or the nearest real ancestor of a missing path. Undefined when that is
+ * `resolved` itself, so there is nothing more to judge.
+ */
+function realTarget(resolved: string): string | undefined {
+	let real: string;
+	try {
+		real = realpathSync(resolved);
+	} catch {
+		try {
+			real = realpathLoose(resolve(dirname(resolved), readlinkSync(resolved)));
+		} catch {
+			real = realpathLoose(resolved);
+		}
+	}
+	return real === resolved ? undefined : real;
+}
+
 /** Protected path (ask in auto): agent dir, .git/.pi/..., shell rc files, ... */
 export function isProtectedPath(target: string, ctx: PathContext): boolean {
 	if (target === "") return false;
@@ -3683,18 +3749,31 @@ export function isProtectedPath(target: string, ctx: PathContext): boolean {
 	if (ctx.planFile !== undefined && resolved === resolve(ctx.planFile)) return false;
 	if (ctx.scratchDir !== undefined && isInsideScratch(resolved, ctx.scratchDir)) return false; // a cloned repo's .git is fair game there
 	if (ctx.agentDir !== undefined && isInside(resolved, resolve(ctx.agentDir))) return true;
-	if (resolved.split(sep).some((part) => PROTECTED_DIRS.has(part))) return true;
-	if (resolved.includes(`${sep}.config${sep}git`)) return true;
-	return PROTECTED_FILES.has(basename(resolved));
+	if (isProtectedName(resolved)) return true;
+	// a link is protected when where it points is
+	const real = realTarget(resolved);
+	if (real === undefined) return false;
+	if (ctx.agentDir !== undefined && isInside(real, realpathLoose(resolve(ctx.agentDir)))) return true;
+	// judged below the project's real location, so a project under a protected-looking directory is not flagged
+	const realCwd = realpathLoose(resolve(ctx.cwd));
+	return isProtectedName(isInside(real, realCwd) ? sep + relative(realCwd, real) : real);
 }
 
-/** Outside the working directory (ask in auto); the plan file is exempt. */
+function isProtectedName(path: string): boolean {
+	if (path.split(sep).some((part) => PROTECTED_DIRS.has(part))) return true;
+	if (path.includes(`${sep}.config${sep}git`)) return true;
+	return PROTECTED_FILES.has(basename(path));
+}
+
+/** Outside the working directory (ask in auto); the plan file is exempt. A link inside the project that points out of it is outside. */
 export function isOutsideCwd(target: string, ctx: PathContext): boolean {
 	if (target === "") return false;
 	const resolved = resolvePath(target, ctx.cwd);
 	if (ctx.planFile !== undefined && resolved === resolve(ctx.planFile)) return false;
 	if (ctx.scratchDir !== undefined && isInsideScratch(resolved, ctx.scratchDir)) return false;
-	return !isInside(resolved, resolve(ctx.cwd));
+	if (!isInside(resolved, resolve(ctx.cwd))) return true;
+	const real = realTarget(resolved);
+	return real !== undefined && !isInside(real, realpathLoose(resolve(ctx.cwd)));
 }
 
 export interface SecretContext {
@@ -3712,6 +3791,17 @@ export interface SecretContext {
  */
 export function isSecretFile(path: string, ctx?: SecretContext): boolean {
 	if (path === "") return false;
+	if (isSecretPath(path, ctx)) return true;
+	// a link is a secret when where it points is; a relative path only resolves with a cwd
+	if (ctx?.cwd === undefined && !/^[/~]/.test(expandHome(path))) return false;
+	const real = realTarget(resolvePath(path, ctx?.cwd ?? "/"));
+	if (real === undefined) return false;
+	const agentDir = ctx?.agentDir === undefined ? undefined : realpathLoose(resolve(ctx.agentDir));
+	return isSecretPath(real, { cwd: ctx?.cwd, agentDir });
+}
+
+/** The name and location checks of isSecretFile, on the path as given. */
+function isSecretPath(path: string, ctx?: SecretContext): boolean {
 	const name = basename(path);
 	if (/^\.env(\..+)?$/.test(name)) return !/\.(example|sample|template|dist)$/.test(name);
 	if (name.endsWith(".pub")) return false;

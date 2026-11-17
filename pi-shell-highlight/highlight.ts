@@ -485,9 +485,10 @@ const GUESSES: readonly { lang: string; patterns: readonly RegExp[] }[] = [
 	{
 		lang: "sql",
 		patterns: [
-			/^(?:select|with\s+\w+\s+as)\b/i,
+			/^select\s+(?:\*|distinct\b|\d|count\s*\(|[\w.,\s"`()*]+\bfrom\b)/i,
+			/^with\s+\w+\s+as\b/i,
 			/^insert\s+into\b/i,
-			/^update\s+\w+\s+set\b/i,
+			/^update\s+\w+\s+set\s+\w+\s*=/i,
 			/^delete\s+from\b/i,
 			/^(?:create|alter|drop)\s+(?:table|index|view|schema|database)\b/i,
 		],

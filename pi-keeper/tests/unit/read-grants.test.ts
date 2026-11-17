@@ -1,5 +1,5 @@
 /**
- * Outside-read directory grants, pi's own output files, and the service CLIs
+ * Outside-read directory grants, the OS temp dir (never an outside read), and the service CLIs
  * recognised as read-only (gh, kubectl, docker, podman, env, printenv).
  * Run: npm test
  */
@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { isOutsideCwdRead, isReadOnlyCommand, outsideCwdReadPaths, readGrantDir, type PathContext } from "../../extensions/utils.ts";
+import { isInTempDir, isOutsideCwdRead, isReadOnlyCommand, outsideCwdReadPaths, readGrantDir, type PathContext } from "../../extensions/utils.ts";
 import { evaluate, type EvalContext } from "../../extensions/rules.ts";
 import { GLOBAL_RULES, MODES } from "../../extensions/modes.ts";
 
@@ -16,7 +16,12 @@ const CWD = "/home/user/project";
 
 function withTree<T>(run: (base: string) => T): T {
 	const base = realpathSync(mkdtempSync(join(tmpdir(), "pdf-grants-")));
+	// The temp dir is `base/tmp`, inside the fixture rather than around it: the fixture's own files are
+	// outside the temp dir, which is never an outside read (see isInTempDir). Restored afterwards.
+	const savedTmp = process.env.TMPDIR;
+	process.env.TMPDIR = join(base, "tmp");
 	try {
+		mkdirSync(join(base, "tmp"));
 		mkdirSync(join(base, "data", "sub"), { recursive: true });
 		mkdirSync(join(base, "other"));
 		writeFileSync(join(base, "data", "a.txt"), "a");
@@ -25,6 +30,8 @@ function withTree<T>(run: (base: string) => T): T {
 		writeFileSync(join(base, "other", "c.txt"), "c");
 		return run(base);
 	} finally {
+		if (savedTmp === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = savedTmp;
 		rmSync(base, { recursive: true, force: true });
 	}
 }
@@ -123,38 +130,52 @@ test("a grant never covers secrets: they ask on their own rule, in every mode", 
 		}
 	}));
 
-test("pi's own output files in the temp dir are not outside reads; look-alikes are", () =>
+test("the temp dir is never an outside read: any file in it, pi's output files included, but a link out of it is", () =>
 	withTree((base) => {
 		const ctx: PathContext = { cwd: CWD };
 		const tmp = tmpdir();
+		// pi's own output file (the full text of truncated output): a temp-dir file like any other now
 		const piFile = join(tmp, `pi-bash-${"ab".repeat(8)}.log`);
 		writeFileSync(piFile, "output", { mode: 0o600 });
-		const cleanup = [piFile];
-		try {
-			assert.equal(isOutsideCwdRead(piFile, ctx), false);
-			const mcp = join(tmp, `pi-mcp-${"01".repeat(8)}.json`);
-			writeFileSync(mcp, "{}");
-			cleanup.push(mcp);
-			assert.equal(isOutsideCwdRead(mcp, ctx), false);
-			// wrong name shapes
-			for (const name of ["pi-bash-short.log", `pi-other-${"ab".repeat(8)}.log`, `pi-bash-${"ab".repeat(8)}`, `pi-bash-${"AB".repeat(8)}x.log`]) {
-				const path = join(tmp, name);
-				writeFileSync(path, "x");
-				cleanup.push(path);
-				assert.equal(isOutsideCwdRead(path, ctx), true, name);
-			}
-			// not a direct child of the temp dir
-			const nested = join(base, `pi-bash-${"cd".repeat(8)}.log`);
-			writeFileSync(nested, "x");
-			assert.equal(isOutsideCwdRead(nested, ctx), true);
-			// a symlink with pi's name is not a file pi wrote
-			const link = join(tmp, `pi-bash-${"ef".repeat(8)}.log`);
-			symlinkSync(join(base, "other", "c.txt"), link);
-			cleanup.push(link);
-			assert.equal(isOutsideCwdRead(link, ctx), true);
-		} finally {
-			for (const f of cleanup) rmSync(f, { force: true });
+		assert.equal(isOutsideCwdRead(piFile, ctx), false);
+		// any other file, and a nested one
+		const scratch = join(tmp, "scratch.txt");
+		writeFileSync(scratch, "x");
+		assert.equal(isOutsideCwdRead(scratch, ctx), false);
+		mkdirSync(join(tmp, "nested"));
+		writeFileSync(join(tmp, "nested", "n.txt"), "x");
+		assert.equal(isOutsideCwdRead(join(tmp, "nested", "n.txt"), ctx), false);
+		// a link in the temp dir to a file elsewhere is judged by its target: outside
+		symlinkSync(join(base, "other", "c.txt"), join(tmp, "link.txt"));
+		assert.equal(isOutsideCwdRead(join(tmp, "link.txt"), ctx), true);
+		// a link from elsewhere into the temp dir is judged by its target: inside
+		symlinkSync(scratch, join(base, "other", "into-tmp"));
+		assert.equal(isOutsideCwdRead(join(base, "other", "into-tmp"), ctx), false);
+		// a sibling that only shares the name prefix is not in the temp dir
+		mkdirSync(join(base, "tmpfoo"));
+		writeFileSync(join(base, "tmpfoo", "x"), "x");
+		assert.equal(isOutsideCwdRead(join(base, "tmpfoo", "x"), ctx), true);
+		assert.equal(isInTempDir(join(base, "tmpfoo", "x")), false);
+		assert.equal(isInTempDir(scratch), true);
+	}));
+
+test("the temp dir is readable in default, auto and plan, by the read tool and by cat; secrets there still ask", () =>
+	withTree((base) => {
+		const tmp = tmpdir();
+		const file = join(tmp, "scratch.txt");
+		writeFileSync(file, "x");
+		writeFileSync(join(tmp, ".env"), "S=1");
+		const ctx: EvalContext = { cwd: CWD, remembered: [] };
+		const action = (mode: "default" | "auto" | "plan", toolName: string, input: unknown) => evaluate(MODES[mode].permissions, GLOBAL_RULES, { toolName, input }, ctx).action;
+		for (const mode of ["default", "auto", "plan"] as const) {
+			assert.equal(action(mode, "read", { path: file }), "allow", `${mode} read`);
+			assert.equal(action(mode, "bash", { command: `cat ${file}` }), "allow", `${mode} cat`);
+			assert.equal(action(mode, "read", { path: join(tmp, ".env") }), "ask", `${mode} read .env`);
+			assert.equal(action(mode, "bash", { command: `cat ${join(tmp, ".env")}` }), "ask", `${mode} cat .env`);
 		}
+		// writes and removals in the temp dir are not reads: they still ask in default
+		assert.equal(action("default", "write", { path: join(tmp, "new.txt"), content: "x" }), "ask");
+		assert.equal(action("default", "bash", { command: `rm ${file}` }), "ask");
 	}));
 
 const READ_ONLY = [
@@ -368,6 +389,21 @@ test("$HOME and ${HOME} words get the same decision as ~ (secret file asks in ev
 test("$HOME and ${HOME} words name the home dir as an outside read, like ~", () => {
 	for (const word of ["~", "$HOME", "${HOME}"]) assert.equal(outsideCwdReadPaths(`cat ${word}`, { cwd: CWD }).length, 1, word);
 });
+
+test("$PWD and ${PWD} words expand to the command's cwd, so a `..` after them is judged", () =>
+	withTree((base) => {
+		const cwd = join(base, "data");
+		assert.equal(outsideCwdReadPaths("cat $PWD/../other/c.txt", { cwd }).length, 1);
+		assert.equal(outsideCwdReadPaths("cat ${PWD}/../other/c.txt", { cwd }).length, 1);
+		assert.deepEqual(outsideCwdReadPaths("cat $PWD/a.txt", { cwd }), [], "inside the cwd stays allowed");
+		for (const mode of ["default", "plan"] as const) {
+			assert.equal(decideIn(mode, "cat $PWD/../../../../etc/hosts", cwd), "ask", mode);
+			assert.equal(decideIn(mode, "cat ${PWD}/../../../../etc/hosts", cwd), "ask", mode);
+		}
+		// other forms stay as they were: ${PWD:-x} and ~user are not expanded
+		assert.deepEqual(outsideCwdReadPaths("cat ${PWD:-/x}/../other/c.txt", { cwd }), []);
+		assert.deepEqual(outsideCwdReadPaths("cat ~nobody/../other/c.txt", { cwd }), []);
+	}));
 
 test("a `..` segment that leaves the cwd is an outside read, the same as the absolute path", () =>
 	withTree((base) => {

@@ -119,7 +119,7 @@ export function childLaneLine({ mode, relay, parentAsks = false, activeTools }: 
  * tool is active. Kept to a single sentence per mode so it never bloats the
  * prompt; the lane line carries the details inside each child.
  */
-export function parentLaneHint(mode: "plan" | "default" | "auto", backgroundAuto: boolean, backgroundAsks = false): string {
+export function parentLaneHint(mode: "plan" | "default" | "auto", backgroundAutoFallback: boolean, backgroundAsks = false): string {
 	// One sentence on purpose (a test pins the single period): what a child may do, then how to fan out.
 	const fanOut = 'for a scripted fan-out pass the source inline as `options: { script: "…" }` — a fenced ```js workflow block is dropped once the reply has already made a tool call';
 	if (mode === "plan") {
@@ -127,7 +127,7 @@ export function parentLaneHint(mode: "plan" | "default" | "auto", backgroundAuto
 	}
 	const background = backgroundAsks
 		? "background (async) children ask the user through this session like foreground ones, so a gated call may wait for an answer"
-		: backgroundAuto
+		: backgroundAutoFallback
 			? "background (async) children run in the auto lane and can write inside this directory"
 			: "background (async) children have every mutation denied (no relay): they stage work in their scratch dir and report it, so copy it in yourself or launch them foreground";
 	return `Subagents you launch: scout = explorer, worker = implementer, reviewer = checker; each runs in its lane below whatever tools its agent lists, and ${background}; ${fanOut}.`;

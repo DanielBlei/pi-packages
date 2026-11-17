@@ -92,8 +92,8 @@ describe("parent: children load this extension in the parent's mode", () => {
 describe("parent: the /keeper setting lets an auto parent register child-auto", () => {
 	it("the mode prompt carries the one-sentence parent hint about the children it can launch", async () => {
 		const sb = sandboxed();
-		// background asks off: the hint then follows backgroundAuto (with them on, background children ask the user like foreground ones)
-		writeFileSync(join(sb.agentDir, "pi-keeper.json"), '{"backgroundAuto": true, "backgroundAsks": false}');
+		// background asks off: the hint then follows backgroundAutoFallback (with them on, background children ask the user like foreground ones)
+		writeFileSync(join(sb.agentDir, "pi-keeper.json"), '{"backgroundAutoFallback": true, "backgroundAsks": false}');
 		const h = await startPi({ sandbox: sb, activeTools: ["read", "bash", "edit", "write", "subagent"] });
 		await h.session();
 		await h.prompt("go");
@@ -115,9 +115,9 @@ describe("parent: the /keeper setting lets an auto parent register child-auto", 
 		assert.doesNotMatch(bare.modeBlocks().at(-1) ?? "", /scout = explorer/);
 	});
 
-	it("with autoSubagents on, auto registers child-auto; plan and default are unchanged", async () => {
+	it("with subagentsFollowAuto on, auto registers child-auto; plan and default are unchanged", async () => {
 		const sb = sandboxed();
-		writeFileSync(join(sb.agentDir, "pi-keeper.json"), '{"autoSubagents": true}');
+		writeFileSync(join(sb.agentDir, "pi-keeper.json"), '{"subagentsFollowAuto": true}');
 		const h = await startPi({ sandbox: sb });
 		await h.session();
 		assert.equal(registered(h), entryFile("default"));
@@ -131,22 +131,22 @@ describe("parent: the /keeper setting lets an auto parent register child-auto", 
 		assert.equal(registered(h), entryFile("default"));
 	});
 
-	it("/keeper auto-subagents on re-registers without a restart; off goes back; the file follows", async () => {
+	it("/keeper subagents-follow-auto on re-registers without a restart; off goes back; the file follows", async () => {
 		const sb = sandboxed();
 		const h = await startPi({ sandbox: sb });
 		await h.session();
 		await h.command("mode", "auto");
 		assert.equal(registered(h), entryFile("default"));
-		await h.command("keeper", "auto-subagents on");
+		await h.command("keeper", "subagents-follow-auto on");
 		assert.equal(registered(h), entryFile("auto"));
-		assert.equal(JSON.parse(readFileSync(join(sb.agentDir, "pi-keeper.json"), "utf8")).autoSubagents, true);
-		assert.ok(h.notifications.some((n) => /Allow subagents in auto mode: on/.test(n.message)));
-		await h.command("keeper", "auto-subagents off");
+		assert.equal(JSON.parse(readFileSync(join(sb.agentDir, "pi-keeper.json"), "utf8")).subagentsFollowAuto, true);
+		assert.ok(h.notifications.some((n) => /Subagents follow auto mode: on/.test(n.message)));
+		await h.command("keeper", "subagents-follow-auto off");
 		assert.equal(registered(h), entryFile("default"));
-		assert.equal(JSON.parse(readFileSync(join(sb.agentDir, "pi-keeper.json"), "utf8")).autoSubagents, false);
+		assert.equal(JSON.parse(readFileSync(join(sb.agentDir, "pi-keeper.json"), "utf8")).subagentsFollowAuto, false);
 		// the setting applies in auto only: default and plan registrations don't move
 		await h.command("mode", "plan");
-		await h.command("keeper", "auto-subagents on");
+		await h.command("keeper", "subagents-follow-auto on");
 		assert.equal(registered(h), entryFile("plan"));
 	});
 
@@ -154,30 +154,30 @@ describe("parent: the /keeper setting lets an auto parent register child-auto", 
 		const sb = sandboxed();
 		const h = await startPi({ sandbox: sb });
 		await h.session();
-		await h.command("keeper", "auto-subagents off");
+		await h.command("keeper", "subagents-follow-auto off");
 		assert.ok(h.notifications.some((n) => /\(unchanged\)/.test(n.message)));
 		// nothing to save: the file is not even created
 		assert.equal(existsSync(join(sb.agentDir, "pi-keeper.json")), false);
 	});
 
-	it("/keeper background-auto toggles and saves; the bridge registration is untouched", async () => {
+	it("/keeper background-auto-fallback toggles and saves; the bridge registration is untouched", async () => {
 		const sb = sandboxed();
 		const h = await startPi({ sandbox: sb });
 		await h.session();
 		assert.equal(registered(h), entryFile("default"));
 		assert.deepEqual(h.complete("keeper", "background"), [
-			{ value: "background-asks ", label: "background-asks", description: "Background subagent asks reach you: on" },
-			{ value: "background-auto ", label: "background-auto", description: "Background subagents run auto when asks cannot reach you: off" },
-			{ value: "background-ask-popup ", label: "background-ask-popup", description: "Background ask popup: idle" },
+			{ value: "background-asks ", label: "background-asks", description: "Background subagents can ask you: on" },
+			{ value: "background-auto-fallback ", label: "background-auto-fallback", description: "Run auto when a background subagent can't ask: off" },
+			{ value: "background-ask-popup ", label: "background-ask-popup", description: "When background asks pop up: always" },
 			{ value: "background-ask-timeout ", label: "background-ask-timeout", description: "Background ask timeout: 5 min" },
 		]);
 		// the child entry files read the config at launch, so no re-registration
-		await h.command("keeper", "background-auto on");
-		assert.equal(JSON.parse(readFileSync(join(sb.agentDir, "pi-keeper.json"), "utf8")).backgroundAuto, true);
-		assert.ok(h.notifications.some((n) => /Background subagents run auto when asks cannot reach you: on/.test(n.message)));
+		await h.command("keeper", "background-auto-fallback on");
+		assert.equal(JSON.parse(readFileSync(join(sb.agentDir, "pi-keeper.json"), "utf8")).backgroundAutoFallback, true);
+		assert.ok(h.notifications.some((n) => /Run auto when a background subagent can't ask: on/.test(n.message)));
 		assert.equal(registered(h), entryFile("default"));
-		await h.command("keeper", "background-auto off");
-		assert.equal(JSON.parse(readFileSync(join(sb.agentDir, "pi-keeper.json"), "utf8")).backgroundAuto, false);
+		await h.command("keeper", "background-auto-fallback off");
+		assert.equal(JSON.parse(readFileSync(join(sb.agentDir, "pi-keeper.json"), "utf8")).backgroundAutoFallback, false);
 	});
 
 	it("a wrong usage or unknown setting warns, and completions cover key and value", async () => {
@@ -186,17 +186,17 @@ describe("parent: the /keeper setting lets an auto parent register child-auto", 
 		await h.session();
 		await h.command("keeper", "nonsense");
 		assert.ok(h.notifications.some((n) => /Unknown setting: nonsense/.test(n.message)));
-		await h.command("keeper", "auto-subagents maybe");
-		assert.ok(h.notifications.some((n) => /Usage: \/keeper auto-subagents <on\|off>/.test(n.message)));
+		await h.command("keeper", "subagents-follow-auto maybe");
+		assert.ok(h.notifications.some((n) => /Usage: \/keeper subagents-follow-auto <on\|off>/.test(n.message)));
 		assert.deepEqual(
-			h.complete("keeper", "auto-su"),
-			[{ value: "auto-subagents ", label: "auto-subagents", description: "Allow subagents in auto mode: off" }],
+			h.complete("keeper", "subagents-f"),
+			[{ value: "subagents-follow-auto ", label: "subagents-follow-auto", description: "Subagents follow auto mode: off" }],
 		);
-		assert.deepEqual(h.complete("keeper", "auto-subagents o"), [
-			{ value: "auto-subagents on", label: "on", description: "Allow subagents in auto mode: off" },
-			{ value: "auto-subagents off", label: "off", description: "Allow subagents in auto mode: off" },
+		assert.deepEqual(h.complete("keeper", "subagents-follow-auto o"), [
+			{ value: "subagents-follow-auto on", label: "on", description: "Subagents follow auto mode: off" },
+			{ value: "subagents-follow-auto off", label: "off", description: "Subagents follow auto mode: off" },
 		]);
-		assert.equal(h.complete("keeper", "auto-subagents on x"), null);
+		assert.equal(h.complete("keeper", "subagents-follow-auto on x"), null);
 	});
 
 	it("without a UI the settings are listed as text", async () => {
@@ -204,10 +204,10 @@ describe("parent: the /keeper setting lets an auto parent register child-auto", 
 		const h = await startPi({ sandbox: sb, ui: "none" });
 		await h.session();
 		await h.command("keeper");
-		assert.ok(h.notifications.some((n) => /Allow subagents in auto mode: off/.test(n.message) && /Usage: \/keeper/.test(n.message)));
+		assert.ok(h.notifications.some((n) => /Subagents follow auto mode: off/.test(n.message) && /Usage: \/keeper/.test(n.message)));
 		// the argument form still works headless
-		await h.command("keeper", "auto-subagents on");
-		assert.equal(JSON.parse(readFileSync(join(sb.agentDir, "pi-keeper.json"), "utf8")).autoSubagents, true);
+		await h.command("keeper", "subagents-follow-auto on");
+		assert.equal(JSON.parse(readFileSync(join(sb.agentDir, "pi-keeper.json"), "utf8")).subagentsFollowAuto, true);
 	});
 
 	it("the panel toggles on Enter and Esc closes it", async () => {
@@ -215,11 +215,11 @@ describe("parent: the /keeper setting lets an auto parent register child-auto", 
 		const h = await startPi({ sandbox: sb });
 		await h.session();
 		await h.command("mode", "auto");
-		// Subagents tab, row 0: Allow subagents in auto mode
+		// Subagents tab, row 0: Subagents follow auto mode
 		h.answer(/pi-keeper settings/, { keys: [KEY.tab, KEY.enter, KEY.escape] });
 		await h.command("keeper");
 		assert.equal(registered(h), entryFile("auto"));
-		assert.equal(JSON.parse(readFileSync(join(sb.agentDir, "pi-keeper.json"), "utf8")).autoSubagents, true);
+		assert.equal(JSON.parse(readFileSync(join(sb.agentDir, "pi-keeper.json"), "utf8")).subagentsFollowAuto, true);
 	});
 });
 

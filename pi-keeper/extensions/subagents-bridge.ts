@@ -5,7 +5,7 @@
  * parent's UI). A relay-less child (a background child, another process)
  * decides its own mode in the entry it loads (relaylessChildMode): with
  * background asks on it keeps the mode of its entry, like a foreground child;
- * with them off it is default, or auto when the `background-auto` setting
+ * with them off it is default, or auto when the `background-auto-fallback` setting
  * enables it.
  *
  * pi-subagents keeps a process-global registry of "required child
@@ -59,15 +59,15 @@ export interface BridgeOptions {
 
 /**
  * The child mode that follows a parent mode. An auto parent gets auto
- * children only when `autoSubagents` is enabled (the `/keeper`
+ * children only when `subagentsFollowAuto` is enabled (the `/keeper`
  * setting): child-auto.ts itself falls back to default when the child's
  * asks cannot reach the parent's user (a relay-less child with background
- * asks off), unless the `background-auto` setting opts it into auto (see
+ * asks off), unless the `background-auto-fallback` setting opts it into auto (see
  * relaylessChildMode).
  */
-export function childModeFor(mode: ModeName, autoSubagents = false): ChildMode {
+export function childModeFor(mode: ModeName, subagentsFollowAuto = false): ChildMode {
 	if (mode === "plan") return "plan";
-	if (mode === "auto" && autoSubagents) return "auto";
+	if (mode === "auto" && subagentsFollowAuto) return "auto";
 	return "default";
 }
 
@@ -76,14 +76,14 @@ export function childModeFor(mode: ModeName, autoSubagents = false): ChildMode {
  * given the mode its entry file stands for (`registered`: child-default.ts or
  * child-auto.ts). With background asks on its asks reach the parent's user,
  * so it follows the parent like a foreground child. Without them every ask
- * is denied: default, or auto when the `background-auto` setting opts in.
+ * is denied: default, or auto when the `background-auto-fallback` setting opts in.
  * The child entries, the test mock and the parent's clamp
  * (ask-server.ts backgroundChildMode) all use this one formula, so the mode
  * the parent judges a request in is the mode the child runs in.
  */
-export function relaylessChildMode(registered: "default" | "auto", settings: { backgroundAsks: boolean; backgroundAuto: boolean }): "default" | "auto" {
+export function relaylessChildMode(registered: "default" | "auto", settings: { backgroundAsks: boolean; backgroundAutoFallback: boolean }): "default" | "auto" {
 	if (settings.backgroundAsks) return registered;
-	return settings.backgroundAuto ? "auto" : "default";
+	return settings.backgroundAutoFallback ? "auto" : "default";
 }
 
 // Extension code lives in extensions/, next to the child entry files
