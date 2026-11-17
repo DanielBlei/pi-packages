@@ -1,5 +1,5 @@
 /**
- * Plan approval, after Claude Code (its ExitPlanMode):
+ * Plan approval:
  *
  * - `PlanView` is the exit_plan_mode tool row: the plan rendered as Markdown
  *   in the transcript (so the wheel, PageUp/PageDown and search scroll it,
@@ -167,7 +167,7 @@ export type PlanChoice =
 export const PLAN_KEEP = "No, keep planning";
 export const FEEDBACK_PLACEHOLDER = "Tell pi what to change";
 const SELECTOR_QUESTION = "The plan is ready. Start working on it?";
-/** The Yes row shift+tab approves into: manual approval (second row), as in Claude Code. */
+/** The Yes row shift+tab approves into: manual approval (second row). */
 const MANUAL_ROW = 1;
 
 export interface PlanSelectorOptions {
@@ -188,7 +188,7 @@ export interface PlanSelectorOptions {
 
 /**
  * Asks what to do with the plan: Yes rows, or feedback in the inline field.
- * Keys follow Claude Code: ↑↓ and ctrl+n/ctrl+p move everywhere; j/k and the
+ * Keys: ↑↓ and ctrl+n/ctrl+p move everywhere; j/k and the
  * digits only off the field row (on it they type); Enter on a Yes row
  * approves, on the field sends the feedback (an empty field does nothing);
  * shift+tab approves with the feedback; ctrl+g edits the plan; Esc rejects.

@@ -179,9 +179,8 @@ sequenceDiagram
 
 Small local models (7-14B) follow short, positive, single-source directions and
 lose the thread when a rule is repeated with different wording or contradicted
-at the point of use. These are our own rules; other harnesses (Claude Code,
-OpenCode, ...) are comparison points, not templates. Practices we share with
-them: a short imperative plan reminder, an approval tool that reads the plan
+at the point of use. These are our own rules; other harnesses are comparison
+points, not templates. Practices we share with them: a short imperative plan reminder, an approval tool that reads the plan
 from a file and says when *not* to use it, an approval result that is one
 sentence followed by the plan, and a rejection that says "stop and wait"
 (adding the user's words when given).

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 - 2026-11-16
 
 - Workflow, `parallel`, `tasks` and `chain` children (pi-subagents 0.85 and
   newer) no longer fail in plan mode. pi-subagents makes a `subagent_launch`

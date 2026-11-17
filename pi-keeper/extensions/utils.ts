@@ -69,7 +69,7 @@ import {
 	WRITE_INDICATORS,
 } from "./modes.ts";
 
-/** Longer commands are never read-only (Claude Code uses the same cap). */
+/** Longer commands are never read-only (too long to classify with confidence). */
 export const MAX_COMMAND_LENGTH = 10_000;
 
 /**
@@ -457,7 +457,7 @@ const WRAPPER_VALUE_FLAGS: Record<string, Set<string>> = {
  * are not stripped (they stay the root and fail the allowlist).
  * loose (deny/ask matching): every assignment, `env` (incl. `-S` scripts),
  * flagged `xargs` and leading shell keywords (`{`, `then`, `do`, ...) are
- * stripped, as Claude Code does for deny rules.
+ * stripped, so a deny rule still sees the command that runs.
  */
 function stripPrefixes(argv: string[], globs: boolean[], strict: boolean): Segment | null {
 	let words = argv;
@@ -2401,7 +2401,7 @@ function isCriticalPath(resolved: string): boolean {
 }
 
 /**
- * rm/rmdir targeting a critical path (Claude Code's list): `/`, top-level
+ * rm/rmdir targeting a critical path: `/`, top-level
  * dirs, home, the cwd or a parent, `*` at the cwd root, a glob under a
  * variable. Recursive deletes of variable targets or paths outside the cwd
  * also count. `rm -rf build` inside the cwd does not, and neither does a

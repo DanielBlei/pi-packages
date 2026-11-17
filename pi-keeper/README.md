@@ -1,6 +1,6 @@
 # pi-keeper
 
-Permission modes and a project rulebook for pi, in the style of Claude Code / OpenCode: `default`, `auto` and `plan`, per-project rules, and a plan → execute handoff. Each mode decides which tool calls run, which ask you, and which are blocked.
+Permission modes and a project rulebook for pi: `default`, `auto` and `plan`, per-project rules, and a plan → execute handoff. Each mode decides which tool calls run, which ask you, and which are blocked.
 
 > A personal project, shared as is. pi-keeper reduces accidental damage by asking before risky actions. It is not a sandbox or a security boundary. Run untrusted work in a container or a VM.
 
@@ -64,7 +64,7 @@ Tested with pi 1.5.2, pi-subagents 0.89.0 and pi-cc-extensions 1.0.20. pi-cc-ext
 
 ## Acknowledgements
 
-Modes, the plan flow and the allow/ask/deny rule format follow [Claude Code](https://claude.com/claude-code). The command arity table in `extensions/modes.ts` is adapted from [OpenCode](https://github.com/anomalyco/opencode) (MIT, see [NOTICE](https://github.com/DanielBlei/pi-packages/blob/main/pi-keeper/NOTICE)). The rulebook's file shape is an idea from [oh-my-pi](https://github.com/can1357/oh-my-pi); no code was taken. Built on [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent).
+Rule spellings such as `Bash(git add:*)` and `WebFetch(domain:<host>)` are read for compatibility with the settings format [Claude Code](https://claude.com/claude-code) documents. The modes, the plan flow and everything else are written from scratch; nothing here comes from Claude Code's code or prompts. The command arity table in `extensions/modes.ts` is adapted from [OpenCode](https://github.com/anomalyco/opencode) (MIT, see [NOTICE](https://github.com/DanielBlei/pi-packages/blob/main/pi-keeper/NOTICE)). The rulebook's file shape is an idea from [oh-my-pi](https://github.com/can1357/oh-my-pi); no code was taken. Built on [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent). Not affiliated with or endorsed by Anthropic, OpenCode, oh-my-pi or the pi project; their names are used only to say what this works with or credits.
 
 ## License
 

@@ -13,7 +13,7 @@ const theme: StatusTheme = {
 	bold: (text) => `<b>${text}</b>`,
 };
 
-test("each mode chip is bold in its Claude Code-style color", () => {
+test("each mode chip is bold in its own color", () => {
 	assert.equal(formatModeStatus(theme, "default", false), "<b><mdLink>● default</mdLink></b>");
 	assert.equal(formatModeStatus(theme, "auto", false), "<b><warning>⏵⏵ auto</warning></b>");
 	assert.equal(formatModeStatus(theme, "plan", false), "<b><success>⏸ plan</success></b>");

@@ -66,4 +66,4 @@ Environment variables win over the file:
 
 ## License
 
-Apache-2.0, see [LICENSE](LICENSE).
+Apache-2.0, see [LICENSE](https://github.com/DanielBlei/pi-packages/blob/main/pi-session-topic/LICENSE).

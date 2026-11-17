@@ -107,7 +107,7 @@ export function readDirRuleFor(dir: string): string {
 const HOSTNAME = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/;
 
 /**
- * Parse a `Fetch(<host>)` entry, or its Claude Code spelling `WebFetch(domain:<host>)`: undefined
+ * Parse a `Fetch(<host>)` entry, or the `WebFetch(domain:<host>)` spelling Claude Code's settings use: undefined
  * when it isn't one, an error when the host isn't a plain hostname.
  */
 export function parseFetchHost(entry: string): ParsedFetchHost | { error: string } | undefined {
@@ -546,7 +546,7 @@ export function ensureGitExclude(root: string): void {
 /**
  * The `Bash(...)` grants of a prompt template's `allowed-tools` frontmatter:
  * a string (`Bash(git add *) Bash(git commit *)`) or a list of such strings.
- * Other tools are ignored; Claude Code's legacy `Bash(git commit:*)` is read
+ * Other tools are ignored; the legacy `Bash(git commit:*)` spelling is read
  * as `git commit *`. Each grant gets the same checks as an "Yes, and always allow"
  * rule; rejected ones are reported, never applied.
  */

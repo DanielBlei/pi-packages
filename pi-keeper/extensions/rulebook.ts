@@ -8,12 +8,12 @@
  * module: the contract and the mode prompts are paid for on every request and
  * dilute as they grow; a rule is paid for once, on the turn it catches.
  *
- * Modelled on oh-my-pi's rulebook (https://github.com/can1357/oh-my-pi), warn
- * path only: match the finished text,
+ * The rule file shape (description + condition + body), once-per-session by
+ * rule name, and skipping an uncompilable pattern with a warning are ideas from
+ * oh-my-pi's rulebook (https://github.com/can1357/oh-my-pi, MIT); no code was
+ * taken. This module is the warn path only: match the finished text,
  * deliver ONE hidden correction, record the fire, never interrupt the stream
- * and never touch a tool call. Taken from it: the file shape (description +
- * condition + body), once-per-session by rule name, and "an uncompilable pattern
- * is skipped with a warning, the session starts".
+ * and never touch a tool call.
  *
  * Deliberately free of pi types and of pi imports (like project-rules.ts), so
  * every rule in it is unit-tested with plain strings and temp dirs. That is also

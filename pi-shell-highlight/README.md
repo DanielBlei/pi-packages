@@ -55,4 +55,4 @@ The delimiter names the language, then a part of it (`PY_EOF` → python), then 
 
 ## License
 
-Apache-2.0, see [LICENSE](LICENSE).
+Apache-2.0, see [LICENSE](https://github.com/DanielBlei/pi-packages/blob/main/pi-shell-highlight/LICENSE).

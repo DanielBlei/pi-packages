@@ -1,0 +1,56 @@
+name: check
+
+# Runs the same gate as `make check` on every push to main and every PR.
+# Checks only: this workflow never publishes. A publish workflow needs its own
+# identity (npm trusted publishing) and belongs in a separate file.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22.19.0 is the floor in every package's engines field, 24 is current.
+        node: ['22.19.0', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run check
+
+  pack:
+    name: tarball contents
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci
+
+      # Fails if a package's `files` field stops shipping LICENSE, README,
+      # NOTICE, or starts shipping tests and scratch files.
+      - run: make pack-dry

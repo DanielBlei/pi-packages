@@ -1,7 +1,7 @@
 /**
  * pi-keeper
  *
- * Claude Code-style permission modes for Pi, cycled with Ctrl+Shift+M (or
+ * Permission modes for Pi, cycled with Ctrl+Shift+M (or
  * Alt+M):  default -> auto -> plan -> default
  *
  * - default: reads, read-only bash and read-only (MCP-annotated) tools run;

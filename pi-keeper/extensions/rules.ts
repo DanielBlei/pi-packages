@@ -3,7 +3,7 @@
  *
  * Each mode is a fallback action plus a list of rules. Every rule whose
  * tool and matcher match the call contributes its action; the strictest
- * wins (deny > ask > allow, as in Claude Code), so an allow rule can never
+ * wins (deny > ask > allow), so an allow rule can never
  * override a dangerous-command ask or the global privilege deny. When no
  * rule matches, the mode's fallback applies.
  */

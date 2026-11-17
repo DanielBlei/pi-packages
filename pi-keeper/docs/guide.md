@@ -116,8 +116,8 @@ can also edit `.pi/settings.local.json` by hand and list the hosts you use
 under `allow`, for example `"Fetch(github.com)"`, `"Fetch(api.github.com)"`,
 `"Fetch(raw.githubusercontent.com)"` (also `codeload.github.com`,
 `objects.githubusercontent.com`, `gist.github.com`,
-`gist.githubusercontent.com`). `WebFetch(domain:<host>)`, the Claude Code
-spelling, is accepted as the same rule, in `allow` lists only (anywhere else
+`gist.githubusercontent.com`). `WebFetch(domain:<host>)`, the spelling Claude Code's
+settings use, is accepted as the same rule, in `allow` lists only (anywhere else
 it is ignored with a warning). pi asks you to review a hand-edited file the
 next time it loads, and the rules apply once you accept. Subagents share the
 session grant with their parent both ways and read the project rule like any
@@ -445,7 +445,7 @@ session rules, limited to the run, with the same limits as a project rule
 (never dangerous or program-running commands). Prompt commands (`/commit`)
 and skill commands (`/skill:commit`) both work: the `Bash(...)` entries of
 the file's `allowed-tools` frontmatter become grants; other entries are
-ignored, and Claude Code's `Bash(git add:*)` spelling reads the same. No
+ignored, and the `Bash(git add:*)` spelling Claude Code uses reads the same. No
 prompt ships with the package (`pi.prompts` is `[]`); a skill such as the
 `commit` one carries its grants in its own frontmatter. `/permissions`
 lists the grants and removes single ones.

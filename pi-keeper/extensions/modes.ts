@@ -759,8 +759,8 @@ export const READ_ONLY_RTK_SUBCOMMANDS: string[] = [
 ];
 
 /**
- * Leading env assignments that keep a command read-only (Claude Code's
- * known-safe set). Any other assignment makes it not read-only.
+ * Leading env assignments that keep a command read-only (a short allowlist of
+ * display and locale variables). Any other assignment makes it not read-only.
  */
 export const SAFE_ENV_VARS = new Set(["LANG", "LANGUAGE", "NO_COLOR", "TERM", "FORCE_COLOR", "CI", "NODE_ENV", "RUST_BACKTRACE", "TZ", "COLUMNS", "PAGER", "GIT_PAGER"]);
 export const SAFE_ENV_PREFIXES = ["LC_"];

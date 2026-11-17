@@ -17,7 +17,7 @@ credentials.
   from doing something you didn't intend. It does not contain a hostile one:
   it can't see through `make deploy`, scripts or aliases, and in auto mode the
   model can edit the project rules file with a command. Use a container or VM
-  when that matters. Other harnesses (Claude Code, for one) say the same about rule-based asks.
+  when that matters. Other agent harnesses say the same about rule-based asks.
 - **Fail closed.** Anything that can't be parsed or resolved confidently is
   not read-only, not covered by a rule, or denied. The one deliberate
   exception is auto mode's write-outside-the-project check, which lets an
@@ -42,7 +42,7 @@ credentials.
 Each mode (`MODES` in `extensions/modes.ts`) is a **fallback action** plus a
 list of **rules**. Every rule that matches a tool call contributes its
 action; `evaluate` in `extensions/rules.ts` takes the strictest:
-**deny > ask > allow**, the precedence Claude Code uses. If nothing matches, the fallback
+**deny > ask > allow**, the usual precedence for allow/ask/deny rule sets. If nothing matches, the fallback
 applies (default: ask, auto: allow, plan: deny). Consequences:
 
 - An allow rule never overrides a dangerous-command ask, a secret ask or the
@@ -381,7 +381,7 @@ A mistake here is a silent action, so the classifier is an allowlist that fails 
 
 ## 6. Dangerous commands and denied privilege escalation
 
-The category list is `DANGEROUS_COMMANDS` in `extensions/modes.ts`, detected by `isDangerousCommand` in `extensions/utils.ts`, based on Claude Code's auto-mode block list. Dangerous commands ask in default and auto but are never remembered: a "don't ask again" on `git push` would turn a one-time decision into a standing one. They are denied in plan, because a plan is research and a dangerous step is never context-gathering. Privilege escalation is denied in every mode, auto included, because the model cannot type a password; you run it yourself. Protected paths (`PROTECTED_DIRS`, `PROTECTED_FILES` in `modes.ts`) ask in auto and default, since editing shell rc files or `.git/` changes how later commands behave.
+The category list is `DANGEROUS_COMMANDS` in `extensions/modes.ts`, detected by `isDangerousCommand` in `extensions/utils.ts`. Dangerous commands ask in default and auto but are never remembered: a "don't ask again" on `git push` would turn a one-time decision into a standing one. They are denied in plan, because a plan is research and a dangerous step is never context-gathering. Privilege escalation is denied in every mode, auto included, because the model cannot type a password; you run it yourself. Protected paths (`PROTECTED_DIRS`, `PROTECTED_FILES` in `modes.ts`) ask in auto and default, since editing shell rc files or `.git/` changes how later commands behave.
 
 ## 7. Remembered commands
 
@@ -400,7 +400,7 @@ Auto is "allow everything, except a fixed ask list": the `ask` rules of `MODES.a
 Code and flows: `extensions/plan-approval.ts`, `prompts/plan-mode.md`, `tests/integration/flows.test.ts`. The reasons behind the design:
 
 - The plan renders in the transcript, not in a dialog, so it scrolls, is searchable and survives a resume.
-- `exit_plan_mode` is an approval tool, the shape Claude Code uses. Its result echoes the approved plan, because compaction can lose the incremental edits that built the file.
+- `exit_plan_mode` is an approval tool: the model proposes, the user decides. Its result echoes the approved plan, because compaction can lose the incremental edits that built the file.
 - Declining ends the turn, so the model cannot re-ask or push ahead; "keep planning" with feedback is the continue path.
 - The one plan file is the only project-adjacent file writable without a dialog, since the model ticks off steps there while executing.
 
@@ -429,11 +429,9 @@ that rejects the beta there is no `models.json` setting that helps. Every
 other model pays a cache flush for the same change.
 
 So: freeze `system` and `tools`, and append what varies as messages. That is
-also the discipline Anthropic documents, and the one Claude Code and OpenCode
-converged on — Claude Code keeps its prompt and toolset constant across
-permission modes and delivers mode rules as reminders (full once, then a
-sparse pointer), OpenCode injects plan rules as synthetic user messages "near
-the tail so the cached prefix stays warm". `prefix.test.ts` is what keeps us
+also the discipline Anthropic's prompt-caching documentation describes. OpenCode,
+for one, injects plan rules as synthetic user messages "near the tail so the
+cached prefix stays warm". `prefix.test.ts` is what keeps us
 honest about it.
 
 Residual: an MCP server connecting mid-session adds tools, and a tool list we
