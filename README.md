@@ -6,9 +6,9 @@ Small extensions for [pi](https://www.npmjs.com/package/@earendil-works/pi-codin
 
 | Package | What it does | Install |
 |---|---|---|
-| [pi-keeper](pi-keeper) | Autonomy modes (`default`, `auto`, `plan`) and a project rulebook that gate every tool call | `pi install npm:pi-keeper` |
-| [pi-session-topic](pi-session-topic) | One-line session titles, so `/resume` shows a topic | `pi install npm:pi-session-topic` |
-| [pi-shell-highlight](pi-shell-highlight) | Shell command highlighting for permission dialogs | `pi install npm:pi-shell-highlight` |
+| [pi-keeper](pi-keeper) | Autonomy modes (`default`, `auto`, `plan`) and a project rulebook that gate every tool call (the main package) | `pi install npm:pi-keeper` |
+| [pi-session-topic](pi-session-topic) | One-line session titles, so `/resume` shows a topic; standalone | `pi install npm:pi-session-topic` |
+| [pi-shell-highlight](pi-shell-highlight) | Shell command highlighting for permission dialogs; pi-keeper uses it when loaded | `pi install npm:pi-shell-highlight` |
 
 Not on npm yet? Install a checkout: `pi install /path/to/pi-packages/<package>`.
 

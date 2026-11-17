@@ -167,7 +167,7 @@ import { isDialogLocked, withDialogLock } from "./dialog-lock.ts";
 import { permissionDialog, selectModeDialog, setPreviewTextColor } from "./dialog.ts";
 import { ccExtensionsStatus, ccSettingsPath, excludeExitPlanMode, type CcExtensionsStatus } from "./cc-extensions-compat.ts";
 import { commandHighlighter } from "./shell-highlight-bridge.ts";
-import { backgroundAsksEnabled, CONFIG_FILE, effectiveCommandColors, formatDuration, loadConfig, MAX_BACKGROUND_ASK_TIMEOUT_MS, MIN_BACKGROUND_ASK_TIMEOUT_MS, parseDuration, POPUP_MODES, PREVIEW_TEXT_COLORS, saveConfig, type BackgroundAskPopup, type KeeperConfig, type PreviewTextColor } from "./config.ts";
+import { backgroundAsksEnabled, CONFIG_FILE, DEFAULT_MODE_FLASH_SECS, effectiveCommandColors, formatDuration, loadConfig, MAX_BACKGROUND_ASK_TIMEOUT_MS, MIN_BACKGROUND_ASK_TIMEOUT_MS, parseDuration, POPUP_MODES, PREVIEW_TEXT_COLORS, saveConfig, type BackgroundAskPopup, type KeeperConfig, type PreviewTextColor } from "./config.ts";
 import { settingsPanel, type PanelItem, type PanelResult } from "./settings-panel.ts";
 import { asPlanDetails, PLAN_KEEP, PlanView, selectPlanAction, type PlanChoice, type PlanDetails } from "./plan-approval.ts";
 import { childCwdProblem } from "./child-cwd.ts";
@@ -315,6 +315,8 @@ function currentSystemPrompt(ctx: ExtensionContext): string {
 }
 
 const STATUS_KEY = "pi-keeper-mode";
+/** The widget that shows the mode for a moment after a switch (above the prompt). */
+const FLASH_KEY = "pi-keeper-mode-flash";
 const STATE_ENTRY = "pi-keeper";
 /** Status line showing how many background approvals wait. */
 const ASKS_STATUS_KEY = "pi-keeper-asks";
@@ -930,7 +932,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		try {
 			return await run();
 		} finally {
-			ctx.ui.setWorkingMessage();
+			syncWorkingMessage(ctx, true); // back to the mode-bearing text, or pi's default
 		}
 	}
 
@@ -1293,6 +1295,53 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		ctx.ui.setStatus(STATUS_KEY, formatModeStatus(ctx.ui.theme, currentMode, sessionEdits && currentMode === "default"));
 	}
 
+	let flashTimer: ReturnType<typeof setTimeout> | undefined;
+
+	/** Remove the mode line and its timer. The context may be stale at shutdown; a failed clear is harmless. */
+	function clearFlash(ctx: ExtensionContext): void {
+		if (flashTimer !== undefined) clearTimeout(flashTimer);
+		flashTimer = undefined;
+		try {
+			if (ctx.hasUI) ctx.ui.setWidget(FLASH_KEY, undefined);
+		} catch {
+			// the session is gone; nothing to clear
+		}
+	}
+
+	/**
+	 * The working row reads `<icon> <badge> · Working` in plan and auto mode (default mode keeps
+	 * pi's own text), so the mode is in front of you while a run is active. It stays set between
+	 * runs: pi shows it only while streaming. `modeFlashSecs: 0` turns it off with the flash.
+	 */
+	let workingMessageSet = false;
+	function syncWorkingMessage(ctx: ExtensionContext, force = false): void {
+		if (!ctx.hasUI) return;
+		try {
+			if (childMode !== undefined || currentMode === "default" || config.modeFlashSecs <= 0) {
+				// nothing to show: undo only what this function set (or what a dialog overwrote)
+				if (workingMessageSet || force) ctx.ui.setWorkingMessage();
+				workingMessageSet = false;
+				return;
+			}
+			const { color, icon, badge } = MODES[currentMode];
+			ctx.ui.setWorkingMessage(`${ctx.ui.theme.fg(color, `${icon} ${badge}`)} \u00b7 Working`);
+			workingMessageSet = true;
+		} catch {
+			// a stale context at shutdown; the row is gone with it
+		}
+	}
+
+	/** Show the mode, in its color, above the prompt for `modeFlashSecs` when idle; a new flash replaces the old one. */
+	function flashMode(mode: ModeName, ctx: ExtensionContext): void {
+		clearFlash(ctx);
+		// a run is active: the working row carries the mode instead of a line above the prompt
+		if (!ctx.hasUI || config.modeFlashSecs <= 0 || !ctx.isIdle()) return;
+		const { color, icon, badge } = MODES[mode];
+		ctx.ui.setWidget(FLASH_KEY, [ctx.ui.theme.fg(color, `${icon} ${badge}`)]);
+		flashTimer = setTimeout(() => clearFlash(ctx), config.modeFlashSecs * 1000);
+		flashTimer.unref?.();
+	}
+
 	function applyMode(mode: ModeName, ctx: ExtensionContext, options: { announce: boolean }): void {
 		const previousMode = currentMode;
 		currentMode = mode;
@@ -1316,6 +1365,8 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		refreshStatus(ctx);
 		persistState();
 		syncBridge(ctx);
+		syncWorkingMessage(ctx);
+		if (previousMode !== mode) flashMode(mode, ctx);
 
 		// The mode text is a conversation message now, not part of the system prompt (a changed
 		// prefix flushes the prompt cache and, behind some gateways, fails every later request of a
@@ -2722,6 +2773,17 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		return setting.kind === "duration" ? `<duration: ${formatDuration(setting.min)} to ${formatDuration(setting.max)}, e.g. 90s, 5m, 2m30s>` : `<${settingValues(setting).join("|")}>`;
 	}
 
+	/** The mode flash's panel choices, and the one nearest to a value that was hand-edited into the file. */
+	const MODE_FLASH_CHOICES = ["off", "1s", "2s", "3s", "5s"] as const;
+	function modeFlashChoice(secs: number): string {
+		if (secs <= 0) return "off";
+		return MODE_FLASH_CHOICES.slice(1).reduce((best, choice) => (Math.abs(Number.parseFloat(choice) - secs) < Math.abs(Number.parseFloat(best) - secs) ? choice : best));
+	}
+	function modeFlashNote(): string {
+		const secs = config.modeFlashSecs;
+		return secs <= 0 ? "off" : `${secs} s${secs === DEFAULT_MODE_FLASH_SECS ? " (default)" : ""}`;
+	}
+
 	/** Whether pi-shell-highlight's highlighter is registered now (read at each use, so a later load counts). */
 	const highlighterLoaded = (): boolean => commandHighlighter() !== undefined;
 
@@ -2941,6 +3003,24 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 					return undefined;
 				},
 			},
+			{
+				kind: "choice",
+				key: "mode-flash",
+				choices: MODE_FLASH_CHOICES,
+				value: () => modeFlashChoice(config.modeFlashSecs),
+				panelLabel: () => `Mode line after a switch: ${modeFlashNote()}`,
+				name: () => "Mode line after a switch",
+				label: () => `Mode line after a switch: ${modeFlashNote()}`,
+				summary: "Shows the mode, in its color: above the prompt for this long after a switch while idle (1s, 2s default, 3s or 5s), and in the working row in plan and auto mode while a run is active. off hides both. For another length between 0.1 and 10 seconds, set modeFlashSecs in the file.",
+				set(value, ctx) {
+					const secs = value === "off" ? 0 : Number.parseFloat(value);
+					const problem = saveConfig(getAgentDir(), { modeFlashSecs: secs });
+					if (problem !== undefined) return problem;
+					config = { ...config, modeFlashSecs: secs }; // the next switch uses it, no reload
+					syncWorkingMessage(ctx); // the working row follows at once
+					return undefined;
+				},
+			},
 		];
 	}
 
@@ -2957,7 +3037,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				label: "Subagents",
 				keys: ["subagents-follow-auto", "background-asks", "background-auto-fallback", "subagent-thinking", "background-ask-popup", "background-ask-timeout"],
 			},
-			{ id: "dialog", label: "Dialog", keys: ["command-colors"] },
+			{ id: "dialog", label: "Dialog", keys: ["command-colors", "mode-flash"] },
 		];
 	}
 
@@ -3351,7 +3431,16 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		await reviewRules(ctx);
 	});
 	// Children of a session that is gone must not keep loading this extension
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (_event, ctx) => {
+		clearFlash(ctx);
+		if (workingMessageSet && ctx.hasUI) {
+			try {
+				ctx.ui.setWorkingMessage();
+			} catch {
+				// a stale context; the row is gone with it
+			}
+		}
+		workingMessageSet = false;
 		bridge?.dispose();
 		bridge = undefined;
 		relayReg?.dispose();

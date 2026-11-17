@@ -244,6 +244,10 @@ export interface Harness {
 	readonly statuses: Array<string | undefined>;
 	/** The newest text set under a status key (`undefined` = cleared or never set). */
 	statusOf(key: string): string | undefined;
+	/** The newest lines set under a widget key (`undefined` = cleared or never set). */
+	widgetOf(key: string): string[] | undefined;
+	/** Every `theme.fg(color, text)` call, in order, so a test can check the color a line was drawn in. */
+	readonly themed: Array<{ color: string; text: string }>;
 	/** What `ctx.ui.getEditorText()` returns. */
 	editorText: string;
 	/** Runs one poll of the background-ask server (its timer is stepped by hand; see StartOptions). */
@@ -381,6 +385,8 @@ export async function startPi(options: StartOptions): Promise<Harness> {
 		notifications: [] as Harness["notifications"],
 		statuses: [] as Array<string | undefined>,
 		statusByKey: new Map<string, string | undefined>(),
+		widgetByKey: new Map<string, string[] | undefined>(),
+		themed: [] as Array<{ color: string; text: string }>,
 		editorText: "",
 		workingMessages: [] as Array<string | undefined>,
 		dialogs,
@@ -425,7 +431,7 @@ export async function startPi(options: StartOptions): Promise<Harness> {
 	}
 
 	const ui = {
-		theme: { fg: (_color: string, text: string): string => text, bold: (text: string): string => text, bg: (_color: string, text: string): string => text },
+		theme: { fg: (color: string, text: string): string => (harness.themed.push({ color, text }), text), bold: (text: string): string => text, bg: (_color: string, text: string): string => text },
 		async select(title: string, options: string[]): Promise<string | undefined> {
 			dialogs.push({ kind: "select", title, options: [...options] });
 			if (uiMode === "none") throw new Error(`dialog in a session without UI: ${JSON.stringify(title)}`);
@@ -553,6 +559,9 @@ export async function startPi(options: StartOptions): Promise<Harness> {
 		},
 		notify(message: string, type?: string): void {
 			harness.notifications.push({ message, type });
+		},
+		setWidget(key: string, lines: string[] | undefined): void {
+			harness.widgetByKey.set(key, lines);
 		},
 		setStatus(key: string, text: string | undefined): void {
 			harness.statuses.push(text);
@@ -720,6 +729,7 @@ export async function startPi(options: StartOptions): Promise<Harness> {
 			harness.editorText = value;
 		},
 		statusOf: (key) => harness.statusByKey.get(key),
+		widgetOf: (key) => harness.widgetByKey.get(key),
 		pollAsks: () => askTick?.(),
 		get dialogHoldMs() {
 			return harness.dialogHoldMs;

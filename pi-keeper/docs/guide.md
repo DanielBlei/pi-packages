@@ -697,9 +697,8 @@ shows an error and saves nothing until you fix or remove the file.
 The sections are: **Saving approvals to this project** (`project-command-approvals`, `project-read-approvals`,
 `project-exact-commands`), **Subagents** (`subagents-follow-auto`, `background-asks`,
 `background-auto-fallback`, `subagent-thinking`, `background-ask-popup`,
-`background-ask-timeout`) and **Dialog** (`command-colors`). `readOnlyTools`
-and `modeInstructions` are the two settings with no row: they take lists and
-long strings and are edited in the file by hand.
+`background-ask-timeout`) and **Dialog** (`command-colors`, `mode-flash`). `readOnlyTools`
+and `modeInstructions` take lists and long strings, so you edit them in the file by hand.
 
 - **Subagents follow auto mode** (`subagents-follow-auto`, default **off**): when on,
   children of an auto parent run in auto mode themselves — edits and
@@ -796,6 +795,13 @@ long strings and are edited in the file by hand.
   kept). Install it with `pi install npm:pi-shell-highlight`. A diff
   preview keeps its added/removed colors either way. Applies to the next dialog.
 
+- **Mode line after a switch** (`mode-flash`, file key `modeFlashSecs`, default **2**): after a
+  switch while idle, the mode (`⏸ plan`, `⏵⏵ auto`, `● default`) shows in its color above the
+  prompt for this long. While a run is active, the working row reads `⏵⏵ auto · Working` in plan
+  and auto mode. The panel offers `off`, `1s`, `2s`, `3s` and `5s`; in the file `0` is off and any
+  value from 0.1 to 10 works; `off` hides both. Nothing shows on session restore or in a subagent
+  child. pi-cc-extensions rewrites the working row, so with it loaded only the flash shows.
+
 Session grants (remembered commands, read directories, "all edits") stay in
 memory for the session and are never written to the project; foreground
 subagents share them through the relay and background subagents through a
@@ -854,7 +860,7 @@ allow/ask/deny entries, read directories, session grants).
 | Workflow-command grants | memory | one run |
 | Plans | `~/.pi/agent/plans/` | kept |
 | Scratch dir | `<tmp>/pi-keeper-XXXXXX`, mode `0700` | per session, never deleted (clean `<tmp>/pi-keeper-*` yourself) |
-| Settings (`readOnlyTools`, `subagentsFollowAuto`, `projectExactCommands`, `backgroundAutoFallback`, `backgroundAsks`, `projectCommandApprovals`, `projectReadApprovals`, `backgroundAskTimeoutMs`, `backgroundAskPopup`, `modeInstructions`, `commandColors`, `ccExtensionsPrompt`) | `~/.pi/agent/pi-keeper.json` (`/keeper` writes all of them but `readOnlyTools`, `modeInstructions` and `ccExtensionsPrompt`: you edit the first two by hand, and the pi-cc-extensions dialog writes the last one) | until you edit it; re-read at session start (the two background-ask settings from `/keeper` also apply live) |
+| Settings (`readOnlyTools`, `subagentsFollowAuto`, `projectExactCommands`, `backgroundAutoFallback`, `backgroundAsks`, `projectCommandApprovals`, `projectReadApprovals`, `backgroundAskTimeoutMs`, `backgroundAskPopup`, `modeInstructions`, `modeFlashSecs`, `commandColors`, `ccExtensionsPrompt`) | `~/.pi/agent/pi-keeper.json` (`/keeper` writes all of them but `readOnlyTools`, `modeInstructions` and `ccExtensionsPrompt`: you edit the first two by hand, and the pi-cc-extensions dialog writes the last one) | until you edit it; re-read at session start (the two background-ask settings from `/keeper` also apply live) |
 | Exact commands approved for the session | memory | until a new session starts (`/new`, `/resume`, fork) or exit |
 
 The session log's command text (`pi-keeper-permission` entries) redacts secrets:

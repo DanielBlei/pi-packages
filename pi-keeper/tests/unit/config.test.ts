@@ -56,7 +56,7 @@ test("unusable files fall back to the defaults with one warning", () => {
 test("loadConfig reads <agent dir>/pi-keeper.json; absent means defaults and no warning", () => {
 	const dir = mkdtempSync(join(tmpdir(), "pdf-config-"));
 	try {
-		assert.deepEqual(loadConfig(dir), { readOnlyTools: defaults, subagentsFollowAuto: false, projectExactCommands: false, backgroundAutoFallback: false, projectCommandApprovals: true, projectReadApprovals: false, ccExtensionsPrompt: true, modeInstructions: "message", backgroundAsks: true, backgroundAskTimeoutMs: 300000, backgroundAskPopup: "always", subagentThinking: "follow", commandColors: undefined, warnings: [] });
+		assert.deepEqual(loadConfig(dir), { readOnlyTools: defaults, subagentsFollowAuto: false, projectExactCommands: false, backgroundAutoFallback: false, projectCommandApprovals: true, projectReadApprovals: false, ccExtensionsPrompt: true, modeInstructions: "message", modeFlashSecs: 2, backgroundAsks: true, backgroundAskTimeoutMs: 300000, backgroundAskPopup: "always", subagentThinking: "follow", commandColors: undefined, warnings: [] });
 		writeFileSync(join(dir, CONFIG_FILE), '{"readOnlyTools": ["x_tool"]}');
 		assert.deepEqual([...loadConfig(dir).readOnlyTools], ["x_tool"]);
 		writeFileSync(join(dir, CONFIG_FILE), "{broken");
@@ -250,4 +250,14 @@ test("saveConfig writes the popup policy, the ask timeout and the subagent think
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+test("modeFlashSecs: default 2; 0 turns it off; 0.1 to 10 is kept; anything else is clamped or ignored with a warning", () => {
+	assert.equal(parseConfig("{}").modeFlashSecs, 2);
+	assert.equal(parseConfig('{"modeFlashSecs": 0}').modeFlashSecs, 0);
+	assert.equal(parseConfig('{"modeFlashSecs": 0.1}').modeFlashSecs, 0.1);
+	assert.equal(parseConfig('{"modeFlashSecs": 10}').modeFlashSecs, 10);
+	assert.deepEqual([parseConfig('{"modeFlashSecs": 0.05}').modeFlashSecs, parseConfig('{"modeFlashSecs": 0.05}').warnings.length], [0.1, 1]);
+	assert.deepEqual([parseConfig('{"modeFlashSecs": 60}').modeFlashSecs, parseConfig('{"modeFlashSecs": 60}').warnings.length], [10, 1]);
+	assert.deepEqual([parseConfig('{"modeFlashSecs": "3"}').modeFlashSecs, parseConfig('{"modeFlashSecs": "3"}').warnings.length], [2, 1]);
 });

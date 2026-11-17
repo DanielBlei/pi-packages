@@ -249,3 +249,37 @@ describe("/keeper subagent-thinking", () => {
 		h.assertNoPendingAnswers();
 	});
 });
+
+describe("/keeper mode-flash", () => {
+	it("sets off, 1s, 2s, 3s or 5s headlessly and saves seconds", async () => {
+		const sb = sandboxed();
+		const h = await parentOf(sb);
+		await h.command("keeper", "mode-flash off");
+		assert.equal(saved(sb).modeFlashSecs, 0);
+		assert.match(lastNote(h)?.message ?? "", /Mode line after a switch: off — saved/);
+		await h.command("keeper", "mode-flash 5s");
+		assert.equal(saved(sb).modeFlashSecs, 5);
+		await h.command("keeper", "mode-flash 1s");
+		assert.equal(saved(sb).modeFlashSecs, 1);
+	});
+
+	it("shows a hand-edited length as it is, and an unknown value is a usage error", async () => {
+		const sb = sandboxed({ modeFlashSecs: 2.5 });
+		const h = await parentOf(sb, "none");
+		await h.command("keeper", "");
+		assert.match(lastNote(h)?.message ?? "", /Mode line after a switch: 2.5 s — /);
+		await h.command("keeper", "mode-flash 7s");
+		assert.equal(saved(sb).modeFlashSecs, 2.5, "nothing saved");
+		assert.match(lastNote(h)?.message ?? "", /mode-flash <off\|1s\|2s\|3s\|5s>/);
+	});
+
+	it("the panel row sits after command colors in the Dialog section and cycles off -> 1s", async () => {
+		const sb = sandboxed({ modeFlashSecs: 5 });
+		const h = await parentOf(sb);
+		// Tab twice to Dialog, Down to the second row, Enter once: 5s -> off (wraps)
+		h.answer(/pi-keeper settings/, { keys: [KEY.tab, KEY.tab, KEY.down, KEY.enter, KEY.escape] });
+		await h.command("keeper");
+		assert.equal(saved(sb).modeFlashSecs, 0);
+		h.assertNoPendingAnswers();
+	});
+});
