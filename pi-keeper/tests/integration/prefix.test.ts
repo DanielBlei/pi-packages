@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { makeSandbox, planFileOf, restoreBell, scratchOf, startPi, type Harness, type Sandbox } from "../mocks/pi.ts";
-import { MODES } from "../../extensions/modes.ts";
+import { MODES, RTK_INSTALLED } from "../../extensions/modes.ts";
 import { RELAY_KEY } from "../../extensions/ui-relay.ts";
 import { contractSection, PLACEMENT_TEXT } from "../../extensions/prompt-blocks.ts";
 
@@ -155,7 +155,9 @@ describe("a subagent child's prompt is constant too", () => {
 		assert.equal(first, second, "a child's prompt is what it was on its first run");
 		// the order real runs needed: its own permissions first, then the agent's instructions
 		assert.match(first, /^# Subagent permissions/);
-		assert.match(first, /rtk grep/, "the rtk nudge is not lost for children");
+		// the nudge names rtk only where rtk is on PATH (CI has none)
+		if (RTK_INSTALLED) assert.match(first, /rtk grep/, "the rtk nudge is not lost for children");
+		else assert.doesNotMatch(first, /rtk grep/);
 		assert.match(first, /`todo` tool/, "nor is the todo path");
 		assert.ok(first.endsWith("\n\nBASE"));
 		assert.equal(child.modeBlocks().length, 0, "a child has no mode message: its mode is fixed");

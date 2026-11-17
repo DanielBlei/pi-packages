@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { KEY, makeSandbox, planFileOf, restoreBell, scratchOf, startPi, type Harness, type Sandbox, type SessionEntry } from "../mocks/pi.ts";
-import { MODES } from "../../extensions/modes.ts";
+import { MODES, RTK_INSTALLED } from "../../extensions/modes.ts";
 import { contractSection } from "../../extensions/prompt-blocks.ts";
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -1250,7 +1250,9 @@ describe("flow 13: mode persistence", () => {
 		const expected = `BASE\n\n<pi_keeper>\n${contractSection()}\n</pi_keeper>`;
 		const def = (await fresh.prompt("hi")).systemPrompt;
 		assert.equal(def, expected, "the system prompt is pi's plus the constant contract, nothing else");
-		assert.match(def, /rtk grep/);
+		// the search nudge names rtk only where rtk is on PATH (CI has none)
+		if (RTK_INSTALLED) assert.match(def, /rtk grep/);
+		else assert.doesNotMatch(def, /rtk grep/);
 		assert.ok(!def.includes(MODES.default.prompt), "the mode text is not in the prompt");
 		const defBlock = fresh.modeBlocks().at(-1) ?? "";
 		assert.ok(defBlock.includes(MODES.default.prompt));
