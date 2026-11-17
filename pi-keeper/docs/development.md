@@ -24,7 +24,7 @@ npm test                 # every suite under tests/
 npm run test:unit        # tests/unit: command analysis, per-mode rules, project rules, dialogs, plan approval, read and fetch grants
 npm run test:integration # tests/integration: user flows against a mock pi (no pi process)
 npm run typecheck        # needs the pi peer packages: from the repo root, make install, then make check
-npm run bench            # cost of a load, one tool call and one idle mailbox poll (docs/design.md, section 14)
+npm run bench            # cost of a load, one tool call and one idle mailbox poll (docs/design.md, section 13)
 npm run prompt-weight    # tokens this package injects per mode, and the rulebook warning (caps in tests/unit/prompt-weight.test.ts)
 npm run rulebook-check   # does each installed rule fire where it should, and stay quiet where it must
 npm run rulebook-fires   # how often each rule would have fired over past sessions (--evidence: was it backed?)
@@ -41,7 +41,7 @@ holds the same counts as budgets, so a regression breaks `npm test`.
 
 From the repo root, `make check` runs the type check and the tests for every
 package. In pi-keeper, `npm run check:charts` validates the Mermaid charts in
-`docs/` with Mermaid's own parser (see the repository's root README for all targets).
+`docs/` with Mermaid's own parser (run `make` at the repository root to list every target).
 
 pi host packages and `typebox` are `peerDependencies` only; bundling them
 creates duplicate registries. There is no build step: pi loads TS via `jiti`,

@@ -279,7 +279,7 @@ result, or say plainly that you did not run them.
 - `description` — one line, shown by `/rules` and on the card.
 - `condition` — one JavaScript regex, matched against the model's finished
   answer. Aim it at what a change could break, not at bookkeeping: the example
-  below fires on "all tests pass" and stays quiet on "created two files". A leading `(?i)`, `(?m)` or `(?s)` sets the flags (`g` is never used).
+  above fires on "all tests pass" and stays quiet on "created two files". A leading `(?i)`, `(?m)` or `(?s)` sets the flags (`g` is never used).
   Only the last 20 000 characters of an answer are scanned.
 - the body — the correction the model receives.
 
@@ -303,11 +303,11 @@ What happens on a match (this is the whole lifecycle):
 4. Nothing is interrupted and no tool call is blocked or re-judged. That is the
    promise, and `intent.test.ts` pins it.
 
-Commands and failure modes (`/rules` in the theme's colours, one rule on Enter):
+Commands and failure modes (`/rules` in the theme's colors, one rule on Enter):
 
 - **`/rules`** opens the rulebook: every rule with its name, its source (user
   or project), whether it fired this session, and its description — in the
-  theme's colours, not as a muted notification. Enter opens one rule (pattern,
+  theme's colors, not as a muted notification. Enter opens one rule (pattern,
   file, body), Esc goes back, Esc again closes. Without a TUI (print, RPC) it
   notifies the same facts as text; `/rules <name>` prints one rule in any mode.
   Permission rules are `/permissions`.
@@ -365,8 +365,8 @@ unavailable while planning.
    `~/.pi/agent/plans/<project>-<date>-<time>-<rand>.md` (`- [ ]` steps),
    and calls `exit_plan_mode`; the terminal rings. The plan opens with a
    **`## Plain-language explanation`** — the goal, what exists now, the
-   changes, the main risk and what needs your approval, in ASD-STE100 short
-   sentences (one instruction each; the `asd-ste100` skill covers the style) — and
+   changes, the main risk and what needs your approval, in short sentences
+   in the style of ASD-STE100 Simplified Technical English (one instruction each) — and
    the technical sections follow.
    The plan appears in the
    transcript as formatted Markdown, with a selector docked under it. It is
@@ -445,8 +445,9 @@ session rules, limited to the run, with the same limits as a project rule
 (never dangerous or program-running commands). Prompt commands (`/commit`)
 and skill commands (`/skill:commit`) both work: the `Bash(...)` entries of
 the file's `allowed-tools` frontmatter become grants; other entries are
-ignored, and the `Bash(git add:*)` spelling Claude Code uses reads the same. No
-prompt ships with the package (`pi.prompts` is `[]`); a skill such as the
+ignored, and the `Bash(git add:*)` spelling Claude Code uses reads the same. The
+package registers no prompt templates (`pi.prompts` is `[]`; the files in
+`prompts/` are pi-keeper's own mode text); a skill such as the
 `commit` one carries its grants in its own frontmatter. `/permissions`
 lists the grants and removes single ones.
 
@@ -535,7 +536,7 @@ follow` (the default) and a child runs at the **higher** of its own level and
 your session's current one — raise the parent to `high` (Alt+T) and the next
 child run is `high` too, with no file edited. Lowering the parent below a role's
 own level does not lower the child; the role keeps the floor it was given.
-`subagent-thinking role` restores plain upstream behaviour: every child keeps
+`subagent-thinking role` restores plain upstream behavior: every child keeps
 exactly the level its agent file (or a launch) asked for.
 
 Model and effort stay per-role and per-run: pin one with
@@ -548,9 +549,9 @@ ceiling on all of it.
 ### Subagents get your skills
 
 There is no
-`subagents.defaultSkills`, but a settings override carries the field, so this
-machine enables it for the three roles we delegate to
-(`~/.pi/agent/settings.json`, per role — add any other agent the same way):
+`subagents.defaultSkills`, but a settings override carries the field, so you
+can enable it per role in `~/.pi/agent/settings.json` (this example covers
+`scout`, `worker` and `reviewer`; add any other agent the same way):
 
 ```json
 {
@@ -568,7 +569,7 @@ A child then gets the same `<available_skills>` catalog you do (metadata only;
 it reads the file when the task matches). Two consequences worth knowing:
 
 - **It is machine-local.** The setting lives in your pi config, not
-  in this repo, so a fresh machine needs those three lines again. A stale override wins over
+  in the project, so a fresh machine needs those lines again. A stale override wins over
   everything else, which is why `agentOverrides` is the one place to look when a
   child behaves unlike its agent file.
 - **Skill files are readable without an ask.** Reading `<skill-dir>/SKILL.md` and
@@ -845,7 +846,6 @@ allow/ask/deny entries, read directories, session grants).
   dir opens up. The allowance covers every artifact dir, not just the child's
   own: the id in the path is not the child's run id, so it can't be matched.
 
-
 ## Where state lives
 
 | What | Where | Lasts |
@@ -871,7 +871,6 @@ options and credential-like `NAME=value` assignments are written as `***`.
 decides what is allowed, asked or denied), so a switch changes no tool list and
 tools from other packages and MCP keep their state.
 
-
 ## Compatibility
 
 Tested with pi 1.5.2 (`@earendil-works/pi-coding-agent`), pi-subagents 0.89.0
@@ -892,8 +891,7 @@ rendering.
   README. The script `scripts/exclude_exit_plan_mode.py` in a checkout of this
   repository does the same edit from a shell.
 - **Footer colors:** upstream pi-cc-extensions strips ANSI colors from
-  extension status chips. With an unpatched pi-cc-extensions the badges
-  render dim.
+  extension status chips, so pi-keeper's badges render dim there.
 - **Claude models behind a gateway, and mode switches:** the system prompt and
   the tool list are the same in every mode, so a switch does not change the
   request prefix. Claude's signed thinking blocks are bound to that prefix, and

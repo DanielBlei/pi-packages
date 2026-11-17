@@ -3,7 +3,7 @@
 Gives every pi session a **one-line topic**, so `/resume` (and `pi -r`) shows a readable name instead of the whole first prompt.
 
 ```
-before   when I do /resume in pi I see full blow first prompt, can we have ...
+before   when I run /resume in pi I see the whole first prompt, can we show ...
 after    Session topics in the resume picker
 ```
 
@@ -66,4 +66,4 @@ Environment variables win over the file:
 
 ## License
 
-Apache-2.0, see [LICENSE](https://github.com/DanielBlei/pi-packages/blob/main/pi-session-topic/LICENSE).
+Apache-2.0, see [LICENSE](https://github.com/DanielBlei/pi-packages/blob/main/pi-session-topic/LICENSE) and [NOTICE](https://github.com/DanielBlei/pi-packages/blob/main/pi-session-topic/NOTICE).

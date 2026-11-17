@@ -51,6 +51,7 @@ jobs:
 
       - run: npm ci
 
-      # Fails if a package's `files` field stops shipping LICENSE, README,
-      # NOTICE, or starts shipping tests and scratch files.
-      - run: make pack-dry
+      # Fails if a package's `files` field stops shipping LICENSE, NOTICE,
+      # README, CHANGELOG or a pi entry point, or starts shipping tests,
+      # scripts or docs (scripts/check-pack.mjs).
+      - run: make pack-check

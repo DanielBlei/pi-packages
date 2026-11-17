@@ -1,7 +1,7 @@
 {
 	"name": "pi-shell-highlight",
 	"version": "0.1.0",
-	"description": "Colors shell commands in pi's permission dialogs: command names stand out and heredocs get their own language colors.",
+	"description": "Shell command highlighting for pi's permission dialogs, used by pi-keeper: command names stand out and heredocs get their own language colors.",
 	"license": "Apache-2.0",
 	"author": "Daniel Blei",
 	"bugs": {

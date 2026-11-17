@@ -65,14 +65,14 @@ applies (default: ask, auto: allow, plan: deny). Consequences:
   sometimes needs a test run); dangerous bash is denied, not asked, because it
   is never context-gathering and a dialog would invite the model to run it.
 
-The charts under "Behaviour at a glance" draw all three.
+The charts under "Behavior at a glance" draw all three.
 
-### Behaviour at a glance
+### Behavior at a glance
 
 The charts show what the rule tables in `modes.ts` do. They are drawn as
 **layers**, not as an if-chain: `evaluate` takes the strictest matching rule
 (deny, then ask, then allow), so an ask below never has to "wait for" an allow
-above it, and the order of the rules is not behaviour. Read each mode chart as
+above it, and the order of the rules is not behavior. Read each mode chart as
 *any deny rule matches → deny; else any ask rule matches → ask; else any allow
 rule matches → allow; else the fallback*. The global rules (first chart) take
 part in every mode, so a global deny or ask beats a mode's allow.
@@ -269,8 +269,8 @@ tools, and tools this package doesn't manage (`MANAGED_TOOLS`) are never swapped
 
 Tools from other packages carry no annotations, so `readOnlyTool` also
 matches the names in `readOnlyTools` of `<agent dir>/pi-keeper.json`
-(`extensions/config.ts`; defaults `web_search`, `fetch_content`,
-`get_search_content`, `source_check`, `code_overview`, `lsp_diagnostics`). `mcp` (it runs any
+(`extensions/config.ts`; the defaults in `DEFAULT_READ_ONLY_TOOLS` include `web_search`,
+`fetch_content`, the `lsp_*` readers and the MCP resource readers). `mcp` (it runs any
 MCP sub-tool, destructive ones included) and `subagent` can't be listed: the
 name hides what runs, so config.ts rejects them with a warning and
 `NEVER_LISTED_TOOLS` in `rules.ts` ignores them anyway. Plan mode used to deny these and tell the model to "add it to the

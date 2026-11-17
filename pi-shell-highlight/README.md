@@ -15,7 +15,7 @@ pi's own highlighter is a grammar: it cannot know that `git`, `tar` or `rm` are 
 pi install npm:pi-shell-highlight    # every session; writes ~/.pi/agent/settings.json
 ```
 
-`pi update --extensions` picks up new releases. On its own it draws nothing: install it with a consumer, then for pi-keeper set `/keeper` → `previewTextColor` to `shell-highlight` (`builtin-syntax` is the old look). From a checkout: `pi -e ./pi-shell-highlight`.
+`pi update --extensions` picks up new releases. On its own it draws nothing: install it with a consumer. pi-keeper picks it up by itself; `/keeper` → `command-colors` switches to another style (`builtin-syntax` is pi's own highlighter). From a checkout: `pi -e ./pi-shell-highlight`.
 
 ## The contract
 
@@ -55,4 +55,4 @@ The delimiter names the language, then a part of it (`PY_EOF` → python), then 
 
 ## License
 
-Apache-2.0, see [LICENSE](https://github.com/DanielBlei/pi-packages/blob/main/pi-shell-highlight/LICENSE).
+Apache-2.0, see [LICENSE](https://github.com/DanielBlei/pi-packages/blob/main/pi-shell-highlight/LICENSE) and [NOTICE](https://github.com/DanielBlei/pi-packages/blob/main/pi-shell-highlight/NOTICE).

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 - 2026-11-16
+## 0.1.0 - 2026-11-17
 
 First public release.
 
@@ -12,5 +12,5 @@ First public release.
   by its language.
 - `<<<` here-strings are not read as heredocs, so the lines after them are
   shell.
-- Prose that begins with Select or Update is not coloured as SQL unless it has
+- Prose that begins with Select or Update is not colored as SQL unless it has
   a SQL shape, such as a `from` clause.

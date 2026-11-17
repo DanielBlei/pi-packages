@@ -1,5 +1,5 @@
 /**
- * Ties the Mermaid flowcharts in docs/design.md ("Behaviour at a glance") to
+ * Ties the Mermaid flowcharts in docs/design.md ("Behavior at a glance") to
  * the rule tables in modes.ts: per mode and per layer (deny / ask / allow) the
  * rules named in the chart must be exactly the rules in `MODES`, and the
  * fallback must match. Names and layers only, not arrows; whether Mermaid

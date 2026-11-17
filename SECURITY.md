@@ -23,8 +23,9 @@ choose **Report a vulnerability**. Include:
 - what you expected it to decide.
 
 This is a personal project maintained on a best-effort basis. I aim to
-acknowledge a report within about a week, but this is not a guarantee. A confirmed bypass is fixed in a new release and
-credited in the CHANGELOG, unless you prefer not to be named.
+acknowledge a report within about a week, but this is not a guarantee. A
+confirmed bypass is fixed in a new release and credited in the CHANGELOG,
+unless you prefer not to be named.
 
 ## Scope
 

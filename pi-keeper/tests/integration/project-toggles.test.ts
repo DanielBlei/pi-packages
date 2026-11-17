@@ -11,7 +11,7 @@ import { after, afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { makeSandbox, restoreBell, startPi, type Harness, type Sandbox } from "../mocks/pi.ts";
 import { RELAY_KEY } from "../../extensions/ui-relay.ts";
 import { parseRules } from "../../extensions/project-rules.ts";
@@ -130,7 +130,7 @@ describe("Read(<dir>/**) entries", () => {
 		const parsed = parseRules({
 			"pi-keeper": {
 				permissions: {
-					allow: ["Read(/**)", `Read(${home}/**)`, "Read(/home/**)", "Read(rel/dir/**)", "Read(/srv/data)", "Read(/srv/data/**)"],
+					allow: ["Read(/**)", `Read(${home}/**)`, `Read(${dirname(home)}/**)`, "Read(rel/dir/**)", "Read(/srv/data)", "Read(/srv/data/**)"],
 					deny: ["Read(/srv/data/**)"],
 				},
 			},

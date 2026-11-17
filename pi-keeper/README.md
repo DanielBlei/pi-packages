@@ -17,7 +17,7 @@ pi install npm:pi-keeper    # every session; writes ~/.pi/agent/settings.json
 | Mode | Use it for | Runs without asking | Asks | Blocked |
 |---|---|---|---|---|
 | `default` (blue) | everyday work: you approve changes | reads, searches, read-only bash, anything your rules cover, read-only tools | edits, other bash, other tools | `sudo` & co |
-| `auto` (yellow) | a trusted task you are watching | almost everything, including deletes inside the project | dangerous or destructive commands, protected paths, writes outside the project, secrets | `sudo` & co |
+| `auto` (yellow) | a trusted task you are watching | almost everything, including deletes inside the project | dangerous or destructive commands, protected paths, writes outside the project, secrets, the first outside read | `sudo` & co |
 | `plan` (green) | researching and writing a plan | reads, read-only bash, the plan file, the scratch dir | other bash | edits, other tools, dangerous commands, `sudo` & co |
 
 In plan mode the agent writes a plan file and calls `exit_plan_mode`; you then pick `auto`, or `default` with approval for each edit. The [guide](https://github.com/DanielBlei/pi-packages/blob/main/pi-keeper/docs/guide.md#modes-at-a-glance) has the full action-by-action matrix.
@@ -30,6 +30,7 @@ In plan mode the agent writes a plan file and calls `exit_plan_mode`; you then p
 | `/mode` | Pick a mode |
 | `/plan [prompt\|open]` | Start plan mode, or open the plan |
 | `/permissions` | List every rule with its source; remove the ones you pick |
+| `/approvals` | Open the permission asks that background subagents are waiting on |
 | `/rules` | Open the rulebook: rules that fire when the model slips |
 | `/keeper [setting value]` | Settings panel, or set one directly |
 
@@ -68,4 +69,4 @@ Rule spellings such as `Bash(git add:*)` and `WebFetch(domain:<host>)` are read 
 
 ## License
 
-Apache-2.0, see [LICENSE](https://github.com/DanielBlei/pi-packages/blob/main/pi-keeper/LICENSE).
+Apache-2.0, see [LICENSE](https://github.com/DanielBlei/pi-packages/blob/main/pi-keeper/LICENSE) and [NOTICE](https://github.com/DanielBlei/pi-packages/blob/main/pi-keeper/NOTICE).

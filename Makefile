@@ -43,6 +43,10 @@ typecheck: ## tsc --noEmit for every package
 pack-dry: ## Show what each package would publish (no tarball written)
 	@for pkg in $(PI); do npm pack --dry-run --workspace $$pkg; done
 
+.PHONY: pack-check
+pack-check: ## Fail if a tarball misses LICENSE, NOTICE, README, CHANGELOG or an entry point, or ships tests, scripts or docs
+	@node scripts/check-pack.mjs $(PI)
+
 .PHONY: pack
 pack: ## Write a tarball per package into ./dist
 	@mkdir -p dist

@@ -34,6 +34,3 @@ https://github.com/anomalyco/opencode/blob/219b473e660994ac69a0c5d753ac65da951f3
 
 The @earendil-works/pi-* packages that each package lists as peer dependencies
 are not bundled here: the pi installation that loads the package provides them.
-
-Add a section above when a package starts shipping code from another
-project, with the project's name, copyright line and license.

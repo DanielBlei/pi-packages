@@ -2,15 +2,15 @@
 
 Small extensions for [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent), the terminal coding agent, that I use day to day. Each package installs on its own.
 
-> **Status:** 0.x. Used daily, but settings and behaviour can change between releases.
+> **Status:** 0.x. Used daily, but settings and behavior can change between releases.
 
 | Package | What it does | Install |
 |---|---|---|
-| [pi-keeper](pi-keeper) | Autonomy modes (`default`, `auto`, `plan`) and a project rulebook that gate every tool call (the main package) | `pi install npm:pi-keeper` |
+| [pi-keeper](pi-keeper) | Permission modes (`default`, `auto`, `plan`) and per-project allow, ask and deny rules that decide every tool call (the main package) | `pi install npm:pi-keeper` |
 | [pi-session-topic](pi-session-topic) | One-line session titles, so `/resume` shows a topic; standalone | `pi install npm:pi-session-topic` |
 | [pi-shell-highlight](pi-shell-highlight) | Shell command highlighting for permission dialogs; pi-keeper uses it when loaded | `pi install npm:pi-shell-highlight` |
 
-Not on npm yet? Install a checkout: `pi install /path/to/pi-packages/<package>`.
+From a checkout: `pi install /path/to/pi-packages/<package>`.
 
 ## Risk
 

@@ -13,7 +13,7 @@ text catalogue; this file is the operator's view.
 | The correction text | `prompts/rule-warning.md` (`RULE_WARNING`) | one header, `{{rules}}` slot |
 | The fire path | `extensions/index.ts`, `pi.on("turn_end")` | one hidden `pi-keeper-rule` message + one `pi-keeper-rule-fired` entry per rule; `continue` only when the turn had no tool results, at most `RULES_PER_RUN_CAP` per run |
 | The card | same file, `pi.registerEntryRenderer` | `⚠ rule fired: <name> — <description>`; TUI only |
-| The view | `extensions/rules-view.ts` | `/rules` in theme colours, `Enter` for one rule; `rulesText` for no-TUI |
+| The view | `extensions/rules-view.ts` | `/rules` in theme colors, `Enter` for one rule; `rulesText` for no-TUI |
 | Trust gate for project files | `project-rules.ts` (`trustedHash`, `recordTrust`) + `reviewRules` in `index.ts` | one review per changed file set |
 | Tools | `scripts/rulebook-check.ts`, `scripts/rulebook-fires.ts` | intent check and corpus estimate |
 
@@ -111,5 +111,5 @@ entry type and is not affected by the rulebook.
 
 ## Cheat sheet
 
-In a session: `/rules` (coloured view), `/rules <name>` (one rule, plain),
+In a session: `/rules` (colored view), `/rules <name>` (one rule, plain),
 `/permissions` (a different thing: what may run).
