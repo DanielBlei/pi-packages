@@ -1,7 +1,7 @@
 {
 	"name": "pi-keeper",
 	"version": "0.1.0",
-	"description": "Autonomy modes and a project rulebook for pi: default, auto and plan modes, per-project allow/ask/deny rules that persist, plan review in the transcript, and subagents that inherit the parent's mode.",
+	"description": "Permission modes for pi (default, auto and plan) with per-project allow, ask and deny rules and a plan you approve before any edit.",
 	"license": "Apache-2.0",
 	"author": "Daniel Blei",
 	"bugs": {

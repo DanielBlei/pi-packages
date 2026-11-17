@@ -2,7 +2,7 @@
 
 How the package is put together and where to change things. Start here for a
 task; read [design.md](design.md) for *why* a rule exists and
-[../README.md](../README.md) for what the user sees. Code wins over this file:
+[guide.md](guide.md) for what the user sees. Code wins over this file:
 it names files and symbols, not line numbers, so it stays true longer.
 
 ## Highlights
@@ -266,7 +266,7 @@ sentence followed by the plan, and a rejection that says "stop and wait"
 | A read-only command | `READ_ONLY_BASH_COMMANDS` (or per-tool table) in `modes.ts`; flag rules in `utils.ts` `segmentBlocker` | `utils.test.ts` |
 | A mode's text or the contract | `prompts/<mode>-mode.md` / `prompts/contract.md`, composed in `prompt-blocks.ts` | `prompt-blocks.test.ts`, `modes.test.ts` (length caps), `mode-prompts.test.ts` (every gate is named); never put mode-specific text in the contract — it is the constant prefix |
 | Mode rules | `MODES` in `modes.ts` (new matcher: `Matcher` + `matches` in `rules.ts`) | `rules.test.ts`, `intent.test.ts`; the flowcharts in [design.md](design.md#behaviour-at-a-glance), which `mode-charts.test.ts` ties to `MODES` and `GLOBAL_RULES` by rule name and layer (re-read the arrows by hand); `npm run check:charts` (in pi-keeper) checks them with Mermaid's own parser |
-| A dialog option | `options.ts`, handler in `index.ts` `ask()` | `dialogs.test.ts` catalogue, README "The dialogs" |
+| A dialog option | `options.ts`, handler in `index.ts` `ask()` | `dialogs.test.ts` catalogue, guide.md "The dialogs" |
 | Which other-package tools count as read-only | `readOnlyTools` (default list in `config.ts`) | `config.test.ts`, `session-fixes.test.ts` |
 | A `/keeper` setting | the `flowSettings()` table in `index.ts` (parse/save in `config.ts`) | `config.test.ts`, `subagents.test.ts` |
 | What a child may write | matcher `subagentArtifact` (`rules.ts`, `isSubagentArtifactPath` in `utils.ts`) | `rules.test.ts`, `session-fixes.test.ts` |
@@ -282,7 +282,7 @@ sentence followed by the plan, and a rejection that says "stop and wait"
 | What a child is told it may do, and what a denial says | `childLaneLine`/`childLaneName`/`parentLaneHint` (`child-lane.ts`), the child branch of `before_agent_start` and `relaylessChildDeny`/`denyReason` (`index.ts`) | `child-lane.test.ts`, `child-relay.test.ts`, `subagents.test.ts` |
 | A child's thinking level | `subagentThinking` (`config.ts`), `childThinkingLevel`/`maxThinking` (`thinking.ts`), `applyChildThinking` + `currentThinkingLevel` (`index.ts`), the level in `UiRelaySessionRules.thinking` (`ui-relay.ts`, published by `session-grants.ts`) | `thinking.test.ts`, `config.test.ts`, `subagent-thinking.test.ts` (integration) |
 | Whether exact-command dialogs offer a project rule | `projectExactCommands` (`config.ts`), `exactRuleTokens`/`isRememberableExact` (`utils.ts`), the option gate in `index.ts` `ask()`, the exact-entry check in `parseRule` (`project-rules.ts`) | `utils.test.ts`, `project-rules.test.ts`, `dialogs.test.ts`, `intent.test.ts` |
-| A rulebook rule's fields (`description`, `condition`) | `splitFrontmatter` / `parseRuleFile` (`rulebook.ts`), the text in `prompts/rule-warning.md` | `rulebook.test.ts`; a new field is one key in the splitter, and the format is documented in README "The rulebook" |
+| A rulebook rule's fields (`description`, `condition`) | `splitFrontmatter` / `parseRuleFile` (`rulebook.ts`), the text in `prompts/rule-warning.md` | `rulebook.test.ts`; a new field is one key in the splitter, and the format is documented in guide.md "The rulebook" |
 | The token budget of injected text | `prompt-blocks.ts` (`estimateTokens`), `scripts/prompt-weight.ts` (`npm run prompt-weight`), the caps in `tests/unit/prompt-weight.test.ts` | run the script, then pin the new numbers and the file to trim |
 | Diagnose a rulebook rule (never fires, fires wrongly, correction cut) | [rulebook.md](rulebook.md) — the debugging tables, the session entries to grep, and the follow-up order | `npm run rulebook-check`, `npm run rulebook-fires -- --evidence`, `/rules` |
 | Diagnose a surprising ask | `python3 scripts/extract_flow.py --latest` | |

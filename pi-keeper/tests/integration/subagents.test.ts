@@ -385,3 +385,166 @@ describe("child under default mode (no UI)", () => {
 		assert.equal((await h.tool("contact_supervisor", {})).blocked, true);
 	});
 });
+
+/**
+ * A workflow, `parallel`, `tasks` or `chain` child is launched by pi-subagents
+ * itself, with a `subagent_launch` call the model never sees (upstream 0.85+).
+ * The same bridge rule covers it, and the commands and the output write it
+ * carries are judged with the mode's own rules.
+ */
+describe("parent: workflow children (subagent_launch)", () => {
+	const launch = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({ workflowRunId: "w1", key: "task-1", agent: "scout", task: "find the parser", ...extra });
+
+	for (const mode of ["default", "auto", "plan"]) {
+		it(`a plain child is allowed in ${mode} with the bridge registered`, async () => {
+			const h = await startPi({ sandbox: sandboxed() });
+			await h.session();
+			await h.command("mode", mode);
+			assert.equal((await h.tool("subagent_launch", launch())).blocked, false);
+			assert.deepEqual(h.dialogs, []);
+		});
+
+		it(`denied in ${mode} when the bridge is missing, like subagent`, async () => {
+			root[REGISTRY_KEY] = { version: 2, bySession: new Map() };
+			const h = await startPi({ sandbox: sandboxed() });
+			await h.session();
+			await h.command("mode", mode);
+			const outcome = await h.tool("subagent_launch", launch());
+			assert.equal(outcome.blocked, true);
+			assert.match(outcome.reason ?? "", /couldn't attach to subagent children; refusing to launch unchecked subagents/);
+		});
+	}
+
+	it("a read-only command the child leaves behind runs without a dialog in default and plan", async () => {
+		for (const mode of ["default", "plan"]) {
+			const h = await startPi({ sandbox: sandboxed() });
+			await h.session();
+			await h.command("mode", mode);
+			assert.equal((await h.tool("subagent_launch", launch({ commands: [{ command: "git status" }] }))).blocked, false, mode);
+			assert.deepEqual(h.dialogs, [], mode);
+		}
+	});
+
+	it("plan mode asks about a command the child would run, naming it", async () => {
+		const h = await startPi({ sandbox: sandboxed() });
+		await h.session();
+		await h.command("mode", "plan");
+		h.answer(/Permission required \(plan mode\)/, /^Yes$/);
+		assert.equal((await h.tool("subagent_launch", launch({ commands: [{ command: "npm test" }] }))).blocked, false);
+		assert.equal(h.dialogs.length, 1);
+		assert.match(h.dialogs[0].title, /task-1 \(scout\)/);
+		assert.match(h.dialogs[0].title, /The child leaves this behind: bash: npm test\./);
+		assert.deepEqual(h.dialogs[0].options, ["Yes", "No", "No, and tell pi what to do instead"]);
+	});
+
+	it("plan mode denies a dangerous command the child would run, before any dialog, and names it", async () => {
+		const h = await startPi({ sandbox: sandboxed() });
+		await h.session();
+		await h.command("mode", "plan");
+		const outcome = await h.tool("subagent_launch", launch({ commands: [{ command: "rm -rf /" }] }));
+		assert.equal(outcome.blocked, true);
+		assert.match(outcome.reason ?? "", /Plan mode is active: the workflow child's own command \(bash: rm -rf \/\) is dangerous/);
+		assert.deepEqual(h.dialogs, []);
+	});
+
+	it("auto mode asks about a dangerous command and runs a plain one", async () => {
+		const h = await startPi({ sandbox: sandboxed() });
+		await h.session();
+		await h.command("mode", "auto");
+		assert.equal((await h.tool("subagent_launch", launch({ commands: [{ command: "npm test" }] }))).blocked, false);
+		assert.deepEqual(h.dialogs, []);
+		h.answer(/Permission required \(auto mode\)/, "No");
+		assert.equal((await h.tool("subagent_launch", launch({ commands: [{ command: "rm -rf /" }] }))).blocked, true);
+		assert.equal(h.dialogs.length, 1);
+	});
+
+	it("default mode asks once for the child's own non-read-only command", async () => {
+		const h = await startPi({ sandbox: sandboxed() });
+		await h.session();
+		h.answer(/Permission required \(default mode\)/, "No");
+		assert.equal((await h.tool("subagent_launch", launch({ commands: [{ command: "npm test" }] }))).blocked, true);
+		assert.match(h.dialogs[0].title, /The child leaves this behind: bash: npm test\./);
+	});
+
+	it("a command that sets env, or runs outside the project, asks in every mode, even a read-only one", async () => {
+		for (const mode of ["default", "auto", "plan"]) {
+			for (const [extra, hint] of [
+				[{ env: { GIT_PAGER: "sh -c id" } }, /sets GIT_PAGER in its environment/],
+				[{ cwd: "/" }, /runs in \/, outside this project/],
+			] as const) {
+				const h = await startPi({ sandbox: sandboxed() });
+				await h.session();
+				await h.command("mode", mode);
+				h.answer(/Permission required/, "No");
+				const outcome = await h.tool("subagent_launch", launch({ commands: [{ command: "git status", ...extra }] }));
+				assert.equal(outcome.blocked, true, `${mode} ${JSON.stringify(extra)}`);
+				assert.equal(h.dialogs.length, 1, `${mode} ${JSON.stringify(extra)}`);
+				assert.match(h.dialogs[0].title, /The child leaves this behind: bash: git status/);
+				assert.match(h.dialogs[0].title, hint);
+				assert.deepEqual(h.dialogs[0].options, ["Yes", "No", "No, and tell pi what to do instead"]);
+			}
+		}
+	});
+
+	it("a command whose cwd is inside the project, and a plain command, are not asked about when read-only", async () => {
+		const sb = sandboxed();
+		const h = await startPi({ sandbox: sb });
+		await h.session();
+		assert.equal((await h.tool("subagent_launch", launch({ commands: [{ command: "git status", cwd: sb.cwd }] }))).blocked, false);
+		assert.deepEqual(h.dialogs, []);
+	});
+
+	it("a session approval of the command from a normal bash call covers the same gate command in a launch", async () => {
+		const h = await startPi({ sandbox: sandboxed() });
+		await h.session();
+		h.answer(/Permission required \(default mode\)/, /don't ask again/);
+		assert.equal((await h.tool("bash", { command: "npm test" })).blocked, false);
+		assert.equal(h.dialogs.length, 1);
+		assert.equal((await h.tool("subagent_launch", launch({ commands: [{ command: "npm test" }] }))).blocked, false);
+		assert.equal(h.dialogs.length, 1, "the launch asked nothing more");
+	});
+
+	it("a launch whose commands this check cannot read asks instead of passing", async () => {
+		const h = await startPi({ sandbox: sandboxed() });
+		await h.session();
+		h.answer(/Permission required/, "No");
+		assert.equal((await h.tool("subagent_launch", launch({ commands: "git status" }))).blocked, true);
+		assert.match(h.dialogs[0].title, /commands: a list this check cannot read/);
+	});
+
+	it("the output file is judged as a write: denied in plan mode outside the artifact dirs, asked in default", async () => {
+		const sb = sandboxed();
+		const h = await startPi({ sandbox: sb });
+		await h.session();
+		await h.command("mode", "plan");
+		const refused = await h.tool("subagent_launch", launch({ output: join(sb.cwd, "report.md") }));
+		assert.equal(refused.blocked, true);
+		assert.match(refused.reason ?? "", /only the plan file .* can be changed, so the workflow child's own write \(write .*report\.md\) is blocked/);
+
+		await h.command("mode", "default");
+		h.answer(/Permission required \(default mode\)/, "No");
+		assert.equal((await h.tool("subagent_launch", launch({ output: join(sb.cwd, "report.md") }))).blocked, true);
+		assert.match(h.dialogs.at(-1)?.title ?? "", /The child leaves this behind: write .*report\.md\./);
+	});
+
+	it("a child's artifact report stays writable, so a scout with output is not blocked", async () => {
+		const sb = sandboxed();
+		const artifact = join(sb.agentDir, "sessions", "s1", "subagent-artifacts", "outputs", "run1", "context.md");
+		for (const mode of ["default", "plan"]) {
+			const h = await startPi({ sandbox: sb });
+			await h.session();
+			await h.command("mode", mode);
+			assert.equal((await h.tool("subagent_launch", launch({ output: artifact }))).blocked, false, mode);
+		}
+	});
+
+	it("the tool can't be listed as read-only, so a config entry cannot bypass the bridge", async () => {
+		const sb = sandboxed();
+		writeFileSync(join(sb.agentDir, "pi-keeper.json"), '{"readOnlyTools": ["subagent_launch"]}');
+		root[REGISTRY_KEY] = { version: 2, bySession: new Map() };
+		const h = await startPi({ sandbox: sb });
+		await h.session();
+		assert.equal((await h.tool("subagent_launch", launch())).blocked, true);
+		assert.ok(h.notifications.some((n) => /readOnlyTools: ignored "subagent_launch"/.test(n.message)));
+	});
+});

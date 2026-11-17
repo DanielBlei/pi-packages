@@ -158,7 +158,7 @@ export interface KeeperConfig {
 }
 
 /** Tools a user cannot list: they write, or they front tools whose own behaviour the name hides. */
-export const UNLISTABLE_TOOLS: ReadonlySet<string> = new Set(["bash", "powershell", "edit", "write", "exit_plan_mode", "mcp", "subagent"]);
+export const UNLISTABLE_TOOLS: ReadonlySet<string> = new Set(["bash", "powershell", "edit", "write", "exit_plan_mode", "mcp", "subagent", "subagent_launch"]);
 
 /** Tool names are plain identifiers (letters, digits, `_`, `-`, `.`, `:`). */
 const TOOL_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.:-]*$/;

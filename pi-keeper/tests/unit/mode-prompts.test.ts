@@ -35,6 +35,10 @@ const COVERAGE: Record<string, Coverage> = {
 	questionnaire: { exempt: "asks the user a question; not an action on the machine" },
 	ask_user_question: { exempt: "asks the user a question; not an action on the machine" },
 	subagent: { exempt: "launching subagents is described by the parent lane hint (child-lane.ts parentLaneHint)" },
+	subagent_launch: {
+		exempt:
+			"the per-child launch of a workflow/parallel/tasks/chain child: pi-subagents makes it itself and never declares the name to the model, so no prompt line could reach it (its commands and output are gated by tests/unit/rules.test.ts and tests/integration/subagents.test.ts)",
+	},
 	exit_plan_mode: { parent: /exit_plan_mode/, child: /exit_plan_mode/ },
 };
 

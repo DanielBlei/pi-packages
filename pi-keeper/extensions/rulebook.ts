@@ -298,5 +298,5 @@ export function firedFromBranch(branch: readonly { type?: string; customType?: s
 	return fired;
 }
 
-/** The user's rulebook directory for this agent dir (index.ts and README name it). */
+/** The user's rulebook directory for this agent dir (index.ts and docs/guide.md name it). */
 export const userRuleDir = (agentDir: string): string => resolve(join(agentDir, "pi-keeper", USER_RULE_DIR));

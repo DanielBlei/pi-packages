@@ -1,8 +1,8 @@
 /**
  * Dialog catalogue: every dialog the user can see, driven through the real
  * extension (tests/mocks/pi.ts), with the exact option labels in order and, where
- * a dialog has More…, what More… opens. The README's "Dialogs you can see"
- * mirrors CATALOGUE, so a wording or order change fails here, in one place.
+ * a dialog has More…, what More… opens. docs/guide.md ("The dialogs") describes
+ * them; a wording or order change fails here, in one place.
  * Run: npm run test:integration
  */
 import { describe, it, after } from "node:test";

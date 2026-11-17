@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+- Workflow, `parallel`, `tasks` and `chain` children (pi-subagents 0.85 and
+  newer) no longer fail in plan mode. pi-subagents makes a `subagent_launch`
+  call for each child that the model never sees; it is now allowed in every
+  mode under the same condition as `subagent` (the bridge must be registered),
+  and it is never read-only or listable.
+- A launch also runs what the child leaves behind: its `gate` and
+  `acceptance.verify` commands and the file its `output` writes. Each command is
+  judged as a bash call and the file as a write, with the mode's own rules, and
+  the strictest answer wins. The dialog and a deny name the step.
+- A command that sets `env`, a command whose `cwd` is outside the project, and a
+  `commands` or `output` value of a shape the check cannot read ask in every
+  mode, even for a command the rules call read-only.
+- An `output` path whose artifact directory is a link that leads out of the
+  sessions directory is no longer taken for the child's report.
+- The user guide moved to `docs/guide.md`, and the contributor notes to
+  `docs/development.md`. The README is a short install and overview page. The
+  package descriptions of pi-keeper, pi-session-topic and pi-shell-highlight
+  were reworded.
+
 ## 0.1.0 - 2026-11-16
 
 First public release, as `pi-keeper`.

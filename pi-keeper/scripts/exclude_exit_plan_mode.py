@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Keep pi-cc-extensions from hiding the plan (README: Compatibility).
+Keep pi-cc-extensions from hiding the plan (docs/guide.md: Compatibility).
 
 pi-cc-extensions restyles every tool row and, while a tool runs, shows only
 "↳ Pending…" — which hides pi-keeper's exit_plan_mode plan, so the plan

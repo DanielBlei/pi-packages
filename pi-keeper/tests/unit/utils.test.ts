@@ -35,6 +35,7 @@ import {
 	isInsideSubagentArtifactDir,
 	bashWritesInsideArtifactDirs,
 	isSubagentArtifactPath,
+	isSubagentOutputPath,
 	hasRemoval,
 	createScratchDir,
 	maskCommitHeredocs,
@@ -2132,6 +2133,47 @@ test("subagent artifact paths: files under <agent dir>/sessions/<dir>/subagent-a
 		assert.equal(isSubagentArtifactPath(bad, CTX), false, bad);
 	}
 	assert.equal(isSubagentArtifactPath(ok, { cwd: CWD }), false, "no agent dir known");
+});
+
+test("subagent output paths: a workflow launch names its report before pi-subagents creates the dir", () => {
+	const dir = `${AGENT_DIR}/sessions/--p--/subagent-artifacts/outputs/abc`;
+	// the dir does not exist yet when the launch is checked: judged from the path text
+	assert.equal(isSubagentOutputPath(`${dir}/context.md`, CTX), true);
+	assert.equal(isSubagentOutputPath(`${dir}/deep/notes.md`, CTX), true);
+	for (const bad of [
+		"",
+		dir,
+		`${AGENT_DIR}/sessions/--p--/subagent-artifacts/outputs`,
+		`${AGENT_DIR}/sessions/--p--/subagent-artifacts/other/abc/context.md`,
+		`${AGENT_DIR}/sessions/--p--/session.jsonl`,
+		`${dir}/../../../../models.json`,
+		`${AGENT_DIR}-evil/sessions/--p--/subagent-artifacts/outputs/abc/context.md`,
+		"/tmp/report.md",
+	]) {
+		assert.equal(isSubagentOutputPath(bad, CTX), false, bad);
+	}
+	assert.equal(isSubagentOutputPath(`${dir}/context.md`, { cwd: CWD }), false, "no agent dir known");
+	// a file that already exists is judged by realpath, so a link planted in the dir is not the report
+	const root = mkdtempSync(join(tmpdir(), "pdf-output-"));
+	try {
+		const agentDir = join(root, "agent");
+		const outputs = join(agentDir, "sessions", "--p--", "subagent-artifacts", "outputs", "abc");
+		mkdirSync(outputs, { recursive: true });
+		mkdirSync(join(root, "elsewhere"));
+		writeFileSync(join(root, "elsewhere", "target.md"), "x");
+		symlinkSync(join(root, "elsewhere", "target.md"), join(outputs, "file-link.md"));
+		const live: PathContext = { cwd: CWD, agentDir };
+		assert.equal(isSubagentOutputPath(join(outputs, "context.md"), live), true, "a new file");
+		assert.equal(isSubagentOutputPath(join(outputs, "file-link.md"), live), false, "a symlinked file");
+		// a link in a directory above the file (the artifact dir points out): the file does not exist yet, but its ancestor decides
+		const planted = join(agentDir, "sessions", "--q--");
+		mkdirSync(join(root, "elsewhere", "outputs", "abc"), { recursive: true });
+		mkdirSync(planted, { recursive: true });
+		symlinkSync(join(root, "elsewhere"), join(planted, "subagent-artifacts"));
+		assert.equal(isSubagentOutputPath(join(planted, "subagent-artifacts", "outputs", "abc", "context.md"), live), false, "a linked artifact dir");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("scratch rm: a mixed target list stays dangerous, and the dangerous cases are dangerous (not merely not read-only)", () => {

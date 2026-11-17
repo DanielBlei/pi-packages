@@ -3710,6 +3710,30 @@ export function isSubagentArtifactPath(target: string, ctx: PathContext): boolea
 	return real !== realDir && isInside(real, realDir);
 }
 
+/**
+ * True when `target` is the file a workflow child's `output` names, before that
+ * file exists: `<agent dir>/sessions/<session dir>/subagent-artifacts/outputs/<id>/<file>`,
+ * judged from the path text alone.
+ *
+ * A launch is checked before pi-subagents creates the run's artifact dir, so
+ * `isSubagentArtifactPath` would see no file and no dir and refuse. A path that
+ * does exist is judged by its realpath, as every other write, so a planted link
+ * is not covered by the name.
+ */
+export function isSubagentOutputPath(target: string, ctx: PathContext): boolean {
+	if (target === "" || ctx.agentDir === undefined) return false;
+	const sessions = join(resolve(ctx.agentDir), "sessions");
+	const resolved = resolvePath(target, ctx.cwd);
+	if (!isInside(resolved, sessions) || resolved === sessions) return false;
+	const parts = relative(sessions, resolved).split(sep);
+	// <session dir>/subagent-artifacts/outputs/<id>/<file>[/...]: a file below the run's dir
+	if (parts.length < 5 || parts[1] !== "subagent-artifacts" || parts[2] !== "outputs") return false;
+	// a link in a part that exists (the sessions dir, the artifact dir) must not lead out: judge the
+	// nearest existing ancestor by its realpath, as the file itself is judged once it exists
+	if (!isInside(realpathLoose(resolved), realpathLoose(sessions))) return false;
+	return existsSync(resolved) ? isSubagentArtifactPath(target, ctx) : true;
+}
+
 /** Create the per-session scratch dir: `<tmp>/pi-keeper-XXXXXX`, owner-only (0700). */
 export function createScratchDir(base = tmpdir()): string {
 	const dir = mkdtempSync(join(base, "pi-keeper-"));

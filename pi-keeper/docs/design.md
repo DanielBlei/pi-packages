@@ -1,7 +1,7 @@
 # pi-keeper: design
 
 Why the permission model and plan flow look the way they do. Reading order:
-[../README.md](../README.md) (what the user sees) → [architecture.md](architecture.md)
+[guide.md](guide.md) (what the user sees; [../README.md](../README.md) is the short version) → [architecture.md](architecture.md)
 (modules, flows, state, model-facing text, how to change things) → this file
 (the reasoning and the threat model). This file does not repeat command lists,
 flag tables or dialog labels: those live in code and tests, and each section
@@ -193,7 +193,7 @@ flowchart TD
     d_ask -- match --> d_r_ask(["ASK: the dialog flow"])
     d_ask -- none --> d_allow
     subgraph d_allow["3. Allow layer"]
-        d_allow_reads["Reads and launching a subagent<br/>tool: reads<br/>tool: subagent"]
+        d_allow_reads["Reads and launching a subagent (one child, or a workflow child)<br/>tool: reads<br/>tool: subagent<br/>tool: subagent_launch"]
         d_allow_ro["Read-only shell command<br/>matcher: readOnlyBash"]
         d_allow_ok["Approved earlier: session prefix, exact command, project rule<br/>matcher: rememberedBash<br/>matcher: rememberedVerbatim<br/>matcher: projectAllowBash"]
         d_allow_tool["Read-only tools from other packages<br/>matcher: readOnlyTool"]
@@ -264,7 +264,7 @@ flowchart TD
     p_ask -- match --> p_r_ask(["ASK: the dialog flow"])
     p_ask -- none --> p_allow
     subgraph p_allow["3. Allow layer"]
-        p_allow_reads["Reads, launching a subagent, and asking to leave plan mode<br/>tool: reads<br/>tool: subagent<br/>tool: exit_plan_mode"]
+        p_allow_reads["Reads, launching a subagent (one child, or a workflow child), and asking to leave plan mode<br/>tool: reads<br/>tool: subagent<br/>tool: subagent_launch<br/>tool: exit_plan_mode"]
         p_allow_ro["Read-only shell command, or one approved earlier<br/>matcher: readOnlyBash<br/>matcher: rememberedBash"]
         p_allow_tool["Read-only tools from other packages<br/>matcher: readOnlyTool"]
         p_allow_files["The session's own files: plan file, scratch dir, a subagent's report<br/>matcher: planFile<br/>matcher: scratchFile<br/>matcher: subagentArtifact"]
@@ -597,6 +597,32 @@ Code: `extensions/subagents-bridge.ts` (`registerChildMode`, `childModeFor`,
   `subagent` tool itself is denied in every mode when registration failed,
   since an unregistered child would run unchecked. For the same reason
   agents configured for another runner or machine are refused.
+- Two tool names mean "launch": `subagent` (one child, declared to the model)
+  and `subagent_launch` (one call per `workflow`/`parallel`/`tasks`/`chain`
+  child, made by pi-subagents itself and never declared to the model,
+  upstream since 0.85). `modes.ts` holds both in `LAUNCH_TOOLS`, so the
+  bridge check, the mode allow rules and the deny text cover the two alike;
+  a version of this package that knew only `subagent` denied every workflow
+  child in plan mode, where the allowlist is deny-by-default. The
+  `subagent_launch` input also carries what the parent runs on the child's
+  behalf — the child's `gate`/`acceptance.verify` commands and the file its
+  `output` writes — so the gate (`decide`, `launchNestedCalls` in
+  `rules.ts`) judges each as a `bash` or `write` call under the same mode
+  and ctx, and keeps the strictest answer, marked `launchNested` with the
+  offending step in `Decision.detail`. This is how a mode's bash and write
+  rules reach a command or a file that never appears as a `bash` or `write`
+  call of its own. Two things the nested calls cannot express are judged
+  separately (`launchNestedHazards`, `rules.ts`) and raise the answer to `ask`
+  in every mode: a command's `env` (a variable such as `GIT_PAGER` changes what
+  a read-only command runs) and a command `cwd` outside the project (the rules
+  take "inside the project" from the session cwd, so a delete there would pass
+  as inside), and a shape the check cannot read, which fails closed. The
+  `output` path of a run that does not exist yet is judged from its text
+  (`isSubagentOutputPath`) after its nearest existing ancestor is checked by
+  realpath, so a linked `subagent-artifacts` dir does not carry the name out.
+  Not covered, because pi-subagents never shows them: starts without a tool
+  call (schedule ticks, auto-resume, RPC), and the `acceptance.verify`
+  commands a resumed child kept.
 - Answers share state both ways (session rules, edit flag, outside-read
   flag, granted directories, fetch hosts) because the user approved them for the session,
   not for one process. The parent re-validates anything a child sends back

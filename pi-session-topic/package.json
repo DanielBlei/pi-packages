@@ -1,7 +1,7 @@
 {
 	"name": "pi-session-topic",
 	"version": "0.1.0",
-	"description": "Give pi sessions a one-line topic title, so /resume shows a readable name instead of the first prompt",
+	"description": "Names each pi session with a short topic title, so /resume shows what every session was about.",
 	"license": "Apache-2.0",
 	"author": "Daniel Blei",
 	"bugs": {

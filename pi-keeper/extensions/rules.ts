@@ -29,7 +29,7 @@ import {
 	secretUploads,
 	type PathContext,
 } from "./utils.ts";
-import { ANY_TOOL } from "./modes.ts";
+import { ANY_TOOL, SUBAGENT_LAUNCH_TOOL } from "./modes.ts";
 import { findMatchingRule, type ProjectPermissions } from "./project-rules.ts";
 
 export type Action = "allow" | "ask" | "deny";
@@ -60,6 +60,8 @@ export type Matcher =
 	| "secretSearch"
 	| "secretUpload"
 	| "secretFile"
+	/** Never matched by a mode rule: the gate's decision for the shell commands or the output write a `subagent_launch` call carries (see `launchNestedCalls`). */
+	| "launchNested"
 	/** Never matched by a mode rule: the gate's decision for a child launched outside its parent's project (child-cwd.ts). */
 	| "childCwdLocked";
 
@@ -109,10 +111,10 @@ export interface ToolHints {
 }
 
 /** Tools that never count as read-only, whatever their annotations claim. */
-const NEVER_READ_ONLY_TOOLS = new Set(["bash", "powershell", "edit", "write", "exit_plan_mode", "mcp", "subagent"]);
+const NEVER_READ_ONLY_TOOLS = new Set(["bash", "powershell", "edit", "write", "exit_plan_mode", "mcp", "subagent", SUBAGENT_LAUNCH_TOOL]);
 
 /** Tools that front other tools or launch agents: listing the name would allow whatever they are asked to run. */
-const NEVER_LISTED_TOOLS = new Set(["mcp", "subagent"]);
+const NEVER_LISTED_TOOLS = new Set(["mcp", "subagent", SUBAGENT_LAUNCH_TOOL]);
 
 /** How a whole command is remembered and compared: trimmed, otherwise as typed. */
 export function verbatimKey(command: string): string {
@@ -146,9 +148,12 @@ export interface Decision {
 	action: Action;
 	/** The rule that decided, or undefined for the fallback. */
 	rule?: Rule;
+	/** What the call will run, when a rule about a nested call decided (`launchNested`): one line for the user. */
+	detail?: string;
 }
 
-const SEVERITY: Record<Action, number> = { allow: 0, ask: 1, deny: 2 };
+/** How strict an action is: the strictest matching rule decides a call. */
+export const SEVERITY: Record<Action, number> = { allow: 0, ask: 1, deny: 2 };
 
 /** Command text of a shell tool call. */
 export function commandOf(input: unknown): string {
@@ -247,6 +252,8 @@ function matches(matcher: Matcher, call: ToolCall, ctx: EvalContext): boolean {
 		// set by the gate, never by a mode rule
 		case "childCwdLocked":
 			return false;
+		case "launchNested":
+			return false;
 	}
 }
 
@@ -304,6 +311,68 @@ export function evaluate(mode: ModeRules, globalRules: readonly Rule[], call: To
 		if (rule.action === "deny") break;
 	}
 	return decision ?? { action: mode.fallback };
+}
+
+/**
+ * The calls a `subagent_launch` call will make on this machine after its child
+ * stops: one `bash` call per entry of `commands` (the child's `gate` and
+ * `acceptance.verify` commands), and one `write` call for `output` (the file the
+ * child's result is written to). Empty for every other tool.
+ *
+ * The gate judges each with the mode's own rules, so pi-keeper's bash and write
+ * rules cover what the parent runs on the child's behalf. A command runs in the
+ * child's directory; relative paths in it are checked against this session's
+ * working directory, which is the child's unless the call says otherwise.
+ */
+export function launchNestedCalls(call: ToolCall): ToolCall[] {
+	if (call.toolName !== SUBAGENT_LAUNCH_TOOL) return [];
+	const input = call.input as { commands?: unknown; output?: unknown } | undefined;
+	const nested: ToolCall[] = [];
+	for (const entry of Array.isArray(input?.commands) ? input.commands : []) {
+		const command = (entry as { command?: unknown } | undefined)?.command;
+		if (typeof command === "string" && command.trim() !== "") nested.push({ toolName: "bash", input: { command } });
+	}
+	const output = input?.output;
+	if (typeof output === "string" && output !== "") nested.push({ toolName: "write", input: { path: output } });
+	return nested;
+}
+
+/**
+ * What a `subagent_launch` call carries that the nested `bash` and `write` calls
+ * of `launchNestedCalls` cannot express, one line each. The gate raises the
+ * answer to at least `ask` for every line, in every mode, and never remembers it:
+ *
+ * - a command that sets `env`: a variable such as `GIT_PAGER`, `PATH` or
+ *   `LD_PRELOAD` changes what a command the rules call read-only will run;
+ * - a command whose `cwd` is outside this session's project: the rules judge
+ *   relative paths and "inside the project" from the session cwd, so `rm -rf *`
+ *   in `/home/me` would pass as a delete inside the project;
+ * - a `commands`, `cwd`, `env` or `output` value of a shape this check cannot
+ *   read: unreadable is never "nothing to check".
+ *
+ * Empty for every tool but `subagent_launch`.
+ */
+export function launchNestedHazards(call: ToolCall, ctx: PathContext): string[] {
+	if (call.toolName !== SUBAGENT_LAUNCH_TOOL) return [];
+	const input = call.input as { commands?: unknown; output?: unknown } | undefined;
+	const hazards: string[] = [];
+	const commands = input?.commands;
+	if (commands !== undefined && !Array.isArray(commands)) hazards.push("commands: a list this check cannot read");
+	for (const entry of Array.isArray(commands) ? commands : []) {
+		const item = entry as { command?: unknown; cwd?: unknown; env?: unknown } | null | undefined;
+		if (typeof item !== "object" || item === null || typeof item.command !== "string") {
+			hazards.push("bash: a command this check cannot read");
+			continue;
+		}
+		const shown = item.command.length > 120 ? `${item.command.slice(0, 120)}…` : item.command;
+		const names = typeof item.env === "object" && item.env !== null && !Array.isArray(item.env) ? Object.keys(item.env) : item.env === undefined ? [] : ["?"];
+		if (names.length > 0) hazards.push(`bash: ${shown} (sets ${names.slice(0, 3).join(", ")}${names.length > 3 ? ", …" : ""} in its environment)`);
+		if (item.cwd !== undefined && (typeof item.cwd !== "string" || isOutsideCwd(item.cwd, ctx))) {
+			hazards.push(`bash: ${shown} (runs in ${typeof item.cwd === "string" ? item.cwd : "a directory this check cannot read"}, outside this project)`);
+		}
+	}
+	if (input?.output !== undefined && typeof input.output !== "string") hazards.push("write: an output path this check cannot read");
+	return hazards;
 }
 
 /** A named list of allow patterns (session memory, project rules, a workflow command's grants). */

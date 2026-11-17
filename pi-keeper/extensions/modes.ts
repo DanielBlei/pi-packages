@@ -94,6 +94,22 @@ export const READ_TOOLS = ["read", "grep", "find", "ls", "questionnaire", "ask_u
 export const SUBAGENT_TOOL = "subagent";
 
 /**
+ * The call pi-subagents makes before each workflow child starts (a `workflow`,
+ * `parallel`, `tasks` or `chain` child; pi-subagents 0.85 and newer). It is
+ * not declared to the model, and the model only sees the `subagent` call that
+ * started the workflow, so the same rules must cover this name too.
+ *
+ * Its input carries what the parent runs after the child stops: the child's
+ * `gate` and `acceptance.verify` shell commands (`commands`) and the file the
+ * child's `output` writes (`output`). The gate (index.ts, `decide`) judges
+ * each of them with the mode's own bash and write rules.
+ */
+export const SUBAGENT_LAUNCH_TOOL = "subagent_launch";
+
+/** Every pi-subagents launch tool: one name for a single child, one per workflow child. */
+export const LAUNCH_TOOLS = [SUBAGENT_TOOL, SUBAGENT_LAUNCH_TOOL];
+
+/**
  * Tools pi-subagents gives its children: escalating to the parent
  * (`contact_supervisor`), returning schema-checked output (`structured_output`)
  * and waiting for background runs (`bg_wait`). Allowed only in a child session.
@@ -209,7 +225,7 @@ export const MODES: Record<ModeName, ModeDefinition> = {
 		permissions: {
 			fallback: "ask",
 			rules: [
-				{ tools: [...READ_TOOLS, SUBAGENT_TOOL], action: "allow" },
+				{ tools: [...READ_TOOLS, ...LAUNCH_TOOLS], action: "allow" },
 				{ tools: CHILD_PROTOCOL_TOOLS, match: "childSession", action: "allow" },
 				{ tools: ["bash"], match: "readOnlyBash", action: "allow" },
 				{ tools: ["bash"], match: "rememberedBash", action: "allow" },
@@ -279,7 +295,7 @@ export const MODES: Record<ModeName, ModeDefinition> = {
 			// other packages, codemode tools) is denied.
 			fallback: "deny",
 			rules: [
-				{ tools: [...READ_TOOLS, SUBAGENT_TOOL, EXIT_PLAN_TOOL], action: "allow" },
+				{ tools: [...READ_TOOLS, ...LAUNCH_TOOLS, EXIT_PLAN_TOOL], action: "allow" },
 				{ tools: CHILD_PROTOCOL_TOOLS, match: "childSession", action: "allow" },
 				// read-only MCP tools fit research; every other unknown tool stays denied
 				{ tools: [ANY_TOOL], match: "readOnlyTool", action: "allow" },
@@ -323,8 +339,9 @@ export function formatModeStatus(theme: StatusTheme, mode: ModeName, edits: bool
 /** Rules prepended to every mode. Deny wins over everything. */
 export const GLOBAL_RULES: ModeRules["rules"] = [
 	{ tools: SHELL_TOOLS, match: "privilegedBash", action: "deny" },
-	// no subagent launch unless its children will load this extension (not even in auto)
-	{ tools: [SUBAGENT_TOOL], match: "bridgeInactive", action: "deny" },
+	// no subagent launch unless its children will load this extension (not even in auto);
+	// both launch names: the workflow children behind `subagent_launch` are children too
+	{ tools: LAUNCH_TOOLS, match: "bridgeInactive", action: "deny" },
 	// user rules from .pi/settings.local.json: deny and ask apply in every mode
 	{ tools: SHELL_TOOLS, match: "projectDeny", action: "deny" },
 	{ tools: SHELL_TOOLS, match: "projectAsk", action: "ask" },

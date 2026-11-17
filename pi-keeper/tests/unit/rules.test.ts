@@ -9,7 +9,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { GLOBAL_RULES, MODES, type ModeName } from "../../extensions/modes.ts";
 import { createScratchDir } from "../../extensions/utils.ts";
-import { coveringPatterns, evaluate, lockApprovedInput, patternString, type Action, type EvalContext } from "../../extensions/rules.ts";
+import { coveringPatterns, evaluate, launchNestedCalls, launchNestedHazards, lockApprovedInput, patternString, type Action, type EvalContext } from "../../extensions/rules.ts";
 
 const CWD = "/home/user/project";
 const AGENT_DIR = `${homedir()}/.pi/agent`;
@@ -174,7 +174,7 @@ test("plan mode without a plan file denies every write", () => {
 	assert.equal(decision.action, "deny");
 });
 
-// Regressions for README promises that the rules used to break
+// Regressions for promises the user guide makes that the rules used to break
 const CONTRACT_CASES: Case[] = [
 	// privilege escalation is denied in every mode
 	["bash", bash("sudoedit /etc/hosts"), { default: "deny", auto: "deny", plan: "deny" }],
@@ -204,7 +204,7 @@ const CONTRACT_CASES: Case[] = [
 	["bash", bash("cat src/*.ts"), { default: "allow", auto: "allow", plan: "allow" }],
 ];
 
-test("README contract regressions", () => {
+test("user guide contract regressions", () => {
 	for (const [tool, input, expected] of CONTRACT_CASES) {
 		for (const mode of Object.keys(expected) as ModeName[]) {
 			assert.equal(decide(mode, tool, input), expected[mode], `${mode} ${tool} ${JSON.stringify(input)}`);
@@ -699,10 +699,41 @@ test("secret variables in echo and printf ask in every mode; other variables sti
 	}
 });
 
+test("launchNestedHazards: env, a cwd outside the project and unreadable shapes are named, plain commands are not", () => {
+	const ctx = { cwd: "/work/project" };
+	const hazards = (input: unknown) => launchNestedHazards({ toolName: "subagent_launch", input }, ctx);
+	assert.deepEqual(hazards({ commands: [{ command: "npm test" }, { command: "git status", cwd: "/work/project/sub" }], output: "/x/y.md" }), []);
+	assert.deepEqual(hazards({}), []);
+	assert.deepEqual(hazards({ commands: [{ command: "git log", env: { GIT_PAGER: "sh -c id", A: "1" } }] }), ["bash: git log (sets GIT_PAGER, A in its environment)"]);
+	assert.deepEqual(hazards({ commands: [{ command: "git log", env: {} }] }), []);
+	assert.deepEqual(hazards({ commands: [{ command: "rm -rf *", cwd: "/home/me" }] }), ["bash: rm -rf * (runs in /home/me, outside this project)"]);
+	assert.deepEqual(hazards({ commands: [{ command: "ls", cwd: "/work/project/../other" }] }), ["bash: ls (runs in /work/project/../other, outside this project)"]);
+	// unreadable is never "nothing to check"
+	assert.equal(hazards({ commands: "npm test" }).length, 1);
+	assert.equal(hazards({ commands: [{ nope: true }, "npm test", null] }).length, 3);
+	assert.equal(hazards({ commands: [{ command: "ls", cwd: 5 }] }).length, 1);
+	assert.equal(hazards({ commands: [{ command: "ls", env: "A=1" }] }).length, 1);
+	assert.equal(hazards({ output: 42 }).length, 1);
+	// only the per-child launch carries them
+	assert.deepEqual(launchNestedHazards({ toolName: "subagent", input: { commands: "x" } }, ctx), []);
+});
+
 test("readOnlyTool: mcp and subagent never become read-only through annotations", () => {
 	const annotationsOf = () => ({ readOnlyHint: true });
 	for (const tool of ["mcp", "subagent"]) {
 		assert.notEqual(decideWith("default", tool, {}, { annotationsOf }), "allow", tool);
 		assert.notEqual(decideWith("plan", tool, {}, { annotationsOf }), "allow", tool);
+	}
+});
+
+test("launchNestedCalls reads the commands and the output file a workflow launch carries", () => {
+	// only the per-child launch carries them; a plain subagent call is the model's own and says nothing extra
+	assert.deepEqual(launchNestedCalls({ toolName: "subagent", input: { commands: [{ command: "npm test" }], output: "/x/y.md" } }), []);
+	assert.deepEqual(launchNestedCalls({ toolName: "subagent_launch", input: { workflowRunId: "w", key: "task-1", commands: [{ command: "npm test" }, { command: "  " }, { nope: true }], output: "/x/y.md" } }), [
+		{ toolName: "bash", input: { command: "npm test" } },
+		{ toolName: "write", input: { path: "/x/y.md" } },
+	]);
+	for (const input of [{}, undefined, null, { commands: "npm test" }, { commands: [], output: "" }, { output: 42 }]) {
+		assert.deepEqual(launchNestedCalls({ toolName: "subagent_launch", input }), [], JSON.stringify(input));
 	}
 });

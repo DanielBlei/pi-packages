@@ -58,7 +58,8 @@ import {
 	MODES,
 	PRIVILEGE_REASON,
 	formatModeStatus,
-	SUBAGENT_TOOL,
+	LAUNCH_TOOLS,
+	SUBAGENT_LAUNCH_TOOL,
 	type ChildMode,
 	type ModeName,
 } from "./modes.ts";
@@ -80,10 +81,13 @@ import {
 	commandOf,
 	coveringPatterns,
 	evaluate,
+	launchNestedCalls,
+	launchNestedHazards,
 	LOCKABLE_TOOLS,
 	lockApprovedInput,
 	pathOf,
 	patternString,
+	SEVERITY,
 	type Decision,
 	type EvalContext,
 	type ToolHints,
@@ -101,6 +105,7 @@ import {
 	readGrantDir,
 	fetchGrantHosts,
 	hasRemoval,
+	isSubagentOutputPath,
 	patternLadder,
 	scopeSuffix,
 	secretSearchHits,
@@ -390,8 +395,10 @@ function makePlanFilePath(cwd: string): string {
 }
 
 /** The ask hint for a matcher; names the file for the secret searches and uploads. */
-function askHint(match: string | undefined, command: string, paths: PathContext): string | undefined {
+function askHint(match: string | undefined, command: string, paths: PathContext, detail?: string): string | undefined {
 	if (match === undefined) return undefined;
+	// a launch call that will run a command or write a file: name it, the call description does not
+	if (match === "launchNested") return detail === undefined ? undefined : `The child leaves this behind: ${detail}.`;
 	if (match === "secretSearch") {
 		const hit = secretSearchHits(command, paths)[0];
 		if (hit?.why === "secret") return `A recursive search would read the secret file \`${hit.path}\`.`;
@@ -417,6 +424,15 @@ function describeParts(call: ToolCall): { label: string; main: string; lang?: st
 		return command.length > DESCRIBE_COMMAND_LIMIT
 			? { label: `${call.toolName}: `, main: "(full command shown below)" }
 			: { label: `${call.toolName}: `, main: command, lang };
+	}
+	// a workflow child: name the agent and the first line of its task, not the whole call input
+	if (call.toolName === SUBAGENT_LAUNCH_TOOL) {
+		const input = call.input as { key?: unknown; agent?: unknown; task?: unknown } | undefined;
+		const key = typeof input?.key === "string" && input.key !== "" ? input.key : "child";
+		const agent = typeof input?.agent === "string" && input.agent !== "" ? input.agent : "";
+		const task = typeof input?.task === "string" ? input.task.trim().split("\n")[0] : "";
+		const what = [agent, task].filter((part) => part !== "").join(" · ");
+		return { label: `${key} (${agent === "" ? "subagent" : agent}): `, main: what.length > DESCRIBE_COMMAND_LIMIT ? `${what.slice(0, DESCRIBE_COMMAND_LIMIT)}\u2026` : what };
 	}
 	const path = pathOf(call.input);
 	if (path !== "") return { label: `${call.toolName} `, main: path };
@@ -664,7 +680,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 	/** The one-sentence parent hint about the children this session can launch, memoized the same way. */
 	let hintCache: { key: string; line: string } | undefined;
 	function laneHint(): string {
-		if (childMode !== undefined || !pi.getActiveTools().includes(SUBAGENT_TOOL)) return "";
+		if (childMode !== undefined || !LAUNCH_TOOLS.some((name) => pi.getActiveTools().includes(name))) return "";
 		const asks = backgroundAsksEnabled(config);
 		const key = `${currentMode}:${config.backgroundAutoFallback}:${asks}`;
 		if (hintCache?.key !== key) hintCache = { key, line: parentLaneHint(currentMode, config.backgroundAutoFallback, asks) };
@@ -1179,7 +1195,31 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 	}
 
 	function decide(call: ToolCall, ctx: ExtensionContext, subject: AskSubject = selfSubject(ctx)): Decision {
-		return evaluate(MODES[subject.mode].permissions, GLOBAL_RULES, call, evalContext(ctx, subject));
+		const evalCtx = evalContext(ctx, subject);
+		const mode = MODES[subject.mode].permissions;
+		const decision = evaluate(mode, GLOBAL_RULES, call, evalCtx);
+		if (!LAUNCH_TOOLS.includes(call.toolName)) return decision;
+		// A launch also runs what the child leaves behind: its gate and acceptance commands,
+		// and the write of its output file. Judge those as if this session ran them, and keep
+		// the strictest answer, so no workflow can run a command or write a file that the mode
+		// would have asked about.
+		let strictest = decision;
+		for (const nested of launchNestedCalls(call)) {
+			// the file the child writes for its `output`: its own lane may write a report there in every
+			// mode, and pi-subagents creates the run's directory only after this check, so the path is
+			// judged from its text (isSubagentOutputPath)
+			if (nested.toolName === "write" && isSubagentOutputPath(pathOf(nested.input), evalCtx)) continue;
+			const nestedDecision = evaluate(mode, GLOBAL_RULES, nested, evalCtx);
+			if (SEVERITY[nestedDecision.action] <= SEVERITY[strictest.action]) continue;
+			strictest = { action: nestedDecision.action, rule: { tools: [call.toolName], match: "launchNested", action: nestedDecision.action }, detail: describe(nested) };
+		}
+		// what the nested calls cannot say (a command's env, a cwd outside the project, a shape we
+		// cannot read) asks in every mode: the rules would judge it as something it is not
+		const hazard = launchNestedHazards(call, evalCtx)[0];
+		if (hazard !== undefined && SEVERITY.ask > SEVERITY[strictest.action]) {
+			strictest = { action: "ask", rule: { tools: [call.toolName], match: "launchNested", action: "ask" }, detail: hazard };
+		}
+		return strictest;
 	}
 
 	/** The note of the switch that produced the current mode ("" when it needs none). */
@@ -1366,6 +1406,18 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		if (decision.rule?.match === "bridgeInactive") {
 			return `pi-keeper couldn't attach to subagent children; refusing to launch unchecked subagents (pi-subagents' required-extension registry is unavailable, or already taken for this session). "${description}" was blocked. Do the work yourself, or tell the user.`;
 		}
+		// a workflow child whose own commands or output write the mode would not allow: say which
+		if (decision.rule?.match === "launchNested") {
+			const what = decision.detail === undefined ? "part of the child's own work" : `(${decision.detail})`;
+			// a shell command is denied for being dangerous; a write, because only the plan file may change
+			const shell = decision.detail?.startsWith("bash: ") === true;
+			if (currentMode === "plan" && decision.rule.action === "deny") {
+				return shell
+					? `Plan mode is active: the workflow child's own command ${what} is dangerous and is never run while planning. Put this step in the plan file (${planFilePath ?? "not created yet"}); do not retry it.`
+					: `Plan mode is active: only the plan file (${planFilePath ?? "not created yet"}) can be changed, so the workflow child's own write ${what} is blocked. Put it in the plan instead; do not retry it.`;
+			}
+			return `"${description}" is blocked in ${currentMode} mode: the workflow child's own step ${what} is not allowed here. Do not retry it; change the call or tell the user what you needed.`;
+		}
 		if (decision.rule?.match === "projectDeny") {
 			const rule = findMatchingRule(projectState?.permissions.deny ?? [], commandOf(call.input));
 			return `"${description}" is blocked by the project rule ${rule?.text ?? "(deny)"} in ${RULES_FILE}. Do not retry it; tell the user if it is needed.`;
@@ -1540,7 +1592,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		});
 
 		const why = notReadOnly ? formatBreakdown(approvalBreakdown(commandOf(call.input), subject.cwd, coverSources(ctx, subject), subject.scratchDir, pathContext(ctx, subject).fetchHosts)) : [];
-		const hints = [...why, askHint(decision.rule?.match, commandOf(call.input), pathContext(ctx, subject))].filter((line) => line !== undefined);
+		const hints = [...why, askHint(decision.rule?.match, commandOf(call.input), pathContext(ctx, subject), decision.detail)].filter((line) => line !== undefined);
 		// The command/path is model-controlled: segments are sanitized for the terminal (title.ts)
 		const { label, main, lang } = describeParts(call);
 		const title = dialogTitle([
