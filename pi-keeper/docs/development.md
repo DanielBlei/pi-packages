@@ -34,7 +34,7 @@ npm run rulebook-fires   # how often each rule would have fired over past sessio
 runs every rule through the same matcher pi uses, and compares the result with a sample table in
 `scripts/rulebook-check.ts`: sentences the rule must fire on, and legitimate ones it must leave
 alone. Add a sample before you widen a pattern; a sample that cannot be satisfied means the rule
-wants a judge, not a regex. It never runs in `make check`, because the rules are yours, not the repo's.
+wants a judge, not a regex.
 
 `npm run bench` prints numbers and fails on nothing; `tests/unit/perf.test.ts`
 holds the same counts as budgets, so a regression breaks `npm test`.
@@ -69,48 +69,16 @@ python3 scripts/aggregate_failures.py --latest 20               # …or the 20 n
 ```
 
 `--stats` aggregates per model: asks by matcher, approval rate, plan outcomes
-and denies. The baseline and what is still open are in
+and denies. What is still open is in
 [challenges.md](challenges.md); the rulebook's operator notes — where a rule lives,
-why it fired or did not, and what comes next — in [rulebook.md](rulebook.md).
-
-`--failures` scores one conversation on tool calling: error rate, error kinds
-(permission / timeout / aborted / not-found / validation / other), errors by
-tool and by pi-keeper mode, retry chains after errors (same tool again
-within 180 s), and aborted calls (no result). Subagent children are included:
-foreground children are read from their pi session files under the parent's
-sibling directory (`<parent>.jsonl` → `<parent>/<runId>/run-N/session.jsonl`,
-linked to their `subagent-artifacts/*_meta.json` by the child session's
-`subagent-<agent>-<runId>-<index>` display name), async children from their
-`subagent-artifacts` transcript when no session file exists. A child's fixed
-mode is read from its own permission telemetry. `--failures --json` emits one
-NDJSON record per unit (main/child aggregates) and one per errored call, so a
-future aggregator can combine many sessions.
-
-`scripts/aggregate_failures.py` is that aggregator: it loads every conversation
-under a directory (or `--latest N`) with its children and prints one cross-session
-scorecard — error rates by week, model, unit (main vs child), agent, mode and
-tool; retry recovery; the paths headless children keep being denied on; child
-exit codes; and the worst units. `--json` prints the same aggregate as one JSON
-object. Subagent transcripts and nested child sessions are excluded from
-discovery (children are reached through their parent), and `extract_flow.py
---latest` now skips them too.
+why it fired or did not — in [rulebook.md](rulebook.md).
 
 ## Layout
 
 The module map, event flow, state inventory and "how to change X" cheat sheet
 are in [architecture.md](architecture.md); the reasoning and threat
-model are in [design.md](design.md); the open challenges and reference figures
+model are in [design.md](design.md); the open challenges
 are in [challenges.md](challenges.md).
 
-```
-pi-keeper/
-├── extensions/   # index.ts (wiring), modes.ts (tables), rules.ts, utils.ts, project-rules.ts, dialog/plan UI, subagent glue
-├── prompts/      # per-mode prompts, child prompts (read directly, none are commands)
-├── docs/         # guide.md, development.md, architecture.md, design.md, challenges.md, rulebook.md
-├── tests/        # unit/, integration/ (intent.test.ts), mocks/
-└── scripts/      # extract_flow.py, exclude_exit_plan_mode.py, charts/ (docs chart checks)
-```
-
-`child-plan.ts`, `child-default.ts` and `child-auto.ts` are not listed in
-`package.json`; only
-pi-subagents loads them.
+Directories: `extensions/` (wiring, tables, rules, UI, subagent glue), `prompts/`, `docs/`, `tests/` (`unit/`, `integration/`, `mocks/`) and `scripts/`.
+Docs in `docs/`: guide.md, development.md, architecture.md, design.md, challenges.md, rulebook.md and smoke-background-asks.md.

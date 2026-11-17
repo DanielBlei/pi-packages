@@ -34,11 +34,11 @@ it names files and symbols, not line numbers, so it stays true longer.
 | Decision | `extensions/rules.ts` | `evaluate`, the `Matcher` union, `lockApprovedInput`, `commandOf`/`pathOf` |
 | Analysis | `extensions/utils.ts` | Tokenizer, read-only classifier, dangerous/privileged/secret detection, outside-cwd checks, prefix derivation and pattern ladder, scratch dir |
 | Persistence | `extensions/project-rules.ts` | `.pi/settings.local.json` parse/compile, trust hash store, atomic save |
-| UI | `extensions/settings-panel.ts` | the `/keeper` panel: one tab per section (`flowSections` in `index.ts`), a `SettingsList` per section for the aligned label/value rows and the cycle-on-Enter keys, a one-line input for a free-text row, Tab/Shift+Tab for the tabs, the apply result in the footer |
+| UI | `extensions/settings-panel.ts` | the `/keeper` panel: one tab per section (`flowSections` in `index.ts`) |
 | Persistence | `extensions/config.ts` | `<agent dir>/pi-keeper.json` (`readOnlyTools`, `subagentsFollowAuto`, `projectExactCommands`, `backgroundAutoFallback`, `backgroundAsks`, `backgroundAskTimeoutMs`, `backgroundAskPopup`, `projectCommandApprovals`, `projectReadApprovals`, `modeInstructions`, `commandColors`), `backgroundAsksEnabled` (setting + env kill switch), parse with defaults and warnings, merge-save for `/keeper` |
 | Prompt | `extensions/child-lane.ts` | `childLaneLine` (the per-lane awareness text appended to every child prompt, computed from mode + relay + actual tools), `childLaneName` (shared with the deny messages), `parentLaneHint` (the one-sentence parent hint: agent roles, background-child behaviour, and the workflow-script form that survives a reply which already made a tool call) |
-| UI | `extensions/dialog.ts`, `options.ts`, `title.ts`, `preview.ts`, `attention.ts` | Permission dialog, option lists, styled titles, diff/command preview, bell; the full-command body takes the `commandColors` slot, or pi's highlighter (`builtin-syntax`), or the renderer `pi-shell-highlight` publishes under `Symbol.for("pi.shell-highlight.v1")` via `shell-highlight-bridge.ts` (`shell-highlight`; unset, it is used when that package is loaded and `dim` otherwise, and an explicit `shell-highlight` without the package falls back to `dim`). `shell-highlight` also paints the one-line `bash: <command>` title (a segment carries its language) and a `bash`/`sh` fence in the plan view (`paintShellLines`, `plan-approval.ts`) |
-| UI | `extensions/rules-view.ts` | The `/rules` view: `rulesRows` (pure), `renderRulesList`/`renderRuleDetail` (pure, narrow theme) and a small `ctx.ui.custom` component (Enter opens one rule, Esc back, Esc again closes); `rulesText` is the plain form for a session without a TUI |
+| UI | `extensions/dialog.ts`, `options.ts`, `title.ts`, `preview.ts`, `attention.ts` | Permission dialog, option lists, styled titles, diff/command preview, bell; the full-command body takes the `commandColors` slot, or pi's highlighter (`builtin-syntax`), or the renderer `pi-shell-highlight` publishes under `Symbol.for("pi.shell-highlight.v1")` via `shell-highlight-bridge.ts`. `shell-highlight` also paints the one-line `bash: <command>` title (a segment carries its language) and a `bash`/`sh` fence in the plan view (`paintShellLines`, `plan-approval.ts`) |
+| UI | `extensions/rules-view.ts` | The `/rules` view: `rulesRows` (pure), `renderRulesList`/`renderRuleDetail` (pure, narrow theme) and a small `ctx.ui.custom` component; `rulesText` is the plain form for a session without a TUI |
 | UI | `extensions/dialog-lock.ts` | `withDialogLock`/`isDialogLocked`: a FIFO lock so only one dialog is open (pi has one editor slot and does not queue); every user-facing dialog takes it |
 | UI | `extensions/plan-approval.ts` | `PlanView` transcript row and the docked plan selector |
 | Integration | `extensions/subagents-bridge.ts`, `ui-relay.ts` | pi-subagents registry, parent UI relay for foreground child asks; `relaylessChildMode` (the mode of a child with no UI relay) |
@@ -56,17 +56,6 @@ it names files and symbols, not line numbers, so it stays true longer.
 | Child thinking | `extensions/thinking.ts` | `THINKING_LEVELS` (pi's order), `childThinkingLevel`: the `/keeper` setting `subagent-thinking` (`follow` = the higher of the child's own level and the parent's, `role` = the child's own), `maxThinking`; pure, unit-tested |
 | Scripts | `scripts/extract_flow.py`, `exclude_exit_plan_mode.py`, `scripts/charts/` (`lib.ts` reads the charts, `check.ts` renders them) | Rebuild a session's permission flow (`--stats`: aggregate per model); render the docs' Mermaid charts; pi-cc-extensions renderer opt-out |
 | Tests | `tests/unit`, `tests/integration`, `tests/mocks/pi.ts` | See [Testing](#testing) |
-
-Import direction (no cycles): `index` → everything; `rules` → `utils`,
-`modes`, `project-rules`; `utils` → `modes`; `project-rules` → `utils`;
-`rulebook` → `modes`, `project-rules`; `plan-approval` → `dialog`, `preview`,
-`title`; `modes` imports only a type from `rules`; `ask-server` → `ask-mailbox`,
-`ask-heartbeat`, `secure-file`, `subagents-bridge`; `remote-relay` →
-`ask-mailbox`, `ask-heartbeat`, `session-grants`. `project-rules.ts`,
-`rulebook.ts`, `utils.ts`, `rules.ts` and the background-ask modules (`ask-*`,
-`remote-relay`, `secure-file`, `dialog-lock`) have no pi types, so they are
-unit-testable without the harness; `index.ts` supplies `judge`, `ask` and the
-UI callbacks.
 
 ## Life of a tool call
 
@@ -116,10 +105,7 @@ The child also stops waiting when `parentListening` turns false (deny
 its abort signal fires (`cancelled`); in the last two it files `cancels/<id>.json`
 so the parent closes the dialog. The parent's `stop()` (session end, `/new`,
 `/resume`, `background-asks` toggled off) denies everything pending with
-`parent-session-ended` and removes the heartbeat. Telemetry: a dialog's answer
-is logged where it is shown; what the server settled itself (`remote-auto-allow`,
-`remote-auto-deny`, `remote-denied`, `remote-cancelled`, `parent-gone`) and a
-clamped mode are logged by `logRemote`; the child logs `parent-ask`.
+`parent-session-ended` and removes the heartbeat.
 
 ## Events, tools and commands
 
@@ -144,14 +130,14 @@ clamped mode are logged by `logRemote`; the child logs `parent-ask`.
 |---|---|---|
 | Mode, plan file path | closure; session entry `pi-keeper` | Persisted on change, restored per branch; `/new` starts in default |
 | Plan file | `~/.pi/agent/plans/<project>-<stamp>.md` | One per session, never deleted |
-| Session rules, outside-read flag and dirs, fetch hosts | module level | Reset when a new session starts (`/new`, `/resume`, fork; parent `session_start` only, the child guard is defensive). A child has its own module state (pi evaluates each extension path with its own module cache) and sees the parent's grants only through `sharedRules()`: the UI relay, or the published snapshot for a background child. A background child that outlives a parent `/new` or `/resume` loses them, since the old snapshot is withdrawn; its asks are then denied (`parent-session-ended`) because the mailbox is closed |
+| Session rules, outside-read flag and dirs, fetch hosts | module level | Reset when a new session starts (`/new`, `/resume`, fork; parent `session_start` only, the child guard is defensive). A child has its own module state and sees the parent's grants only through `sharedRules()`: the UI relay, or the published snapshot for a background child. A background child that outlives a parent `/new` or `/resume` loses them, since the old snapshot is withdrawn; its asks are then denied (`parent-session-ended`) because the mailbox is closed |
 | Exact commands approved for the session (`rememberedVerbatim`) | module level | Reset when a new session starts; default mode only; not shared with children |
 | `readOnlyTools` | closure, from `<agent dir>/pi-keeper.json` | Re-read on `session_start` |
 | Allow-all-edits flag | closure | Reset when a new session starts (`/new`, `/resume`, fork) |
 | Workflow-command grant | closure | One run |
 | Project rules | `<project>/.pi/settings.local.json` | Persistent; allow rules need the trust hash |
 | Rulebook rules fired this session | `pi-keeper-rule-fired` session entries, read back on `session_start`/`session_tree` (`firedFromBranch`) | In the session file; a resume or a fork cannot re-fire one |
-| Rulebook rules (the parsed rules) | none: `syncRulebook` re-reads both directories per turn and per prompt (`countWork("rulebookSync")`) | Not cached on purpose — a stale rule is a wrong correction, and the directories are tiny |
+| Rulebook rules (the parsed rules) | none: `syncRulebook` re-reads both directories per turn and per prompt (`countWork("rulebookSync")`) | Not cached on purpose |
 | Project rule files the user loaded or ignored this session | closure (`rulebookReviewKey`, `rulebookIgnoredKey`, `rulebookWarnedKey`) | Reset at `session_start` |
 | Trust store | `<agent dir>/pi-keeper/trusted-rules.json` | Persistent |
 | Scratch dir | `<tmp>/pi-keeper-XXXXXX` (0700) | New per session, never deleted |
@@ -162,23 +148,6 @@ clamped mode are logged by `logRemote`; the child logs `parent-ask`.
 | Decision log | session entries `pi-keeper-permission` | In the session file |
 
 ## Workflows
-
-| Workflow | Files | Pinned by |
-|---|---|---|
-| Mode switching | `index.ts` (`switchMode`, `applyMode`), `modes.ts`, `dialog.ts` | `flows.test.ts` |
-| Prompt prefix and mode-message delivery | `prompt-blocks.ts` (`contractSection`, `nextDelivery`), `index.ts` (`before_agent_start`, `applyMode`, `session_compact`), `modes.ts` (`CONTRACT`, `MODE_ANNOUNCEMENTS`) | `prefix.test.ts`, `prompt-blocks.test.ts`, `modes.test.ts` |
-| Permission dialogs and remembered commands | `index.ts` (`ask`, `patternFlow`), `options.ts`, `utils.ts` (ladder), `dialog.ts` | `dialogs.test.ts`, `utils.test.ts` |
-| Plan mode and approval | `index.ts` (`exit_plan_mode`), `plan-approval.ts`, `prompts/plan-mode.md` | `flows.test.ts`, `intent.test.ts`, `plan-approval.test.ts` |
-| Project rules and trust gate | `project-rules.ts`, `index.ts` (`syncProject`, `reviewProject`) | `project-rules.test.ts` |
-| Rulebook (a rule fires, warns once, never blocks) | `rulebook.ts`, `rules-view.ts`, `prompts/rule-warning.md`, `index.ts` (`syncRulebook`, `reviewRules`, the `turn_end` handler, the entry renderer, `/rules`), `project-rules.ts` (`trustedHash`); debugging and follow-up in [rulebook.md](rulebook.md) | `rulebook.test.ts` (unit), `rules-view.test.ts`, `rulebook.test.ts` (integration), `intent.test.ts`, `prompt-weight.test.ts` |
-| Reads outside the project | `rules.ts` matchers, `utils.ts` (`readGrantDir`) | `read-grants.test.ts` |
-| Fetch grants (curl/wget GETs to granted hosts) | `utils.ts` (`fetchHost`, `fetchGrantHosts`), `project-rules.ts` (`Fetch(<host>)`), `options.ts` | `fetch-grants.test.ts` (unit and integration) |
-| Workflow-command grants | `index.ts` (`startWorkflowGrant`) over prompt templates and `/skill:name` skills (`tests/fixtures/commit-template.md`) | `flows.test.ts` |
-| Subagent relay | `subagents-bridge.ts`, `ui-relay.ts`, `child-*.ts` | `child-relay.test.ts`, `subagents.test.ts` |
-| Background asks | `remote-relay.ts`, `ask-mailbox.ts`, `ask-server.ts`, `ask-heartbeat.ts`, `secure-file.ts`, `dialog-lock.ts`, `index.ts` (`askTheParent`, `askRemote`, `judgeRemote`, `startAsks`, `/approvals`) | `ask-mailbox.test.ts`, `ask-server.test.ts`, `ask-heartbeat.test.ts`, `remote-relay.test.ts`, `dialog-lock.test.ts`, `background-asks.test.ts` |
-| rtk rewrite and canonical form | `rtk-rewrite.ts`, `utils.ts` (`canonicalize`) | `rtk-rewrite.test.ts`, `utils.test.ts` |
-| Telemetry | `telemetry.ts`, `scripts/extract_flow.py` | `telemetry.test.ts` |
-| Cost measurement | `perf.ts` (counting seam, off by default), `scripts/bench.ts`, `tests/unit/perf.test.ts` | `perf.test.ts` |
 
 > **The mode message, one run.** The system prompt and the tool list never change; what
 > varies is appended to the conversation when it changes, so a run either sends nothing
@@ -284,9 +253,9 @@ sentence followed by the plan, and a rejection that says "stop and wait"
 | Whether exact-command dialogs offer a project rule | `projectExactCommands` (`config.ts`), `exactRuleTokens`/`isRememberableExact` (`utils.ts`), the option gate in `index.ts` `ask()`, the exact-entry check in `parseRule` (`project-rules.ts`) | `utils.test.ts`, `project-rules.test.ts`, `dialogs.test.ts`, `intent.test.ts` |
 | A rulebook rule's fields (`description`, `condition`) | `splitFrontmatter` / `parseRuleFile` (`rulebook.ts`), the text in `prompts/rule-warning.md` | `rulebook.test.ts`; a new field is one key in the splitter, and the format is documented in guide.md "The rulebook" |
 | The token budget of injected text | `prompt-blocks.ts` (`estimateTokens`), `scripts/prompt-weight.ts` (`npm run prompt-weight`), the caps in `tests/unit/prompt-weight.test.ts` | run the script, then pin the new numbers and the file to trim |
-| Diagnose a rulebook rule (never fires, fires wrongly, correction cut) | [rulebook.md](rulebook.md) — the debugging tables, the session entries to grep, and the follow-up order | `npm run rulebook-check`, `npm run rulebook-fires -- --evidence`, `/rules` |
+| Diagnose a rulebook rule (never fires, fires wrongly, correction cut) | [rulebook.md](rulebook.md) — the debugging tables and the session entries to grep | `npm run rulebook-check`, `npm run rulebook-fires -- --evidence`, `/rules` |
 | Diagnose a surprising ask | `python3 scripts/extract_flow.py --latest` | |
-| Measure prompt fatigue and plan outcomes over many sessions | `python3 scripts/extract_flow.py --stats ~/.pi/agent/sessions` | compare with the baseline in [challenges.md](challenges.md) |
+| Measure prompt fatigue and plan outcomes over many sessions | `python3 scripts/extract_flow.py --stats ~/.pi/agent/sessions` | |
 
 ## Testing
 
@@ -296,7 +265,5 @@ that fires events and answers dialogs from a script; integration suites run
 user stories (`flows.test.ts`), the dialog catalogue (`dialogs.test.ts`),
 child relay and subagents. `intent.test.ts` pins user promises in the user's
 words: if it fails, the intent is changing and that is a design decision, not a
-test edit. `mode-charts.test.ts` reads the Mermaid flowcharts in design.md
-and fails when a rule in `modes.ts` is missing from, or stale in, the chart of
-its mode and layer. The peer packages (`@earendil-works/*`, `typebox`) come from
+test edit. The peer packages (`@earendil-works/*`, `typebox`) come from
 the workspace `npm ci`.

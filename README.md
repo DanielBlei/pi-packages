@@ -1,38 +1,34 @@
 # pi-packages
 
-Pi packages by [Daniel Blei](https://github.com/DanielBlei), in one repo.
+Small extensions for [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent), the terminal coding agent, that I use day to day. Each package installs on its own.
+
+> **Status:** 0.x. Used daily, but settings and behaviour can change between releases.
 
 | Package | What it does | Install |
 |---|---|---|
-| [pi-keeper](pi-keeper) | Autonomy modes with a project rulebook: arbitrates every tool call (`allow` / `ask` / `deny`) from `default`, `auto` and `plan` modes, keeps per-project rules, and lets subagents inherit the parent's mode | `pi install npm:pi-keeper` |
-| [pi-session-topic](pi-session-topic) | One-line session titles, so `/resume` shows a topic instead of the first prompt | `pi install npm:pi-session-topic` |
-| [pi-shell-highlight](pi-shell-highlight) | Shell command highlighting for the dialogs that ask to run a command; pi-keeper's approval dialog consumes it | `pi install npm:pi-shell-highlight` |
+| [pi-keeper](pi-keeper) | Autonomy modes (`default`, `auto`, `plan`) and a project rulebook that gate every tool call | `pi install npm:pi-keeper` |
+| [pi-session-topic](pi-session-topic) | One-line session titles, so `/resume` shows a topic | `pi install npm:pi-session-topic` |
+| [pi-shell-highlight](pi-shell-highlight) | Shell command highlighting for permission dialogs | `pi install npm:pi-shell-highlight` |
 
-First npm release is pending; until then, install a checkout with
-`pi install /path/to/pi-packages/<package>`.
+Not on npm yet? Install a checkout: `pi install /path/to/pi-packages/<package>`.
 
-## Working in this repo
+## Risk
+
+Pi extensions run code on your machine. Read the source before you install. These are personal tools, provided "AS IS" (Apache-2.0). pi-keeper is a guard, not a sandbox: see its [security and limitations](pi-keeper/README.md#security-and-limitations).
+
+## Contributing
+
+Issues and patches for the packages above are welcome; this repo only holds my own packages. For anything beyond a small fix, open an issue first so we can agree the approach before you spend an evening on it. Replies are best effort. To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ```bash
-make install     # npm ci from the root; workspaces hoist into ./node_modules
-make check       # typecheck + tests for every package
-make pack-dry    # what each package would publish, without writing a tarball
+make install   # dev dependencies only (npm ci), not a pi install
+make check     # typecheck + tests for every package
 ```
-
-One npm workspace per package, one lockfile at the root. The root is `private`
-and never published: `pi install` fetches a single package, so each of them is
-its own npm name, published separately with `npm publish -w <package>`.
-
-Adding a package: [docs/adding-a-package.md](docs/adding-a-package.md).
 
 ## Acknowledgements
 
-pi-keeper credits the projects it draws on in its [acknowledgements](https://github.com/DanielBlei/pi-packages/tree/main/pi-keeper#acknowledgements).
+Credits are in [pi-keeper's README](pi-keeper/README.md#acknowledgements).
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). The packages
-are provided "AS IS", without warranties of any kind. pi-keeper is a guard, not
-a sandbox; read its
-[security and limitations](https://github.com/DanielBlei/pi-packages/tree/main/pi-keeper#security-and-limitations)
-before you rely on it. To report a vulnerability, see [SECURITY.md](SECURITY.md).
+[Apache-2.0](LICENSE), see also [NOTICE](NOTICE).

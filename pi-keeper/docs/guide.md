@@ -19,12 +19,7 @@ resume.
 | `auto` | **`⏵⏵ auto`** (yellow) | a trusted task you are watching | almost everything, deletes and overwrites inside the project included | dangerous commands, destructive commands outside the project, protected paths, writes outside the project, secrets, the first outside read | `sudo` & co |
 | `plan` | **`⏸ plan`** (green) | researching and writing a plan | reads, read-only bash, the plan file, the scratch dir, read-only MCP tools and [listed read-only tools](#read-only-tools-from-other-packages), session rules you granted | other bash (to gather context) | edits, other tools, dangerous commands, `sudo` & co |
 
-Badge colors follow the theme palette (links, diff removed, diff added).
-
 ### What each mode allows
-
-A summary of [Modes at a glance](#modes-at-a-glance). The rules behind each row
-are in the sections linked from the bullets.
 
 | | `default` | `auto` | `plan` |
 |---|---|---|---|
@@ -38,24 +33,6 @@ are in the sections linked from the bullets.
 | Network fetches with `curl` or `wget` | asks (allowed hosts run) | runs | asks (allowed hosts run) |
 | Subagents (with pi-subagents) | runs | runs | runs |
 
-- **Plan, approve, execute.** In plan mode the agent writes the plan file and
-  calls `exit_plan_mode`. You then pick auto, or default with an approval for
-  each edit. See [Plan mode](#plan-mode).
-- **Session and project grants.** *Yes, and don't ask again this session* lasts
-  until `/new`, `/resume`, a fork or exit, and plan mode shares the prefix
-  grants. *Yes, and always allow … in this project* is saved to
-  `.pi/settings.local.json` and applies in default mode only. See
-  [Day to day in default mode](#day-to-day-in-default-mode) and
-  [Managing rules](#managing-rules).
-- **Project rules.** `ask` and `deny` rules apply in every mode; `allow` rules
-  load after you review the file once. A file that cannot be read or is not
-  valid JSON makes every shell command ask, in every mode, until it is fixed.
-  See [Managing rules](#managing-rules).
-- **Subagents.** A child runs in its parent's mode: plan stays read-only, and
-  default stays default. Auto applies only with *Subagents follow auto mode* on, and only
-  while the child's asks reach you. A queued ask that an earlier answer now
-  covers is not asked again. See [Subagents](#subagents-pi-subagents) and
-  [Background subagents](#background-subagents).
 - **A guard, not a sandbox.** pi-keeper decides each call when the call is made.
   An extension that loads after it can still rewrite a call that a rule
   allowed (for example a command rewriter). For untrusted work, use a container
@@ -68,8 +45,7 @@ are in the sections linked from the bullets.
   `… | cat -n | awk '{printf "%d\t%s\n", $1+9, substr($0, index($0,$2))}'`,
   ...) never ask. `awk` counts as read-only only when its command-line program
   cannot reach outside the pipeline (no `system`, `getline`, pipe, redirect or
-  `-f` file), because awk is what a model reaches for to number the lines of a
-  slice; anything it can't read means a dialog (`docs/design.md`, "Read-only
+  `-f` file); anything it can't read means a dialog (`docs/design.md`, "Read-only
   analysis").
   pi's built-in `grep`/`find`/`ls` tools are off; the model uses `rtk` in
   bash (`pi --enable-builtin-tools` turns them back on; tools enabled
@@ -147,8 +123,7 @@ next time it loads, and the rules apply once you accept. Subagents share the
 session grant with their parent both ways and read the project rule like any
 other. A grant never covers a request that sends data (`-d`, `-F`, `-T`,
 `--json`, a cookie file, a non-GET method), a proxy or `--resolve` override,
-or one saved to a file. Only hosts you allow qualify, never "any host",
-because a GET still carries its URL, and data can leave in the URL.
+or one saved to a file. Only hosts you allow qualify, never "any host".
 `/permissions` lists and removes the grants.
 
 ## Day to day in default mode
@@ -208,8 +183,7 @@ How rules match:
 
 ### The dialogs
 
-All approval dialogs share one bordered style: commands, paths and patterns
-in the theme's warning color, *Why* lines dim. The common choices are listed
+The common choices are listed
 first and the rare ones sit behind *More…* (Esc in the main dialog rejects;
 Esc in *More…* goes back). Long or multi-line commands are shown in full;
 scroll with PgUp/PgDn or Shift+↑↓, pick with ↑↓ or j/k and Enter. There are
@@ -345,8 +319,7 @@ Commands and failure modes (`/rules` in the theme's colours, one rule on Enter):
   `npm run prompt-weight` prints the numbers for every mode.
 
 Where a rule lives, why it did or did not fire, the two session entries it leaves
-behind, and what is deliberately not built yet are in
-[docs/rulebook.md](rulebook.md).
+behind are in [docs/rulebook.md](rulebook.md).
 
 ## Read-only tools from other packages
 
@@ -369,9 +342,7 @@ start, because the name would allow whatever they are asked to run. The same too
 annotation: they keep the mode's fallback (ask in default, deny in plan) whatever the server declares. The MCP
 *resource* readers are listed while `mcp` is not: they only read what a server
 offers. `lsp_rename` is deliberately absent — it only previews a rename today,
-but the name promises a write; add it by hand if you want it. The file
-is global on purpose: a project file could let a cloned repository grant
-itself tools. A broken file warns once at session start and the defaults
+but the name promises a write; add it by hand if you want it. A broken file warns once at session start and the defaults
 apply. Any other unknown tool still asks in default
 mode and is denied in plan mode, with a message that tells the model it is
 unavailable while planning.
@@ -576,9 +547,7 @@ ceiling on all of it.
 
 ### Subagents get your skills
 
-A child used to be blind to the skills you installed — every builtin agent sets
-`inheritSkills: false`, so a brief that says "run the `principal-architect`
-skill" named something the child could not see. There is no
+There is no
 `subagents.defaultSkills`, but a settings override carries the field, so this
 machine enables it for the three roles we delegate to
 (`~/.pi/agent/settings.json`, per role — add any other agent the same way):
@@ -596,12 +565,10 @@ machine enables it for the three roles we delegate to
 ```
 
 A child then gets the same `<available_skills>` catalog you do (metadata only;
-it reads the file when the task matches) — verified by asking a `scout` child to
-list its catalog. Two consequences worth knowing:
+it reads the file when the task matches). Two consequences worth knowing:
 
-- **It is machine-local, on purpose.** The setting lives in your pi config, not
-  in this repo, so a fresh machine needs those three lines again (they are also
-  the whole fix for a different harness's children). A stale override wins over
+- **It is machine-local.** The setting lives in your pi config, not
+  in this repo, so a fresh machine needs those three lines again. A stale override wins over
   everything else, which is why `agentOverrides` is the one place to look when a
   child behaves unlike its agent file.
 - **Skill files are readable without an ask.** Reading `<skill-dir>/SKILL.md` and
@@ -700,21 +667,9 @@ grants, and either settles it silently or shows the usual dialog.
 - **Settings.** `background-asks` (default **on**, in `/keeper`) turns
   the whole feature on or off; the environment variable
   `PI_KEEPER_BACKGROUND_ASKS=0`, set for the parent or the child, is a
-  kill switch that overrides it. Two more
-  settings are in `/keeper` too: `background-ask-timeout` (default 5
-  minutes, between 10 seconds and 30 minutes; stored as
-  `backgroundAskTimeoutMs`; it applies to children launched afterwards; the
-  parent's own limit follows at the next poll but never drops below 15 minutes) and `background-ask-popup`
-  (`always` by default, `idle`, `badge`; stored as `backgroundAskPopup`): `always` opens as soon as no other dialog is open; `idle` pops up with the bell
-  when the session is idle and the editor is empty and shows the badge
-  otherwise; `badge` never pops up, you open asks with `/approvals`.
+  kill switch that overrides it.
 
-Compared with Claude Code, whose background subagents surface their
-permission prompts in the main session and where Esc denies that one call,
-the model here is the same; the differences are the badge and `/approvals`
-(so a prompt never steals what you are typing), and the heartbeat, which
-makes a child with no listening parent fail fast. Not offered for background
-asks: *No, and tell pi*. Limits: a reply takes up to about half a second to
+Limits: a reply takes up to about half a second to
 arrive (polling); a parent blocked for more than 15 seconds without
 returning to its event loop looks gone to its children; and a child's lane
 text is fixed when it starts, so it keeps describing the setup it started
@@ -765,10 +720,7 @@ long strings and are edited in the file by hand.
   lifts the next child run and lowering it below the role's level does not lower
   the child. `role`: the child keeps what its agent file or a launch asked for
   and ignores this session. A `:level` suffix on a launch is never lowered by
-  `follow`. The level
-  travels with the session grants (through the relay for a foreground child and
-  the published snapshot for a background one), so a parent that changes its
-  level mid-session reaches children that are already running, at their next run.
+  `follow`.
   Applies without restarting the child.
 - **Offer "always allow in this project" for exact commands** (`project-exact-commands`, default **off**): when
   on, the approval dialog for a command no prefix can cover (an interpreter
@@ -841,8 +793,7 @@ long strings and are edited in the file by hand.
   assignment target in a python/ruby/perl body —
   and falls back to `dim` when that package is not loaded (an unset value follows
   whether the package is loaded, when each dialog opens; a value you set yourself is
-  kept). Install it with `pi install npm:pi-shell-highlight`. The
-  old single value `syntax` is gone: the parser warns and uses the default. A diff
+  kept). Install it with `pi install npm:pi-shell-highlight`. A diff
   preview keeps its added/removed colors either way. Applies to the next dialog.
 
 Session grants (remembered commands, read directories, "all edits") stay in
@@ -853,24 +804,6 @@ background ask are applied in your session, so they appear there too). Every mod
 parent and child, is told the rules in effect (a *rules line*: project
 allow/ask/deny entries, read directories, session grants).
 
-- **Children know their lane.** Every child's system prompt gets a *lane
-  line* after its mode prompt (`childLaneLine`, `extensions/child-lane.ts`):
-  a few sentences naming its lane (read-only plan child / default child
-  with a relay / default background child / default child with no relay /
-  auto child, ...), what runs, what
-  is denied — naming the mutation tools the child actually has — and what
-  to do instead (scratch dir, final report, `contact_supervisor` with
-  reason `need_decision`). A child with no way to ask is told plainly that every
-  mutation is denied for every path, so it does not probe `edit` → `bash` →
-  `write` → path variants after the first denial; a background child that can
-  ask is told its asks go to the user and that a declined or unanswered one
-  means continuing without the call. The deny messages (the
-  ask that cannot reach a user, and the child's `denyReason`) reuse the
-  same lane names and phrases, so a denial reads like the lane line made
-  specific to one call. Parents get one sentence in their mode message
-  about the children they can launch (agent roles, and whether background
-  children ask you, run auto or stage-and-report), only while the `subagent` tool is
-  active.
 - **Children ask through you.** A tool call that needs approval in a
   foreground child opens the same dialog in your terminal (the title says
   *subagent*, the terminal rings) and your answer is applied to the child's
@@ -949,10 +882,7 @@ rendering.
   then run `/reload`), put a prompt for the agent in the editor (not sent), not now
   (asked again next session), or don't ask again (saved as `ccExtensionsPrompt` in
   `pi-keeper.json`). The manual edit is adding `"exit_plan_mode"` to that list,
-  creating the list if it is missing. This works because `exit_plan_mode` defines its own
-  renderer, and `excludeRenderers` applies only to such tools. pi-cc-extensions is
-  detected by its `/ccstyle` command, or by its listing in `settings.json`, or by
-  its settings file. pi-cc-extensions 1.0.20 requires pi ^1.5.1 according to its
+  creating the list if it is missing. pi-cc-extensions 1.0.20 requires pi ^1.5.1 according to its
   README. The script `scripts/exclude_exit_plan_mode.py` in a checkout of this
   repository does the same edit from a shell.
 - **Footer colors:** upstream pi-cc-extensions strips ANSI colors from
@@ -972,23 +902,6 @@ rendering.
   change (a session grant re-sends the whole mode message). On a small local
   model that follows the system prompt better than a message, set `"modeInstructions": "prompt"` in
   `~/.pi/agent/pi-keeper.json` to put the mode back into the prompt.
-- **Command colors in the dialog:** a bash command over 300 characters, or
-  one with newlines, is shown under the `full command` label. That block is
-  painted with the theme's `dim` slot by default, and on some dark themes
-  `dim` is only just readable for body text (obsidian-harbor's slate sits at
-  4.4:1). `"commandColors"` in `~/.pi/agent/pi-keeper.json` takes
-  `"dim"`, `"muted"`, `"text"`, `"builtin-syntax"` or `"shell-highlight"`. Left
-  unset, it is `"shell-highlight"` when pi-shell-highlight is installed and `"dim"`
-  when not (install with `pi install npm:pi-shell-highlight`); saving a value from
-  `/keeper` makes it explicit:
-  `"builtin-syntax"` colors it with pi's own shell highlighter (the one the
-  transcript uses for fenced code), so strings, variables, keywords and
-  comments show in the theme's syntax colors. `"shell-highlight"` adds what a
-  grammar cannot know — the name of each external command, a language or task runner
-  (`python`, `go`, `npm`) apart from a plain tool, a modifier such as `sudo` or `rtk`
-  painted as a quieter qualifier, the options of the command, and the inner language of a
-  heredoc — through the `pi-shell-highlight` package; set explicitly without that
-  package, it means `"dim"`. A diff preview keeps its added/removed colors.
 - **Where the colors reach:** `"shell-highlight"` also paints the one-line
   `bash: <command>` title of the dialog (the form a short command takes, where
   there is no preview block) and a `bash`/`sh` fenced block in the plan view,

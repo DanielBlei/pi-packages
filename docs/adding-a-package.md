@@ -1,7 +1,8 @@
 # Adding a package
 
-Every package is published on its own, so a package directory has to stand
-alone: npm packs that directory and nothing around it.
+Maintainer notes. This repo holds my own packages and does not take new ones from outside.
+
+Each package is published on its own: npm packs that directory and nothing around it.
 
 ## 1. Directory and manifest
 
@@ -32,14 +33,13 @@ alone: npm packs that directory and nothing around it.
 | `repository` | `{ "type": "git", "url": "...", "directory": "<package>" }` — no source link without it |
 | `engines` | `{ "node": ">=22.19.0" }`, what pi itself requires |
 
-Remove `private` from the package manifest when the package is meant to
-publish. The root stays `private: true`.
+Drop `private` from the package manifest to publish it. The root stays `private: true`.
 
 ## 2. Wire it into the repo
 
 1. Add the directory to `workspaces` in the root `package.json`.
 2. Add it to `PI` in the `Makefile`.
-3. Add a row to the table in the root `README.md`.
+3. Add a row to the package table in the root `README.md`.
 4. `npm install` at the root to update the lockfile.
 
 ## 3. Before the first publish
@@ -58,8 +58,7 @@ PI_CODING_AGENT_DIR=/tmp/probe/agent pi install /tmp/probe/extract/<package>
 PI_CODING_AGENT_DIR=/tmp/probe/agent pi list
 ```
 
-A package that publishes but loads nothing fails silently: `pi install` does no
-resource validation.
+`pi install` does no resource validation, so a package that loads nothing fails silently.
 
 ## Rules that bite
 

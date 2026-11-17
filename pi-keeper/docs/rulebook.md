@@ -1,11 +1,11 @@
-# The rulebook: follow-up and debugging
+# The rulebook: debugging
 
 Everything about the reactive rules: where they live, what runs when, how to find
-out why a rule did or did not fire, and what is deliberately not built yet.
+out why a rule did or did not fire.
 [docs/architecture.md](architecture.md) has the module map and the model-facing
 text catalogue; this file is the operator's view.
 
-## What ships (v1)
+## What ships
 
 | Piece | File | Job |
 |---|---|---|
@@ -22,20 +22,6 @@ the assistant's **text blocks only** (no thinking, no tool arguments); only the
 last `RULE_SCAN_CAP` (20 000) characters of an answer are scanned; `continue` is
 skipped when the turn made tool calls; **subagent children are not policed**; the
 card needs a TUI.
-
-## The lifecycle, once more
-
-```
-turn ends (outcome=completed)
-  → text = the assistant's text blocks, joined
-  → syncRulebook: user dir, then project dir (project files: trusted hash only)
-  → matchRules: skip already-fired, test the tail of the text
-  → fired? then in ONE turn_end return:
-        custom_message pi-keeper-rule   (display:false, details.rules)
-        custom        pi-keeper-rule-fired per rule (card + session record)
-        continue: true                     (if no tool results, and under the cap)
-  → the model reads the correction on its next request and answers
-```
 
 ## Debugging: it does not fire
 
@@ -54,13 +40,6 @@ Work down this list; each step is one command or one look.
 | Is the file new, mid-session? | Rules are re-read every turn, so no reload is needed. But `firedRules` is per session, and the trust gate is per content hash. |
 
 ## Rule design: blast radius, not bookkeeping
-
-The first version of `claims-need-evidence` fired on any "tests pass" phrasing. On
-the recorded corpus (one machine's sample) that was wrong in both directions:
-it nudged the model into a
-full test run after trivial edits ("created two files"), and it matched prose
-*about* the words ("Item 5's whole approach did not work", "every caplog assertion
-passed alone and failed in the full suite").
 
 The rule that survived asks a narrower question — **does this claim cover things
 the change could break?** — and answers it with two changes:
@@ -85,12 +64,8 @@ Measure both halves before you trust a rule:
 
 ```bash
 npm run rulebook-check                       # the samples say what the intent is
-npm run rulebook-fires -- --evidence         # 39/342 sessions, 18% already backed (one machine's sample)
+npm run rulebook-fires -- --evidence
 ```
-
-This rule took three iterations, each one driven by a sample the previous version
-got wrong. That loop — add the real false positive to `quiet`, watch it fail,
-narrow the pattern, re-measure — is the whole method.
 
 ## Debugging: it fires when it should not
 
@@ -112,7 +87,7 @@ narrow the pattern, re-measure — is the whole method.
 
 | Symptom | Cause and fix |
 |---|---|
-| The same header twice | Fixed in v1.1: `correctionText` renders ONE header and a block per rule. If it returns, `prompts/rule-warning.md` lost its `{{rules}}` slot. |
+| The same header twice | `correctionText` renders ONE header and a block per rule. If it returns, `prompts/rule-warning.md` lost its `{{rules}}` slot. |
 | A rule's body cut off | `RULE_BODY_CAP` (1 200 chars) per body, `RULE_TEXT_CAP` (4 000) for the whole message; over the whole cap the tail points at `/rules <name>`, which always has the full body. |
 | The model apologises and does nothing | The body is a scolding, not a fix. Rewrite it as the action: "run `npm test` and quote the line". |
 | The card is missing | The card is an entry renderer: TUI only. `pi -p` leaves only the session entries. |
@@ -134,46 +109,7 @@ what the session holds cannot disagree. Permission telemetry
 (`pi-keeper-permission`, `python3 scripts/extract_flow.py`) is a different
 entry type and is not affected by the rulebook.
 
-## Follow-up, in the order I would do it
-
-1. **Evidence checks (tier 2, highest value).** A `requires:` field, e.g.
-   `requires: tool:bash=npm test|pytest|make test`, satisfied only if a matching tool call
-   *succeeded* in the same turn (or the last N turns). This turns "claimed tests
-   without running them" from a wording match into a fact check: no false positive
-   when the model did run them, no miss when it paraphrases. Small and pure: one
-   field, one matcher in `rulebook.ts`, the tool results already in the `turn_end`
-   payload (`event.toolResults`), one test per branch. Effort: a day.
-2. **Fire telemetry.** Append the fire to `pi-keeper-permission`-style
-   telemetry (`telemetry.ts`) so `extract_flow.py --stats` can report fires per
-   model and per rule next to approval rates. Effort: an hour.
-3. **Repeat policy.** Today: once per session. If a habit needs a second
-   reminder, `repeat: gap` (re-eligible after N turns, as oh-my-pi does) is the
-   next step, with the gap counted at `turn_end`.
-4. **Judged rules (`question:`).** Only for what a regex cannot see ("does this
-   reply oversell certainty?"). Shape it like the reference: opt-in per rule,
-   a `condition` as required prefilter, ONE batched judge request per turn for
-   every candidate question, a probability threshold, a session cap, and fail
-   open — a failed judgment never fires. Anything less is a surprise generator.
-5. **Children.** The same handler behind the `childMode` guard, with a rule
-   field for which lanes it applies to (`agents: main|scout|*`), once the parent
-   path has a month of quiet.
-6. **A disable toggle.** `/rules` could flip a rule off for the session (an
-   in-memory set next to `firedRules`) without editing the file. Cheap, but only
-   worth it if a rule is kept despite misfiring.
-
-Not planned: matching tool arguments or thinking, AST conditions, globs, rule
-discovery from `.cursor`/`.windsurf`/`.cline`/`.github`, goal or loop modes, any
-change to the prompt prefix.
-
 ## Cheat sheet
-
-```bash
-npm run rulebook-check                    # do the installed rules fire/keep quiet as intended
-npm run rulebook-fires -- --evidence      # how often each rule would have fired over past sessions
-npm run prompt-weight                     # what the injected text costs per mode
-npm test --workspace pi-keeper      # unit + integration (rulebook has both)
-make check                                # everything offline, from the repo root
-```
 
 In a session: `/rules` (coloured view), `/rules <name>` (one rule, plain),
 `/permissions` (a different thing: what may run).
