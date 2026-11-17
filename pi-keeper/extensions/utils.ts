@@ -1216,6 +1216,42 @@ function checkGitBranchArgs(rest: string[]): boolean {
 	return true;
 }
 
+/**
+ * Options whose value may be a glob: every expansion keeps the option name, so
+ * `--include=*.py` can only become more `--include=` words, never another flag.
+ */
+const GLOB_VALUE_OPTIONS = ["--include=", "--exclude=", "--exclude-dir=", "--glob=", "--iglob=", "-g"];
+
+/**
+ * True when the shell could expand this unquoted word into a flag, or into
+ * several words that no check saw. Every expansion of a glob keeps the literal
+ * text before its first glob character, so `src/*.py` can only become paths
+ * under `src/`, and `--include=*.py` only more `--include=` words. A word that
+ * starts with a glob (`*`, `*.py`, `{-x,y}`) can become anything, a file named
+ * `--pre=./x.sh` among them, and `$` word-splits whatever its prefix says.
+ */
+function globMayBecomeFlag(word: string): boolean {
+	if (word.includes("$")) return true;
+	const first = word.search(/[*?[{]/);
+	if (first <= 0) return true;
+	const prefix = word.slice(0, first);
+	if (!prefix.startsWith("-")) return false;
+	return !GLOB_VALUE_OPTIONS.some((option) => prefix.startsWith(option));
+}
+
+/**
+ * True when a glob operand may reach outside the project: a path that does not
+ * exist yet is not seen as an outside read, so the directory part of the glob
+ * is judged instead. `~`, a `..` segment anywhere, and an unknown cwd count as outside.
+ */
+function globReachesOutside(word: string, cwd: string | undefined): boolean {
+	if (word.startsWith("-")) return false; // an option value (`--include=*.py`) is a filter, not a path
+	if (cwd === undefined || word.startsWith("~") || word.split("/").includes("..")) return true;
+	const first = word.search(/[*?[{]/);
+	const dir = word.slice(0, first).replace(/[^/]*$/, "");
+	return isOutsideCwd(dir === "" ? "." : dir, { cwd });
+}
+
 /** rtk subcommands that pass their args to a native command. */
 const RTK_NATIVE: Record<string, string> = { find: "find", rg: "rg", grep: "rg", tree: "tree" };
 
@@ -1234,8 +1270,10 @@ function rtkBlocker(args: string[], globs: boolean[], cwd: string | undefined): 
 	if (sub === "git") return gitBlocker(rest, cwd, "rtk git");
 	const native = RTK_NATIVE[sub];
 	if (native !== undefined) {
-		const glob = rest.find((_, k) => restGlobs[k]);
+		const glob = rest.find((word, k) => restGlobs[k] && globMayBecomeFlag(word));
 		if (glob !== undefined) return execBlock(globReason(`rtk ${sub}`, glob));
+		const reach = rest.find((word, k) => restGlobs[k] && globReachesOutside(word, cwd));
+		if (reach !== undefined) return execBlock(`\`rtk ${sub}\` has an unquoted glob (\`${reach}\`) that may reach outside the project; quote the path or name the files`);
 		return flagBlocker(native, rest, `rtk ${sub}`);
 	}
 	return READ_ONLY_RTK_SUBCOMMANDS.includes(sub) ? undefined : plain(`\`rtk ${sub}\` isn't on the read-only rtk list`);
@@ -2451,7 +2489,7 @@ export function isDangerousCommand(command: string, ctx: PathContext): boolean {
  * directly or through a glob that can match a .env file (`.en*`, `.e[n]v`).
  */
 export function isSecretCommand(command: string, ctx?: SecretContext): boolean {
-	return scanUnits(command).some((unit) => unit.some((w) => isSecretFile(w, ctx) || globMatchesSecretFile(w))) || printsSecretVariable(command);
+	return scanUnits(command).some((unit) => unit.some((w) => isSecretFile(w, ctx) || globMatchesSecretFile(w) || globMatchesSecretOnDisk(w, ctx))) || printsSecretVariable(command);
 }
 
 /**
@@ -2529,6 +2567,17 @@ export function outsideCwdReadPaths(command: string, ctx: PathContext): string[]
 			// $HOME is expanded first, so `$HOME/x` is judged like `~/x`; a `..` segment can climb out of the cwd anywhere in the word
 			const value = expandHome(arg.startsWith("-") ? arg.slice(arg.indexOf("=") + 1) : arg, homedir(), cwd);
 			if (/^(\/|~|\.\.)|(^|\/)\.\.(\/|$)/.test(value) && isOutsideCwdRead(value, ctx)) found.add(value);
+			// a path or glob inside the project can still be, or match, a link that leads out of it
+			// (a path that is itself outside is the case above, or the `cd` directory already reported)
+			else if (cwd !== undefined && !arg.startsWith("-") && isInside(resolve(cwd), resolve(ctx.cwd))) {
+				const here: string = cwd;
+				const leadsOut = (path: string): boolean => isInside(resolvePath(path, here), resolve(ctx.cwd)) && isOutsideCwdRead(resolvePath(path, here), ctx);
+				if (/[*?[{]/.test(arg)) {
+					const matches = expandGlob(arg, cwd);
+					if (matches === null) found.add(arg);
+					else for (const match of matches) if (leadsOut(match)) found.add(match);
+				} else if (lstatOk(resolvePath(arg, cwd)) && leadsOut(arg)) found.add(arg);
+			}
 		}
 	}
 	return [...found];
@@ -3186,6 +3235,99 @@ function globMatchesSecretFile(word: string): boolean {
 	if (!name.startsWith(".") || !/[*?[]/.test(name)) return false;
 	const pattern = globToRegExp(name);
 	return pattern !== null && SECRET_FILE_SAMPLES.some((sample) => pattern.test(sample));
+}
+
+/** Most files a glob operand may match before it is no longer checked one by one. */
+const GLOB_EXPANSION_LIMIT = 2000;
+
+/** `a{b,c}d` as `abd`, `acd`; a word without a valid comma list stays as it is. Null past 256 alternatives. */
+function braceAlternatives(word: string, depth = 0): string[] | null {
+	const open = word.indexOf("{");
+	if (open === -1 || depth > 4) return [word];
+	let level = 0;
+	let close = -1;
+	const commas: number[] = [];
+	for (let i = open; i < word.length; i++) {
+		const ch = word[i];
+		if (ch === "{") level++;
+		else if (ch === "}" && --level === 0) {
+			close = i;
+			break;
+		} else if (ch === "," && level === 1) commas.push(i);
+	}
+	if (close === -1 || commas.length === 0) return [word];
+	const bounds = [open, ...commas, close];
+	const out: string[] = [];
+	for (let k = 0; k < bounds.length - 1; k++) {
+		const part = braceAlternatives(word.slice(0, open) + word.slice(bounds[k] + 1, bounds[k + 1]) + word.slice(close + 1), depth + 1);
+		if (part === null) return null;
+		out.push(...part);
+		if (out.length > 256) return null;
+	}
+	return out;
+}
+
+/**
+ * The files an unquoted glob operand names, as the shell expands it against
+ * `cwd`: `*`, `?` and `[...]` match within one path segment, a leading dot only
+ * matches a pattern that starts with a dot, and `{a,b}` expands first. Names
+ * that do not exist are not returned (the shell passes the word through then).
+ * Null when more than GLOB_EXPANSION_LIMIT names would be read, so the caller
+ * can fail closed.
+ */
+function expandGlob(word: string, cwd: string): string[] | null {
+	const alternatives = braceAlternatives(word);
+	if (alternatives === null) return null;
+	const found: string[] = [];
+	let visited = 0;
+	for (const alternative of alternatives) {
+		let paths = [alternative.startsWith("/") ? "/" : ""];
+		for (const segment of alternative.split("/").filter((part) => part !== "")) {
+			const next: string[] = [];
+			const joined = (base: string, name: string): string => (base === "" ? name : base === "/" ? `/${name}` : `${base}/${name}`);
+			if (!/[*?[]/.test(segment)) {
+				for (const base of paths) next.push(joined(base, segment));
+			} else {
+				const pattern = globToRegExp(segment);
+				if (pattern === null) return null;
+				for (const base of paths) {
+					let names: string[];
+					try {
+						names = readdirSync(resolve(cwd, base === "" ? "." : base));
+					} catch {
+						continue;
+					}
+					visited += names.length;
+					if (visited > GLOB_EXPANSION_LIMIT) return null;
+					for (const name of names) if ((!name.startsWith(".") || segment.startsWith(".")) && pattern.test(name)) next.push(joined(base, name));
+				}
+			}
+			paths = next;
+		}
+		found.push(...paths.filter((path) => lstatOk(resolve(cwd, path))));
+	}
+	return found;
+}
+
+/** True when `path` exists as a link, even a dangling one (existsSync follows it). */
+function lstatOk(path: string): boolean {
+	try {
+		lstatSync(path);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * True when an unquoted glob operand matches a secret file, or a link to one,
+ * by looking at the directory: `conf/*` holding an `id_rsa` is a secret read
+ * that no pattern on the word can show. Unreadable by the limit counts as one.
+ */
+function globMatchesSecretOnDisk(word: string, ctx: SecretContext | undefined): boolean {
+	if (ctx?.cwd === undefined || !/[*?[{]/.test(word) || word.startsWith("-")) return false;
+	const matches = expandGlob(word, ctx.cwd);
+	return matches === null || matches.some((match) => isSecretFile(match, ctx));
 }
 
 function globToRegExp(glob: string): RegExp | null {

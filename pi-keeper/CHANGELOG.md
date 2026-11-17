@@ -16,6 +16,17 @@
   mode, even for a command the rules call read-only.
 - An `output` path whose artifact directory is a link that leads out of the
   sessions directory is no longer taken for the child's report.
+- `rtk grep`, `rtk rg`, `rtk find` and `rtk tree` no longer ask for an unquoted
+  glob that cannot become a flag: `src/*.py`, `./*.py` and `--include=*.py` run,
+  because every expansion keeps its literal prefix. `*.py`, `--pre=*.sh`, `$VAR`,
+  `{-a,b}` and any glob that leaves the project (`../*`, `/etc/pass*`, `~/*`)
+  still ask: a file named `--pre=x.sh` would reach `rg` as an option.
+- A glob operand is now checked against what it matches on disk. `cat conf/*`
+  asks when `conf/` holds an `id_rsa`; a glob, or a plain name, that is a link
+  leading out of the project (`src/link.py` pointing at a file elsewhere) asks as
+  an outside read; a glob that matches more than 2000 files asks. Before, only a
+  pattern that could match `.env` was seen, and a link inside the project was
+  taken for a file inside it.
 - The user guide moved to `docs/guide.md`, and the contributor notes to
   `docs/development.md`. The README is a short install and overview page. The
   package descriptions of pi-keeper, pi-session-topic and pi-shell-highlight

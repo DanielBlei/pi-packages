@@ -1025,6 +1025,21 @@ Why a command is not read-only decides what a rule can cover
   `zip`, `scp`/`sftp`, `man`). `git log` must never cover `git -c core.x=y
   log`; the exec flags on `tar`/`rsync`/`zip` apply even under a `tar` rule,
   and long options match abbreviations (`--use-c`) so they can't be dodged.
+- **An unquoted glob is judged by where it can lead** (`globMayBecomeFlag`,
+  `globReachesOutside`; the `rtk grep`/`rg`/`find`/`tree` path). The shell
+  expands it before the command runs, and every expansion keeps the literal text
+  before the first glob character. So `src/*.py` can only name paths under
+  `src/`, and `--include=*.py` can only stay an `--include=`. A glob that
+  starts with a glob character (`*.py`), any `$` (it word-splits), and a glob
+  that leaves the project or holds `..` stay exec: a file named `--pre=x.sh`
+  would reach `rg` as an option. Plain `cat`/`grep` do not get the outside
+  check on the word itself, because a glob is not a path that exists.
+  Instead the glob is expanded against the directory as the shell would
+  (`expandGlob`: no leading-dot match unless the pattern starts with a dot,
+  `{a,b}` first, at most 2000 names read, more fails closed), and every match
+  goes through the secret check (`globMatchesSecretOnDisk`) and the outside-read
+  check (`outsideCwdReadPaths`). That also catches a link inside the project
+  that leads out of it, named directly or matched by a glob.
 - **write: covered only when every target passes the target rule.**
   `FILE_WRITERS` (`cp`, `mv`, `ln`, `install`, `mkdir`, `touch`, `tee`,
   `truncate`: every operand is a target, sources included, since `cp
