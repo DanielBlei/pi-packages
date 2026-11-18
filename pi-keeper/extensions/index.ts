@@ -3165,7 +3165,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				value: () => config.modeWorkingRow,
 				name: () => "Mode in the working row",
 				label: () => `Mode in the working row: ${config.modeWorkingRow ? "on" : "off"}`,
-				summary: "While the agent works in plan or auto mode, the working row reads \"\u23f5\u23f5 auto \u00b7 Working\" so the mode is in front of you. Off by default: the footer already shows the mode. Default mode keeps pi's own text.",
+				summary: "While the agent works in plan or auto mode, the working row reads \"\u00bb auto \u00b7 Working\" so the mode is in front of you. Off by default: the footer already shows the mode. Default mode keeps pi's own text.",
 				set(value, ctx) {
 					const problem = saveConfig(getAgentDir(), { modeWorkingRow: value });
 					if (problem !== undefined) return problem;

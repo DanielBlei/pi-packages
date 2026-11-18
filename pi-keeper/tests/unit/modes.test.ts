@@ -15,8 +15,8 @@ const theme: StatusTheme = {
 
 test("each mode chip is bold in its own color", () => {
 	assert.equal(formatModeStatus(theme, "default", false), "<b><mdLink>● default</mdLink></b>");
-	assert.equal(formatModeStatus(theme, "auto", false), "<b><warning>⏵⏵ auto</warning></b>");
-	assert.equal(formatModeStatus(theme, "plan", false), "<b><success>⏸ plan</success></b>");
+	assert.equal(formatModeStatus(theme, "auto", false), "<b><warning>» auto</warning></b>");
+	assert.equal(formatModeStatus(theme, "plan", false), "<b><success>≡ plan</success></b>");
 });
 
 test("session edits add a dim separator and a bold yellow `edits` flag", () => {

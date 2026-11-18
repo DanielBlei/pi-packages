@@ -256,7 +256,7 @@ export const MODES: Record<ModeName, ModeDefinition> = {
 		name: "auto",
 		tools: [...ACTIVE_READ_TOOLS, ...WRITE_TOOLS, "bash", "mcp", EXIT_PLAN_TOOL],
 		badge: "auto",
-		icon: "⏵⏵",
+		icon: "»",
 		color: "warning",
 		description: "a trusted task: nearly everything runs; dangerous, secret and outside actions ask",
 		prompt: loadPrompt("auto-mode.md"),
@@ -286,7 +286,7 @@ export const MODES: Record<ModeName, ModeDefinition> = {
 		// other target is denied by the rules below.
 		tools: [...ACTIVE_READ_TOOLS, ...WRITE_TOOLS, "bash", "mcp", EXIT_PLAN_TOOL],
 		badge: "plan",
-		icon: "⏸",
+		icon: "≡",
 		color: "success",
 		description: "researching and writing a plan: read-only except the plan file",
 		prompt: loadPrompt("plan-mode.md"),

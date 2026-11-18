@@ -42,7 +42,7 @@
  * small local models that follow prompt rules better. Written by
  * hand only — `/keeper` has no entry for it yet.
  * `modeStatus` (default true) shows the mode in the footer status line; false hides it.
- * `modeWorkingRow` (default false) shows it in the working row too (`⏵⏵ auto · Working`,
+ * `modeWorkingRow` (default false) shows it in the working row too (`» auto · Working`,
  * plan and auto mode only). Both are set by the `/keeper` panel or by hand.
  * `modeFlashSecs` (default 0, which is off; otherwise 0.1 to 10) is how long the
  * mode (icon and badge, in the mode's color) shows above the prompt after a real

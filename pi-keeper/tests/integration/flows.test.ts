@@ -1153,9 +1153,9 @@ describe("flow 13: mode persistence", () => {
 
 	it("Alt+M cycles default, auto, plan and back; each change is persisted and shown", async () => {
 		await h.shortcut("alt+m");
-		assert.match(lastStatus(h), /⏵⏵ auto/);
+		assert.match(lastStatus(h), /» auto/);
 		await h.shortcut("alt+m");
-		assert.match(lastStatus(h), /⏸ plan/);
+		assert.match(lastStatus(h), /≡ plan/);
 		await h.shortcut("alt+m");
 		assert.match(lastStatus(h), /● default/);
 		assert.deepEqual(states().map((s) => s.mode), ["auto", "plan", "default"]);
@@ -1173,9 +1173,9 @@ describe("flow 13: mode persistence", () => {
 	it("/mode without arguments opens a selector: a pick switches, Esc keeps the mode", async () => {
 		const h = await startPi({ sandbox: sb });
 		await h.session();
-		h.answer(/Current mode: ● default/, /⏵⏵ auto/);
+		h.answer(/Current mode: ● default/, /» auto/);
 		await h.command("mode", "");
-		assert.match(lastStatus(h), /⏵⏵ auto/);
+		assert.match(lastStatus(h), /» auto/);
 		assert.ok(notes(h).includes("Mode: auto"));
 		assert.equal(h.sentMessages.length, 0, "an idle switch sends nothing: the next prompt carries the mode");
 		const dialog = h.dialogs.at(-1);
@@ -1186,9 +1186,9 @@ describe("flow 13: mode persistence", () => {
 		assert.deepEqual(rows.filter((l) => l.includes("(current)")), rows.slice(0, 1), "only the current mode is marked");
 		const descCols = rows.map((l) => l.indexOf(" — "));
 		assert.ok(descCols.every((c) => c === descCols[0]), `descriptions align: ${JSON.stringify(rows)}`);
-		h.answer(/Current mode: ⏵⏵ auto/, "esc");
+		h.answer(/Current mode: » auto/, "esc");
 		await h.command("mode", "");
-		assert.match(lastStatus(h), /⏵⏵ auto/);
+		assert.match(lastStatus(h), /» auto/);
 		assert.equal(h.sentMessages.length, 0, "Esc changed nothing");
 		h.assertNoPendingAnswers();
 	});
@@ -1230,7 +1230,7 @@ describe("flow 13: mode persistence", () => {
 		const plan = h.entries.filter((e) => e.customType === "pi-keeper" && (e.data as { mode: string }).mode === "plan");
 		h.branch = [plan[0]];
 		await h.tree();
-		assert.match(lastStatus(h), /⏸ plan/);
+		assert.match(lastStatus(h), /≡ plan/);
 		assert.ok(h.activeTools().includes("exit_plan_mode"));
 		await h.prompt("again");
 		assert.ok((h.modeBlocks().at(-1) ?? "").includes(`Plan file: ${(plan[0].data as { planFilePath: string }).planFilePath}`));

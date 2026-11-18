@@ -326,7 +326,7 @@ export interface ModeDialogItem {
 	current: boolean;
 }
 
-/** Icon + badge padded into fixed columns, so the rows stack: `●  default`, `⏵⏵ auto`, `⏸  plan`. */
+/** Icon + badge padded into fixed columns, so the rows stack: `● default`, `» auto`, `≡ plan`. */
 function padModeLabel(item: ModeDialogItem, iconWidth: number, badgeWidth: number): string {
 	const icon = item.icon + " ".repeat(iconWidth - visibleWidth(item.icon));
 	const badge = item.badge + " ".repeat(badgeWidth - visibleWidth(item.badge));

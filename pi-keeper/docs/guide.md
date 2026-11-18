@@ -16,8 +16,8 @@ resume.
 | Mode | Footer | Use it for | Runs without asking | Asks | Blocked |
 |---|---|---|---|---|---|
 | `default` | **`● default`** (blue) | everyday work: you approve changes | reads, searches, read-only bash, anything your rules cover, read-only MCP tools and [listed read-only tools](#read-only-tools-from-other-packages) | edits, other bash, other tools | `sudo` & co |
-| `auto` | **`⏵⏵ auto`** (yellow) | a trusted task you are watching | almost everything, deletes and overwrites inside the project included | dangerous commands, destructive commands outside the project, protected paths, writes outside the project, secrets, the first outside read | `sudo` & co |
-| `plan` | **`⏸ plan`** (green) | researching and writing a plan | reads, read-only bash, the plan file, the scratch dir, read-only MCP tools and [listed read-only tools](#read-only-tools-from-other-packages), session rules you granted | other bash (to gather context) | edits, other tools, dangerous commands, `sudo` & co |
+| `auto` | **`» auto`** (yellow) | a trusted task you are watching | almost everything, deletes and overwrites inside the project included | dangerous commands, destructive commands outside the project, protected paths, writes outside the project, secrets, the first outside read | `sudo` & co |
+| `plan` | **`≡ plan`** (green) | researching and writing a plan | reads, read-only bash, the plan file, the scratch dir, read-only MCP tools and [listed read-only tools](#read-only-tools-from-other-packages), session rules you granted | other bash (to gather context) | edits, other tools, dangerous commands, `sudo` & co |
 
 ### What each mode allows
 
@@ -840,12 +840,12 @@ and `modeInstructions` take lists and long strings, so you edit them in the file
   preview keeps its added/removed colors either way. Applies to the next dialog.
 
 - **Mode line after a switch** (`mode-flash`, file key `modeFlashSecs`, default **off**): after a
-  switch while idle, the mode (`⏸ plan`, `⏵⏵ auto`, `● default`) shows in its color above the
+  switch while idle, the mode (`≡ plan`, `» auto`, `● default`) shows in its color above the
   prompt for this long. The panel offers `off`, `1s`, `2s`, `3s` and `5s`; in the file `0` is off and any
   value from 0.1 to 10 works. Nothing shows on session restore or in a subagent child.
 
 - **Mode in the working row** (`mode-working-row`, file key `modeWorkingRow`, default **off**): while a
-  run is active in plan or auto mode, the working row reads `⏵⏵ auto · Working`. Default mode keeps
+  run is active in plan or auto mode, the working row reads `» auto · Working`. Default mode keeps
   pi's own text. pi-cc-extensions rewrites the working row, so with it loaded this has no effect.
 
 - **Mode in the footer** (`mode-status`, file key `modeStatus`, default **on**): the mode in the

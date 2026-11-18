@@ -402,7 +402,7 @@ test("non-TUI sessions get the plain title and preview in a select, capped", asy
 
 const MODE_ITEMS: ModeDialogItem[] = [
 	{ icon: "●", badge: "default", color: "mdLink", description: "everyday work", current: true },
-	{ icon: "⏵⏵", badge: "auto", color: "warning", description: "trusted task", current: false },
+	{ icon: "»", badge: "auto", color: "warning", description: "trusted task", current: false },
 ];
 
 async function openModes(mode: string, select?: (title: string, options: string[]) => Promise<string | undefined>, onModeShortcut?: (data: string) => boolean) {
@@ -427,15 +427,15 @@ test("mode selector colors the label by mode and the description as text", async
 	const { component, result } = await openModes("tui");
 	assert.ok(component !== undefined);
 	const lines = component.render(80);
-	assert.ok(lines.some((l) => l.includes("⟦bold⟧⟦mdLink⟧●  default") && l.includes("⟦text⟧ — everyday work") && l.includes("⟦dim⟧ (current)")));
-	assert.ok(lines.some((l) => l.includes("⟦bold⟧⟦warning⟧⏵⏵ auto") && !l.includes("(current)")));
+	assert.ok(lines.some((l) => l.includes("⟦bold⟧⟦mdLink⟧● default") && l.includes("⟦text⟧ — everyday work") && l.includes("⟦dim⟧ (current)")));
+	assert.ok(lines.some((l) => l.includes("⟦bold⟧⟦warning⟧» auto") && !l.includes("(current)")));
 	assert.ok(lines.some((l) => l.replace(/⟦\w+⟧/g, "").startsWith("> ●")), "opens on the current mode");
 	// the rows stack: icon, badge and description each start at the same column
 	const plain = lines.map((l) => l.replace(/⟦\w+⟧/g, "")).filter((l) => l.includes(" — "));
 	assert.equal(plain.length, 2);
 	const descCols = plain.map((l) => l.indexOf(" — "));
 	assert.ok(descCols.every((c) => c === descCols[0]), `descriptions align: ${JSON.stringify(plain)}`);
-	assert.deepEqual(plain.map((l) => l.search(/default|auto/)), [5, 5], "badges align");
+	assert.deepEqual(plain.map((l) => l.search(/default|auto/)), [4, 4], "badges align");
 	component.handleInput(KEYS.down);
 	component.handleInput(KEYS.enter);
 	assert.equal(await result, 1);
@@ -458,5 +458,5 @@ test("mode selector falls back to ctx.ui.select with plain strings outside the T
 		return options[1];
 	});
 	assert.equal(await result, 1);
-	assert.deepEqual(seen, ["●  default — everyday work (current)", "⏵⏵ auto    — trusted task"]);
+	assert.deepEqual(seen, ["● default — everyday work (current)", "» auto    — trusted task"]);
 });

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.2 - 2026-11-18
+
+### Added
+
+- A preview image for the pi package gallery (`pi.image` in `package.json`). The image
+  is loaded from GitHub and is not part of the npm package.
+
+### Changed
+
+- Mode icons are now `»` for auto and `≡` for plan. The old `⏵⏵` and `⏸` did not show
+  in some fonts and broke the column alignment in some terminals.
+
 ## 0.1.1 - 2026-11-18
 
 A review of the whole package. Most entries close a way for a call to run without the

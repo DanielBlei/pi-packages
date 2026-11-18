@@ -1,3 +1,5 @@
+![pi-packages: small extensions for the pi coding agent](assets/banner.png)
+
 # pi-packages
 
 Small extensions for [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent), the terminal coding agent, that I use day to day. Each package installs on its own.
