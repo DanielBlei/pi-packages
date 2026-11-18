@@ -59,11 +59,11 @@ const BAD_KEYS: readonly string[] = ["__proto__", "constructor", "prototype"];
 
 export type ChildMode = "default" | "auto" | "plan";
 export type ReplyDecision = "allow" | "deny" | "cancelled";
-export type ReplyReason = "parent-session-ended" | "timeout" | "user" | "rules" | "no-ui";
+export type ReplyReason = "parent-session-ended" | "asks-turned-off" | "timeout" | "user" | "rules" | "no-ui";
 
 const MODES: readonly string[] = ["default", "auto", "plan"];
 const DECISIONS: readonly string[] = ["allow", "deny", "cancelled"];
-const REASONS: readonly string[] = ["parent-session-ended", "timeout", "user", "rules", "no-ui"];
+const REASONS: readonly string[] = ["parent-session-ended", "asks-turned-off", "timeout", "user", "rules", "no-ui"];
 
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const TOOL_NAME = /^[A-Za-z0-9_.:-]{1,64}$/;
@@ -253,12 +253,30 @@ function isFile(file: string): boolean {
 
 // --- child side ---------------------------------------------------------
 
+/** Thrown by writeRequest for a request the parent would drop unread: over MAX_BYTES, or over the key budget. */
+export class RequestTooLargeError extends Error {
+	readonly code = "request-too-large";
+
+	constructor() {
+		super("request too large to send to the parent");
+		this.name = "RequestTooLargeError";
+	}
+}
+
 /** Child: file a request. Validated first; throws on an invalid one or an unusable dir. */
 export function writeRequest(dir: string, request: AskRequest, options: MailboxOptions = {}): void {
-	if (parseRequest(request) === undefined) throw new Error("invalid ask request");
+	const text = JSON.stringify(request);
+	// the parent's reader counts bytes, not UTF-16 units: a request of CJK text is three bytes a character
+	if (Buffer.byteLength(text, "utf8") > MAX_BYTES) throw new RequestTooLargeError();
+	if (parseRequest(request) === undefined) {
+		const budget = { keys: 0 };
+		isPlainJson((request as { call?: { input?: unknown } }).call?.input, 0, budget);
+		if (budget.keys > MAX_KEYS) throw new RequestTooLargeError();
+		throw new Error("invalid ask request");
+	}
 	ensureAskDir(dir, options);
 	remove(replyFile(dir, request.id)); // never accept a reply that predates this request
-	writeFileAtomic(requestFile(dir, request.id), JSON.stringify(request));
+	writeFileAtomic(requestFile(dir, request.id), text);
 }
 
 /**

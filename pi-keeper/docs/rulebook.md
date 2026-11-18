@@ -9,6 +9,7 @@ text catalogue; this file is the operator's view.
 
 | Piece | File | Job |
 |---|---|---|
+| The example rule and `/new-rule` | `ensureUserRuleDir` and `EXAMPLE_RULE` in `extensions/rulebook.ts` (from session start and `/rules`); `prompt-templates/new-rule.md` | one `example-rule.md` in the user folder, once (`.example-seeded` marker); the template has the model write a rule file and test its regex |
 | Rules: parse, discover, match, render, records | `extensions/rulebook.ts` | pi-free, unit-tested; `parseRuleFile`, `loadRulebook`, `matchRules`, `correctionText`, `firedFromBranch` |
 | The correction text | `prompts/rule-warning.md` (`RULE_WARNING`) | one header, `{{rules}}` slot |
 | The fire path | `extensions/index.ts`, `pi.on("turn_end")` | one hidden `pi-keeper-rule` message + one `pi-keeper-rule-fired` entry per rule; `continue` only when the turn had no tool results, at most `RULES_PER_RUN_CAP` per run |
@@ -29,8 +30,8 @@ Work down this list; each step is one command or one look.
 
 | Check | How |
 |---|---|
-| Is the file found? | `/rules` — a discovered rule is listed; an undiscovered one is silent. Only `*.md` in `~/.pi/agent/pi-keeper/rules/` or `<repo>/.pi/rules/`. |
-| Is it skipped, and why? | `/rules` shows `skipped · <reason>` (no `description:`, no `condition:`, a pattern that does not compile, an empty body). One warning is also notified at session start. |
+| Is the file found? | `/rules` — a discovered rule is listed; an undiscovered one is silent. Only `*.md` in `~/.pi/agent/pi-keeper/rules/` or `<repo>/.pi/rules/`. `example-rule.md` never fires. |
+| Is it skipped, and why? | `/rules` shows `skipped · <reason>` (no frontmatter, no `description:` or `condition:`, a pattern that does not compile or matches ordinary text, an empty body). One warning is also notified at session start. |
 | Is it a project file awaiting review? | `/rules` shows `needs review`. The review dialog appears on the next prompt; *Ignore for this session* leaves it out. Without a UI, project files are never loaded. |
 | Does the pattern match the sentence at all? | `npm run rulebook-check` — put the sentence in `fires` in `scripts/rulebook-check.ts` and see it fail or pass against the installed file. |
 | Right sentence, wrong place? | Only the **last 20 000 characters** of the answer are scanned, and only **text blocks** — a claim made in thinking, or in a tool's arguments, is invisible. |

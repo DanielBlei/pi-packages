@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { renderRuleDetail, renderRulesList, rulesRows, rulesText, type RulesTheme, type RulesViewInput } from "../../extensions/rules-view.ts";
+import { renderRuleDetail, rulesPanel, wrapLine, renderRulesList, rulesRows, rulesText, type RulesTheme, type RulesViewInput } from "../../extensions/rules-view.ts";
 import { parseRuleFile, type RulebookRule } from "../../extensions/rulebook.ts";
 
 /** Every colour becomes a tag, so the expected string reads like the screen. */
@@ -68,15 +68,28 @@ test("status rows say their own story: needs review, skipped and why", () => {
 	assert.match(skipped, /no `condition:` in the frontmatter/);
 });
 
-test("a long row is cut to the terminal width, colours and all", () => {
+test("a long row wraps onto indented lines and none is wider than the terminal", () => {
 	const long = rule("a", "user", "x");
-	const wide = { ...long, description: "d".repeat(300) };
-	const [line] = renderRulesList(theme, rulesRows(view({ rules: [wide] })), 0, 60);
-	assert.ok(strip(line).length <= 60, `${strip(line).length} columns`);
+	const wide = { ...long, description: "word ".repeat(80).trim() };
+	const lines = renderRulesList(theme, rulesRows(view({ rules: [wide] })), 0, 60);
+	assert.ok(lines.length > 1, "the description continues on the next lines");
+	assert.ok(lines.every((line) => strip(line).length <= 60), "every line fits");
+	assert.ok(strip(lines[1] ?? "").startsWith("    "), "continuations are indented");
+});
+
+test("an unbroken 400-character regex, path and problem never overflow (the 'Rendered line exceeds terminal width' crash)", () => {
+	const base = rule("a", "user", "x");
+	const wide = { ...base, description: "d".repeat(400), condition: "(?i)\\b(" + "alpha|".repeat(70) + "omega)\\b", file: `/home/u/${"p".repeat(300)}/a.md` };
+	const rows = rulesRows(view({ rules: [wide], problems: [{ file: "/r/bad.md", problem: "q".repeat(400) }], untrusted: [{ file: "/r/" + "u".repeat(300) + ".md" }] }));
+	for (const width of [20, 40, 80]) {
+		const all = [...renderRulesList(theme, rows, 0, width), ...renderRuleDetail(theme, wide, false, width)];
+		assert.ok(all.every((line) => strip(line).length <= width), `every line fits ${width}`);
+	}
+	assert.equal(wrapLine("", 10).length, 1);
 });
 
 test("the detail view shows the condition, the file and the body", () => {
-	const lines = renderRuleDetail(theme, rule("no-claims", "user", "Run them, then quote the output."), true, 100).join("\n");
+	const lines = renderRuleDetail(theme, rule("no-claims", "user", "Run them, then quote the output."), true, 300).join("\n");
 	assert.match(lines, /<b><accent>no-claims<\/accent><\/b>/);
 	assert.match(lines, /<success>1 fire<\/success>/);
 	assert.match(lines, /<mdCode>\(\?i\)\\bno-claims\\b<\/mdCode>/, "the pattern as written");
@@ -98,4 +111,34 @@ test("the plain-text form for a session without a TUI has the same facts, no col
 	assert.match(text, /pending\.md · project · needs review/);
 	assert.match(text, /broken\.md · skipped: empty body/);
 	assert.match(text, /permission rules are \/permissions/);
+});
+
+test("the detail view's footer and labels wrap at a narrow width", async () => {
+	let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+	const ctx = {
+		mode: "tui",
+		ui: {
+			custom: async (factory: (...args: unknown[]) => unknown) => {
+				component = factory(null, theme, null, () => {}) as typeof component;
+			},
+		},
+	};
+	await rulesPanel(ctx as unknown as Parameters<typeof rulesPanel>[0], view({ rules: [rule("no-claims")] }));
+	component?.handleInput("\r");
+	for (const width of [10, 20]) {
+		const lines = component?.render(width) ?? [];
+		assert.ok(lines.map(strip).join("").includes("condition"), "the detail view is open (a narrow width breaks the label across lines)");
+		assert.ok(lines.every((line) => strip(line).length <= width), `every line fits ${width}`);
+	}
+});
+
+test("rule text from a cloned repository cannot carry escape sequences to the terminal", () => {
+	const evil = { ...rule("evil"), description: "\x1b]0;pwned\x07Looks harmless", file: "/p/.pi/rules/\x1b[31mred.md" };
+	const rows = rulesRows(view({ rules: [evil], untrusted: [{ file: "/p/.pi/rules/\x1b[31mpending.md" }] }));
+	const list = renderRulesList(theme, rows, 0, 200).join("\n");
+	const detail = renderRuleDetail(theme, evil, false, 200).join("\n");
+	for (const out of [list, detail]) {
+		assert.doesNotMatch(out, /\x1b|\x07/, "no raw escape or bell reaches the terminal");
+	}
+	assert.match(list, /␛\]0;pwned/, "the escape is shown as a visible symbol");
 });

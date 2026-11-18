@@ -766,10 +766,19 @@ export const SAFE_ENV_VARS = new Set(["LANG", "LANGUAGE", "NO_COLOR", "TERM", "F
 export const SAFE_ENV_PREFIXES = ["LC_"];
 
 /** Wrappers stripped before matching (they run their argument). */
-export const WRAPPERS = new Set(["timeout", "time", "nice", "nohup", "stdbuf", "command", "builtin", "noglob", "xargs"]);
+export const WRAPPERS = new Set(["!", "timeout", "time", "nice", "nohup", "stdbuf", "command", "builtin", "noglob", "xargs"]);
 
 /** Shells whose `-c <script>` argument is analyzed recursively. */
-export const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish"]);
+export const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "ash", "csh", "tcsh", "mksh", "rbash", "pwsh", "nu"]);
+
+/**
+ * Shell reserved words. Never a rememberable root, and a unit whose first word is one is
+ * never covered by a remembered prefix: `do python3 x.py` is not `do`.
+ */
+// `time` and `!` are not here: they are WRAPPERS, stripped before a rule is matched (`time npm test` is `npm test`)
+export const SHELL_RESERVED_WORDS = new Set(["{", "}", "[[", "]]", "case", "coproc", "do", "done", "elif", "else", "esac", "fi", "for", "function", "if", "in", "select", "then", "until", "while"]);
+/** Words a remembered or project rule may never start with: the reserved words plus the `!` and `time` wrappers. */
+export const NEVER_RULE_ROOTS = new Set([...SHELL_RESERVED_WORDS, "!", "time"]);
 
 /**
  * Commands that run arbitrary code: "Yes, and always allow" is never offered for
@@ -823,6 +832,25 @@ export const INTERPRETERS = new Set([
 	"ssh",
 	"watch",
 	"parallel",
+	// other language runtimes, REPLs, database and terminal multiplexers
+	"tsx",
+	"ts-node",
+	"uvx",
+	"pipx",
+	"bundle",
+	"powershell",
+	"xonsh",
+	"ipython",
+	"groovy",
+	"swift",
+	"osascript",
+	"dotnet",
+	"java",
+	"rake",
+	"sqlite3",
+	"psql",
+	"tmux",
+	"screen",
 ]);
 
 /**
@@ -1048,10 +1076,28 @@ export const COMMAND_ARITY: Record<string, number> = {
 };
 
 /** Privilege escalation — denied in every mode. */
-export const PRIVILEGE_COMMANDS = new Set(["sudo", "sudoedit", "su", "doas", "pkexec", "run0"]);
+export const PRIVILEGE_COMMANDS = new Set(["sudo", "sudoedit", "su", "runuser", "doas", "pkexec", "run0"]);
 
 /** Commands that execute another command given in their args. */
-export const COMMAND_RUNNERS = new Set(["xargs", "find", "fd", "parallel", "watch", "setsid", "nohup", "exec", "eval", "script", "flock", "chroot", "unbuffer", "env", "nice", "timeout", "stdbuf", "time", "command"]);
+export const COMMAND_RUNNERS = new Set(["xargs", "find", "fd", "parallel", "watch", "setsid", "nohup", "exec", "eval", "script", "flock", "chroot", "unbuffer", "env", "nice", "timeout", "stdbuf", "time", "command", "ionice", "chronic", "taskset", "chrt", "strace", "unshare", "nsenter", "systemd-run"]);
+
+/**
+ * Runners and launchers whose options take a separate value (`ionice -c 2 cmd`,
+ * `ssh -p 22 host cmd`, `busybox sh -c …`): the value words are skipped, and the
+ * command starts at any other word. A runner that takes no value option has `[]`.
+ */
+export const RUNNER_VALUE_OPTIONS: Record<string, string[]> = {
+	ionice: ["-c", "-n", "-p", "-P", "-u", "--class", "--classdata", "--pid", "--pgid", "--uid"],
+	taskset: ["-c", "--cpu-list"],
+	chrt: ["-T", "-P", "-D", "--sched-runtime", "--sched-period", "--sched-deadline"],
+	strace: ["-a", "-b", "-e", "-E", "-I", "-o", "-O", "-p", "-P", "-s", "-S", "-u", "-X"],
+	unshare: ["-R", "--root", "-w", "--wd", "-S", "--setuid", "-G", "--setgid", "--map-user", "--map-group"],
+	nsenter: ["-t", "--target", "-S", "--setuid", "-G", "--setgid", "-w", "--wd"],
+	"systemd-run": ["--unit", "-p", "--property", "--uid", "--gid", "--description", "--slice", "--working-directory", "--service-type", "--on-calendar", "--on-active", "--on-boot", "--timer-property"],
+	ssh: ["-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L", "-l", "-m", "-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w"],
+	chronic: [],
+	busybox: [],
+};
 
 /** Flags that disarm a safety guard; dangerous on any command. */
 export const SAFETY_OFF_FLAGS = new Set(["--no-verify", "--insecure", "--dangerously-skip-permissions", "--yolo", "--no-sandbox"]);
@@ -1105,13 +1151,19 @@ export const DANGEROUS_COMMANDS: Record<string, (args: string[]) => boolean> = {
 export const DANGEROUS_ROOT_PREFIXES = ["mkfs"];
 
 /**
+ * Wrappers a download-and-run pipe may start with, each with its options or
+ * NAME=value words (`env -i`, `nice -n 5`, `timeout 5`, `busybox`), then an optional path.
+ */
+const RUN_WRAPPERS = String.raw`(?:(?:\S*\/)?(?:env|exec|command|nice|nohup|setsid|stdbuf|ionice|chronic|busybox|time|timeout\s+\S+|xargs)(?:\s+(?:-\S+|[A-Za-z_]\w*=\S*|\d+))*\s+)*`;
+
+/**
  * Raw-string patterns for forms the unit analysis can't see (download and
  * run, substitution as an rm target).
  */
 export const DANGEROUS_RAW_PATTERNS: RegExp[] = [
-	// curl/wget piped into a shell or interpreter
-	/\b(curl|wget)\b[^;&\n]*\|\s*(sudo\s+)?(ba|z|da|k)?sh\b/,
-	/\b(curl|wget)\b[^;&\n]*\|\s*(sudo\s+)?(python3?|perl|ruby|node)\b/,
+	// curl/wget piped into a shell or interpreter, through wrappers with their options and assignments (`env -i`, `nice -n 5`) and a path
+	new RegExp(String.raw`\b(curl|wget)\b[^;&\n]*\|\s*(sudo\s+)?${RUN_WRAPPERS}(?:\S*\/)?(?:ba|z|da|k|a)?sh\b`),
+	new RegExp(String.raw`\b(curl|wget)\b[^;&\n]*\|\s*(sudo\s+)?${RUN_WRAPPERS}(?:\S*\/)?(python3?(\.\d+)?|perl|ruby|node|php|deno|bun)\b`),
 	// bash <(curl ...) / sh -c "$(curl ...)"
 	/<\(\s*(curl|wget)\b/,
 	/\$\(\s*(curl|wget)\b/,

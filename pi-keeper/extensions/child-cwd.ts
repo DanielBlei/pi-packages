@@ -69,8 +69,10 @@ export function childCwdProblem(childCwd: string, parentCwd: string | undefined,
 	}
 	const parent = real(parentCwd);
 	const parentRoot = real(findProjectRoot(parent));
-	if (inside(cwd, parent) || inside(cwd, parentRoot)) return undefined;
+	// a repository at or above the home directory (a dotfiles repo in $HOME) is no project: it would accept all of home
+	const projectRoot = parentRoot === sep || parentRoot === realHome || inside(realHome, parentRoot) ? undefined : parentRoot;
+	if (inside(cwd, parent) || (projectRoot !== undefined && inside(cwd, projectRoot))) return undefined;
 	const gitDir = worktreeGitDir(cwd);
-	if (gitDir !== undefined && inside(gitDir, join(parentRoot, ".git", "worktrees"))) return undefined;
+	if (gitDir !== undefined && projectRoot !== undefined && inside(gitDir, join(projectRoot, ".git", "worktrees"))) return undefined;
 	return `your working directory ${cwd} is outside the parent session's project (${parentRoot})`;
 }

@@ -3,7 +3,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { dialogOptions, readGrantLabel, type DialogOptionsInput } from "../../extensions/options.ts";
+import { dialogOptions, gitGrantLabel, readGrantLabel, type DialogOptionsInput } from "../../extensions/options.ts";
 
 const SESSION = "Yes, and don't ask again for `sed` this session";
 const PROJECT = "Yes, and always allow `sed` in this project";
@@ -131,4 +131,17 @@ test("the project-exact-commands option is not offered with a session option, in
 	assert.ok(!dialogOptions({ ...base, mode: "auto", projectExactCommands: true }).primary.includes(EXACT_PROJECT));
 	assert.ok(!dialogOptions({ ...base, exactCommand: true }).primary.includes(EXACT_PROJECT));
 	assert.ok(!dialogOptions(base).primary.includes(EXACT_PROJECT));
+});
+
+test("the git grant label names the repo roots, sanitized, with a count past two", () => {
+	assert.equal(gitGrantLabel(["/x/harbor"]), "Yes, and allow git in /x/harbor/ this session");
+	assert.equal(gitGrantLabel(["/x/a", "/x/b"]), "Yes, and allow git in /x/a/, /x/b/ this session");
+	assert.equal(gitGrantLabel(["/x/a", "/x/b", "/x/c"]), "Yes, and allow git in /x/a/, /x/b/ (+1 more) this session");
+	assert.equal(gitGrantLabel(["/x/a\u001b[31mred"]), "Yes, and allow git in /x/a\u241b[31mred/ this session");
+});
+
+test("the git grant is offered after the fetch options, before No, and never replaces the cd options", () => {
+	const label = gitGrantLabel(["/x/harbor"]);
+	assert.deepEqual(dialogOptions({ ...base, gitGrantLabel: label }).primary, ["Yes", label, "No", "More…"]);
+	assert.deepEqual(dialogOptions({ ...base, mode: "plan", gitGrantLabel: label }).primary, ["Yes", label, "No", FEEDBACK]);
 });

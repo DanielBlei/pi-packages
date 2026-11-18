@@ -4,11 +4,13 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	compileCondition,
+	ensureUserRuleDir,
+	EXAMPLE_RULE_FILE,
 	correctionText,
 	firedFromBranch,
 	loadRulebook,
@@ -251,4 +253,94 @@ test("fired rules are read back from the session entries: the branch is the trut
 test("a rule body with $&, $1 and $` reaches the correction text literally", () => {
 	const text = correctionText([rule("dollars", "zzz", "Write `$&` and `$1` as-is, not $`.")]);
 	assert.ok(text.includes("Write `$&` and `$1` as-is, not $`."), text);
+});
+
+test("ensureUserRuleDir creates the folder with one example that parses, and leaves existing rules alone", () => {
+	const agentDir = mkdtempSync(join(tmpdir(), "pi-keeper-rules-"));
+	try {
+		const dir = ensureUserRuleDir(agentDir);
+		assert.equal(dir, userRuleDir(agentDir));
+		const book = loadRulebook({ cwd: agentDir, agentDir, trustedHash: () => undefined });
+		assert.deepEqual(book.problems, []);
+		assert.equal(book.rules.length, 1);
+		assert.equal(book.rules[0]?.file.endsWith(EXAMPLE_RULE_FILE), true);
+		assert.equal(matchRules(book.rules, "This should work now. All tests pass. EXAMPLE rule.", new Set()).length, 0, "the example is a dummy");
+		rmSync(join(dir, EXAMPLE_RULE_FILE));
+		writeFileSync(join(dir, "mine.md"), "---\ndescription: d\ncondition: x\n---\nbody");
+		ensureUserRuleDir(agentDir);
+		assert.equal(loadRulebook({ cwd: agentDir, agentDir, trustedHash: () => undefined }).rules.length, 1);
+		// offered once: with no rule left, it does not come back
+		rmSync(join(dir, "mine.md"));
+		ensureUserRuleDir(agentDir);
+		assert.equal(existsSync(join(dir, EXAMPLE_RULE_FILE)), false);
+	} finally {
+		rmSync(agentDir, { recursive: true, force: true });
+	}
+});
+
+test("ensureUserRuleDir retrofits an existing folder that has no rule file, and leaves one that has rules", () => {
+	const agentDir = mkdtempSync(join(tmpdir(), "pi-keeper-rules-"));
+	try {
+		const dir = userRuleDir(agentDir);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "old.yaml"), "not a rule file");
+		ensureUserRuleDir(agentDir);
+		assert.equal(existsSync(join(dir, EXAMPLE_RULE_FILE)), true, "an old install with only a yaml file gets the example");
+	} finally {
+		rmSync(agentDir, { recursive: true, force: true });
+	}
+	const withRules = mkdtempSync(join(tmpdir(), "pi-keeper-rules-"));
+	try {
+		const dir = userRuleDir(withRules);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "mine.md"), "---\ndescription: d\ncondition: x\n---\nbody");
+		ensureUserRuleDir(withRules);
+		assert.equal(existsSync(join(dir, EXAMPLE_RULE_FILE)), false, "an install with its own rules is not touched");
+	} finally {
+		rmSync(withRules, { recursive: true, force: true });
+	}
+});
+
+test("a file with literal \\n and no frontmatter line says so", () => {
+	const parsed = parseRuleFile("/r/a.md", "user", "description: d\\ncondition: x\\n---\\nbody");
+	assert.ok("problem" in parsed);
+	assert.match(parsed.problem, /no frontmatter: .*literal \\n/);
+});
+
+test("a condition that matches ordinary text is refused (an optional group matches everywhere)", () => {
+	const parsed = parseRuleFile("/r/a.md", "user", "---\ndescription: d\ncondition: (?i)\\b(let commit now)*\\b\n---\nbody");
+	assert.ok("problem" in parsed);
+	assert.match(parsed.problem, /would fire on every answer/);
+	assert.ok(!("problem" in parseRuleFile("/r/b.md", "user", "---\ndescription: d\ncondition: (?i)\\bshould work\\b\n---\nbody")));
+});
+
+test("an inline (?m) sets the m flag: ^ matches the start of a later line, and does without it", () => {
+	const multi = rule("line-start", "(?m)^line");
+	assert.equal(multi.pattern.flags, "m");
+	assert.equal(matchRules([multi], "first\nline two", new Set()).length, 1, "^ at the start of line 2");
+	const single = rule("line-start-plain", "^line");
+	assert.equal(single.pattern.flags, "");
+	assert.equal(matchRules([single], "first\nline two", new Set()).length, 0, "without (?m), ^ is the start of the text only");
+});
+
+test("the seeded example rule never fires on an ordinary answer", () => {
+	const agentDir = mkdtempSync(join(tmpdir(), "pi-keeper-rules-"));
+	try {
+		ensureUserRuleDir(agentDir);
+		const book = loadRulebook({ cwd: agentDir, agentDir, trustedHash: () => undefined });
+		const example = book.rules.find((r) => r.file.endsWith(EXAMPLE_RULE_FILE));
+		assert.ok(example !== undefined, "the example parses as a rule");
+		const answers = [
+			"",
+			"Done. All tests pass.",
+			"I read the module and changed the parser so that it handles nested groups. The new code keeps the old behaviour for flat input, and the cases for unbalanced brackets now report a line number. ".repeat(20),
+			"Here is the change:\n\n```ts\nexport const example = (x: number): number => x * 2;\n```\n",
+		];
+		for (const answer of answers) {
+			assert.equal(example.pattern.test(answer), false, `the example's condition does not match ${JSON.stringify(answer.slice(0, 40))}`);
+			assert.equal(matchRules(book.rules, answer, new Set()).length, 0);
+		}
+	} finally {
+		rmSync(agentDir, { recursive: true, force: true });
+	}
 });

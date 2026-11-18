@@ -1,5 +1,83 @@
 # Changelog
 
+## 0.1.1 - 2026-11-18
+
+A review of the whole package. Most entries close a way for a call to run without the
+question it should get.
+
+### Security
+
+- A single `subagent` call is judged by its `gate`, `acceptance` verify commands and
+  `output` file, as workflow children already were. A `schedule.create` of a workflow
+  asks.
+- Shell keywords (`for`, `do`, `if`, ...) are never remembered as a command prefix,
+  which let any loop body run without a question. A loop gets the exact-command options.
+- A backslash at the end of a line joins the lines as bash does (`su\⏎do id`).
+- Project `deny` and `ask` rules match the command by path or behind a launcher: with
+  `Bash(make deploy *)`, `/usr/bin/make deploy` and `exec make deploy` are denied too.
+  `Bash(rm:*)` is read as `Bash(rm *)`.
+- More secret reads ask in every mode: `grep -f.env`, `git show HEAD:.env`,
+  `ls | xargs cat`, a glob under `~` that matches a secret, and environment dumps
+  (`env`, `printenv`, `/proc/*/environ`). Exclude filters (`--exclude=.env`) do not ask.
+- `~user/...`, `~-` and a glob outside the project (`cat /etc/pass*`) count as outside.
+- Auto mode asks before a redirection writes outside the project (`echo x > ~/notes.txt`).
+  Writes to the system temp dir ask.
+- `sudo` and dangerous commands are seen through more launchers and shells (`exec`,
+  `find -exec`, `pwsh`, `nsenter`). `runuser` is a privilege command. `sudo` after
+  `ssh host` asks instead of being denied.
+- Download-and-run is caught behind a wrapper or a path (`curl x | env -i bash`).
+- More commands are never remembered as a prefix (`tsx`, `uvx`, `dotnet`, `psql`, ...).
+  `git rebase --exec`, `git submodule foreach` and `git bisect run` are never covered
+  by a rule.
+- Smaller: an awk `/` after `x++` hid a pipe to a shell; a restored plan file path must
+  be inside the plans directory; with a git repository as home, a subagent's working
+  directory is checked against the parent's; `/rules` prints no terminal escape
+  sequences; dialogs show zero-width characters as `�`.
+
+### Fixed
+
+- `cd` into another repository combined with git asked again and again. The dialog now
+  offers *Yes, and allow git in `<repo>/` this session*.
+- The session log redacts more secrets (non-bash tool input, `-u user:pass`, URL
+  passwords, token headers).
+- A background ask larger than the mailbox limit made the child wait for the timeout.
+  It is now denied at once. Turning background asks off in `/keeper` denies pending
+  asks with "background asks were turned off in the parent session".
+- A background ask that an open dialog already covers opens no second dialog.
+- A malformed `trusted-rules.json` is no longer overwritten; pi-keeper warns instead.
+- `/mode constructor` blocked every tool call.
+- *Ignore for this session* on project rules no longer outlives `/new` and `/resume`.
+- A glob with many `*` could freeze pi.
+- `/rules` crashed with "Rendered line N exceeds terminal width" on long text.
+- A command after `!` is matched by your rules like the same command alone.
+
+### Changed
+
+- `project-exact-commands` is **on by default**: the dialog for a command no prefix can
+  cover offers *Yes, and always allow this exact command in this project*. Not offered
+  for removals, privilege commands, program-running flags or writes outside the project.
+- `/keeper` has two tabs: **Settings** and **Subagents**.
+- The mode line after a switch is **off by default**; turn it on in `/keeper` (Dialog)
+  or with `modeFlashSecs`.
+- A rulebook file with no frontmatter, or a condition that matches ordinary text, is
+  skipped with a warning.
+
+### Added
+
+- `BashExact(<command>)` entries in `.pi/settings.local.json` (`allow` only): this exact
+  command text runs without a question in default mode. The project option saves one
+  when the command cannot be written as `Bash(...)`, such as a `for` loop.
+  `/permissions` lists them as "(exact text)".
+- *Yes, and allow git in `<repo>/` this session*: after `cd` into another repository,
+  git there runs without the question (dangerous git commands still ask). Session only,
+  shared with subagents, removable in `/permissions`.
+- `/keeper mode-working-row` (`modeWorkingRow`, default off): the mode in the working
+  row (`⏵⏵ auto · Working`).
+- `/keeper mode-status` (`modeStatus`, default on): off hides the mode in the footer.
+- `example-rule.md`, a dummy rule that never fires, is created in
+  `~/.pi/agent/pi-keeper/rules/` when it holds no rule file.
+- `/new-rule <what must not happen>`: the model writes a rule file and tests its regex.
+
 ## 0.1.0 - 2026-11-17
 
 First public release.

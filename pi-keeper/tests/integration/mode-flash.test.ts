@@ -41,7 +41,8 @@ afterEach(() => {
 });
 
 async function session(settings?: Record<string, unknown>, options: Omit<Parameters<typeof startPi>[0], "sandbox"> = {}): Promise<Harness> {
-	const h = await startPi({ sandbox: sandboxed(settings), ...options });
+	// the shipped default is off; these tests are about the flash, so they turn it on unless a test says otherwise
+	const h = await startPi({ sandbox: sandboxed({ modeFlashSecs: 2, modeWorkingRow: true, ...settings }), ...options });
 	await h.session();
 	return h;
 }
@@ -138,8 +139,8 @@ describe("mode flash", () => {
 		assert.equal(h.workingMessages.at(-1), undefined, "default mode goes back to pi's own text");
 	});
 
-	it("modeFlashSecs 0 hides the working-row text too", async () => {
-		const h = await session({ modeFlashSecs: 0 });
+	it("modeWorkingRow false (the default) leaves pi's own working text alone, whatever the flash says", async () => {
+		const h = await session({ modeWorkingRow: false });
 		await h.command("mode", "auto");
 		assert.equal(h.workingMessages.some((m) => m !== undefined), false);
 	});

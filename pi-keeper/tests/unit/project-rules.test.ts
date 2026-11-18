@@ -19,6 +19,7 @@ import {
 	parseRule,
 	parseRules,
 	recordTrust,
+	trustedHash,
 	removeRule,
 	saveAllowRules,
 	saveRules,
@@ -181,7 +182,7 @@ test("trust gate: recorded hashes load allow rules, edits and unknown files do n
 		assert.equal(loaded.exists, true);
 		assert.equal(loaded.trusted, false);
 		let perms = compilePermissions(loaded.rules, loaded.trusted);
-		assert.deepEqual(perms.allow, { prefixes: [], exact: [] });
+		assert.deepEqual(perms.allow, { prefixes: [], exact: [], verbatim: [] });
 		assert.equal(perms.ask.length, 1);
 		assert.equal(perms.deny.length, 1);
 		assert.equal(decide("default", "git commit -m x", perms), "ask"); // untrusted allow: falls back to ask
@@ -481,4 +482,129 @@ test("loadProjectRules marks an unreadable file as broken, a missing file as not
 	} finally {
 		t.done();
 	}
+});
+
+test("ask/deny match a bare command name written by path or quotes; allow stays literal", () => {
+	const deny = rules({ deny: ["Bash(make deploy *)"] }).deny;
+	assert.equal(findMatchingRule(deny, "make deploy prod")?.text, "Bash(make deploy *)");
+	assert.equal(findMatchingRule(deny, "/usr/bin/make deploy")?.text, "Bash(make deploy *)");
+	assert.equal(findMatchingRule(deny, "./make deploy")?.text, "Bash(make deploy *)");
+	assert.equal(findMatchingRule(deny, '"/usr/bin/make" deploy')?.text, "Bash(make deploy *)");
+	assert.equal(findMatchingRule(deny, "/usr/bin/make build"), undefined);
+
+	const exact = rules({ deny: ["Bash(make deploy)"] }).deny;
+	assert.equal(findMatchingRule(exact, "/usr/bin/make deploy")?.text, "Bash(make deploy)");
+	assert.equal(findMatchingRule(exact, "make deploy now"), undefined);
+
+	// a rule that names a path matches that path only
+	const scoped = rules({ deny: ["Bash(./scripts/deploy.sh *)"] }).deny;
+	assert.equal(findMatchingRule(scoped, "./scripts/deploy.sh x")?.text, "Bash(./scripts/deploy.sh *)");
+
+	// allow rules stay literal: `make *` does not cover `./make x`
+	const allow = compilePermissions(rules({ allow: ["Bash(make *)"] }), true);
+	assert.equal(decide("default", "make x", allow), "allow");
+	assert.equal(decide("default", "./make x", allow), "ask");
+});
+
+test("Claude Code style `Bash(rm:*)` entries parse as `rm *`, in every list", () => {
+	const parsed = parseRule("Bash(rm:*)", "deny") as { tokens: string[]; exact: boolean };
+	assert.deepEqual([parsed.tokens, parsed.exact], [["rm"], false]);
+	const loaded = rules({ deny: ["Bash(rm:*)"] });
+	assert.deepEqual(loaded.warnings, []);
+	assert.equal(decide("auto", "rm -rf build", compilePermissions(loaded, true)), "deny");
+	assert.ok("error" in parseRule("Bash(rm:*)", "allow"));
+});
+
+test("recordTrust refuses to rewrite a malformed trust store; reads treat it as nothing trusted", () => {
+	const t = temp();
+	try {
+		const store = join(t.agent, "pi-keeper", "trusted-rules.json");
+		mkdirSync(join(t.agent, "pi-keeper"));
+		const file = join(t.project, FILE);
+		for (const content of ["{ not json", "[1, 2]"]) {
+			writeFileSync(store, content);
+			assert.throws(() => recordTrust(t.agent, file, "abc"), /trusted-rules\.json is not valid JSON/);
+			assert.equal(readFileSync(store, "utf8"), content);
+			assert.equal(trustedHash(t.agent, file), undefined);
+		}
+		// an empty store holds no approval to lose: it is written
+		writeFileSync(store, "  \n");
+		recordTrust(t.agent, file, "abc");
+		assert.equal(trustedHash(t.agent, file), "abc");
+	} finally {
+		t.done();
+	}
+});
+
+test("BashExact(<command>) in allow is an exact command text: the body runs to the last parenthesis and is trimmed", () => {
+	const loaded = rules({ allow: ['BashExact(for f in a b; do echo "$f"; done)', "BashExact(  echo $(date)  )"] });
+	assert.deepEqual(loaded.warnings, []);
+	assert.deepEqual(loaded.allowVerbatim.map((r) => r.command), ['for f in a b; do echo "$f"; done', "echo $(date)"]);
+	assert.deepEqual(loaded.allowVerbatim.map((r) => r.text), ['BashExact(for f in a b; do echo "$f"; done)', "BashExact(  echo $(date)  )"]);
+	assert.deepEqual(loaded.allow, []);
+});
+
+test("BashExact in ask or deny is ignored with a warning", () => {
+	const loaded = rules({ ask: ["BashExact(npm test)"], deny: ["BashExact(rm -rf x)"] });
+	assert.deepEqual(loaded.warnings, [
+		"ask: ignored `BashExact(npm test)` (BashExact(...) entries belong in allow)",
+		"deny: ignored `BashExact(rm -rf x)` (BashExact(...) entries belong in allow)",
+	]);
+	assert.deepEqual(loaded.allowVerbatim, []);
+	assert.deepEqual(loaded.ask, []);
+	assert.deepEqual(loaded.deny, []);
+});
+
+test("a BashExact body that is empty or has a control character is rejected; tab and newline are fine", () => {
+	const bad = rules({ allow: ["BashExact()", "BashExact(   )", "BashExact(echo \x07)"] });
+	assert.equal(bad.allowVerbatim.length, 0);
+	assert.equal(bad.warnings.length, 3);
+	assert.match(bad.warnings[2], /control characters/);
+	const ok = rules({ allow: ["BashExact(printf a\n\tb)"] });
+	assert.deepEqual(ok.warnings, []);
+	assert.equal(ok.allowVerbatim[0].command, "printf a\n\tb");
+});
+
+test("BashExact entries reach the matcher list only when the file is trusted", () => {
+	const command = 'for f in a b; do echo "$f"; done';
+	const loaded = rules({ allow: [`BashExact(${command})`] });
+	assert.deepEqual(compilePermissions(loaded, false).allow, { prefixes: [], exact: [], verbatim: [] });
+	assert.deepEqual(compilePermissions(loaded, true).allow, { prefixes: [], exact: [], verbatim: [command] });
+});
+
+test("saveRules writes a BashExact entry to allow, and refuses one in ask", () => {
+	const t = temp();
+	try {
+		const entry = 'BashExact(for f in a b; do echo "$f"; done)';
+		const saved = saveRules(t.project, t.agent, "allow", [entry]);
+		assert.equal(saved.trusted, true);
+		const doc = JSON.parse(readFileSync(join(t.project, FILE), "utf8"));
+		assert.deepEqual(doc["pi-keeper"].permissions.allow, [entry]);
+		assert.throws(() => saveRules(t.project, t.agent, "ask", ["BashExact(npm test)"]), /BashExact\(npm test\)/);
+	} finally {
+		t.done();
+	}
+});
+
+test("BashExact with a removal or a privilege command is rejected in allow, with the token-rule wording", () => {
+	const loaded = rules({ allow: ['BashExact(for f in a; do rm -rf "$f"; done)', "BashExact(sudo make install)", "BashExact(python3 x.py)"] });
+	assert.deepEqual(loaded.allowVerbatim.map((r) => r.command), ["python3 x.py"]);
+	assert.equal(loaded.warnings.length, 2);
+	assert.equal(loaded.warnings[0], 'allow: ignored `BashExact(for f in a; do rm -rf "$f"; done)` (can\'t be allowed (removal or privilege command))');
+	assert.equal(loaded.warnings[1], "allow: ignored `BashExact(sudo make install)` (can't be allowed (removal or privilege command))");
+});
+
+test("WebFetch(domain:<host>) is accepted in allow only; in ask or deny it is ignored with a warning", () => {
+	// guide: "`WebFetch(domain:<host>)` ... is accepted as the same rule, in `allow` lists only (anywhere else it is ignored with a warning)."
+	const allowed = rules({ allow: ["WebFetch(domain:github.com)"] });
+	assert.deepEqual(allowed.warnings, []);
+	assert.deepEqual(allowed.fetchHosts.map((h) => h.host), ["github.com"]);
+	const elsewhere = rules({ ask: ["WebFetch(domain:example.org)"], deny: ["WebFetch(domain:evil.test)"] });
+	assert.deepEqual(elsewhere.warnings, [
+		"ask: ignored `WebFetch(domain:example.org)` (Fetch(...) entries belong in allow)",
+		"deny: ignored `WebFetch(domain:evil.test)` (Fetch(...) entries belong in allow)",
+	]);
+	assert.deepEqual(elsewhere.fetchHosts, []);
+	assert.deepEqual(elsewhere.ask, []);
+	assert.deepEqual(elsewhere.deny, []);
 });

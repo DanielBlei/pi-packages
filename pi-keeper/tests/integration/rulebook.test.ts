@@ -7,7 +7,7 @@
  */
 import { after, afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { assistantMessage, KEY, makeSandbox, restoreBell, startPi, type Harness, type Sandbox } from "../mocks/pi.ts";
 import { RELAY_KEY } from "../../extensions/ui-relay.ts";
@@ -109,6 +109,37 @@ describe("a rule fires once, as a warning", () => {
 		assert.equal(h.delivered(RULE_MESSAGE).length, 1);
 	});
 
+	it("a fork keeps the fire: a forked session started from the same entries does not fire it again", async () => {
+		const sb = sandboxed();
+		writeRule(sb, "no-claims.md", `${NO_CLAIMS[0]}\n${NO_CLAIMS[1]}`, NO_CLAIMS[2]);
+		const h = await start(sb);
+		await h.session();
+		await h.prompt("go");
+		await h.turnEnd(BREAKS);
+		// a fork carries the branch's entries (the fired record and the correction) into the new session
+		const forked = await startPi({ sandbox: sb, entries: [...h.entries] });
+		started.push(forked);
+		await forked.session("fork");
+		const again = await forked.turnEnd(BREAKS);
+		assert.equal(again.continue, false, "an already-fired rule asks for nothing in the fork");
+		assert.equal(forked.delivered(RULE_MESSAGE).length, 1, "only the correction the parent sent is in the branch");
+	});
+
+	it("only the text blocks are matched: a match in a thinking block or in a tool call's arguments does not fire, the same text in a text block does", async () => {
+		const sb = sandboxed();
+		writeRule(sb, "no-claims.md", `${NO_CLAIMS[0]}\n${NO_CLAIMS[1]}`, NO_CLAIMS[2]);
+		const h = await start(sb);
+		await h.session();
+		await h.prompt("go");
+		const inThinking = { role: "assistant", content: [{ type: "thinking", thinking: "All tests pass." }, { type: "text", text: "Looking into it." }], stopReason: "stop", timestamp: Date.now() };
+		const inToolArgs = { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "bash", arguments: { command: "echo 'All tests pass.'" } }, { type: "text", text: "Checking." }], stopReason: "stop", timestamp: Date.now() };
+		assert.equal((await h.turnEnd(inThinking)).continue, false, "a match only in thinking does not fire");
+		assert.equal((await h.turnEnd(inToolArgs)).continue, false, "a match only in tool arguments does not fire");
+		assert.deepEqual(h.delivered(RULE_MESSAGE), [], "no correction for either");
+		assert.equal((await h.turnEnd(assistantMessage("All tests pass."))).continue, true, "the same text in a text block fires");
+		assert.equal(h.delivered(RULE_MESSAGE).length, 1);
+	});
+
 	it("an aborted or empty turn fires nothing", async () => {
 		const sb = sandboxed();
 		writeRule(sb, "no-claims.md", `${NO_CLAIMS[0]}\n${NO_CLAIMS[1]}`, NO_CLAIMS[2]);
@@ -156,6 +187,20 @@ describe("a project rule needs one review", () => {
 		await loaded.turnEnd(BREAKS);
 		assert.equal(loaded.delivered(RULE_MESSAGE).length, 1);
 		assert.match(loaded.delivered(RULE_MESSAGE)[0], /Rule: no-claims/);
+	});
+
+	it("a malformed trust store does not stop a loaded project rule from firing this session", async () => {
+		const sb = sandboxed();
+		writeRule(sb, "no-claims.md", `${NO_CLAIMS[0]}\n${NO_CLAIMS[1]}`, NO_CLAIMS[2], join(sb.cwd, ".pi", "rules"));
+		mkdirSync(join(sb.agentDir, "pi-keeper"), { recursive: true });
+		writeFileSync(join(sb.agentDir, "pi-keeper", "trusted-rules.json"), "{ nope");
+		const h = await start(sb);
+		h.answer(/Load .*rulebook rule/, "Load them");
+		await h.session();
+		await h.prompt("go");
+		await h.turnEnd(BREAKS);
+		assert.equal(h.delivered(RULE_MESSAGE).length, 1, "the approved rule fires in this session");
+		assert.ok(h.notifications.some((n) => n.type === "warning" && /trusted-rules\.json is not valid JSON/.test(n.message)), JSON.stringify(h.notifications));
 	});
 
 	it("a user rule and a project rule of the same name: the user's fires, once", async () => {
@@ -243,6 +288,28 @@ describe("/rules renders the rulebook", () => {
 		assert.deepEqual(h.notifications.filter((n) => /Rulebook rules/.test(n.message)), [], "no plain-text listing when a panel opened");
 	});
 
+	it("session start alone creates the folder and the example, so an updated install is retrofitted", async () => {
+		const sb = sandboxed();
+		const h = await start(sb);
+		await h.session();
+		assert.equal(existsSync(join(sb.agentDir, "pi-keeper", "rules", "example-rule.md")), true);
+	});
+
+	it("on a fresh install /rules creates the folder, seeds the dummy example and lists it", async () => {
+		const sb = sandboxed();
+		const dir = join(sb.agentDir, "pi-keeper", "rules");
+		assert.equal(existsSync(dir), false);
+		const h = await start(sb);
+		await h.session();
+		h.answer(/Rulebook rules/, "esc");
+		await h.command("rules");
+		assert.equal(existsSync(join(dir, "example-rule.md")), true, "the example is written");
+		const panel = h.dialogs.at(-1);
+		assert.equal(panel?.kind, "custom", "something is shown, not nothing");
+		assert.match(panel?.title ?? "", /example-rule/);
+		assert.match(panel?.title ?? "", /not fired/);
+	});
+
 	it("Enter opens one rule in the panel (condition, file, body), Esc backs out and closes", async () => {
 		const sb = sandboxed();
 		writeRule(sb, "no-claims.md", `${NO_CLAIMS[0]}\n${NO_CLAIMS[1]}`, NO_CLAIMS[2]);
@@ -254,7 +321,29 @@ describe("/rules renders the rulebook", () => {
 		assert.equal(h.dialogs.at(-1)?.kind, "custom");
 	});
 
-	it("without a TUI it notifies the plain listing, including the files it skipped", async () => {
+	it("without a TUI, /rules <name> prints that one rule; an unknown name says so", async () => {
+			const sb = sandboxed();
+			writeRule(sb, "no-claims.md", `${NO_CLAIMS[0]}\n${NO_CLAIMS[1]}`, NO_CLAIMS[2]);
+			writeRule(sb, "other.md", "description: Another rule.\ncondition: (?i)\\bother thing\\b", "Other body.");
+			const h = await startPi({ sandbox: sb, ui: "none" });
+			started.push(h);
+			await h.session();
+			await h.command("rules", "no-claims");
+			const shown = h.notifications.at(-1);
+			assert.equal(shown?.type, "info");
+			assert.match(shown?.message ?? "", /no-claims \(user\) — not fired/);
+			assert.match(shown?.message ?? "", /Do not claim tests pass when they did not run\./);
+			assert.match(shown?.message ?? "", /condition: \(\?i\)\\ball tests pass\\b/);
+			assert.match(shown?.message ?? "", /Run the tests with `npm test`, then quote the line that shows the result\./);
+			assert.doesNotMatch(shown?.message ?? "", /Other body\./, "only the named rule is printed");
+
+			await h.command("rules", "nope");
+			const missing = h.notifications.at(-1);
+			assert.equal(missing?.type, "error");
+			assert.match(missing?.message ?? "", /No rulebook rule is named nope\. Known: no-claims, other/);
+		});
+
+		it("without a TUI it notifies the plain listing, including the files it skipped", async () => {
 		const sb = sandboxed();
 		writeRule(sb, "no-claims.md", `${NO_CLAIMS[0]}\n${NO_CLAIMS[1]}`, NO_CLAIMS[2]);
 		writeRule(sb, "broken.md", "description: Broken.\ncondition: (?i)[", "body");

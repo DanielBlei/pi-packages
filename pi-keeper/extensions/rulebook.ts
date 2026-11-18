@@ -21,7 +21,7 @@
  * accepts one flat `key: value` per line and one condition per rule.
  */
 
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { RULE_WARNING } from "./modes.ts";
 import { findProjectRoot, sha256 } from "./project-rules.ts";
@@ -152,6 +152,9 @@ export function compileCondition(source: string): RegExp | undefined {
 	}
 }
 
+/** Text no rule should match; a condition that does fires on every answer. */
+const NEUTRAL_TEXTS = ["", " ", "qqq vvv."];
+
 /**
  * One rule file to a rule, or the reason it cannot be one. Pure: the caller
  * decides what to do with `{ problem }` (index.ts reports it once and skips).
@@ -159,12 +162,18 @@ export function compileCondition(source: string): RegExp | undefined {
 export function parseRuleFile(file: string, kind: "user" | "project", text: string): RulebookRule | RulebookProblem {
 	const name = basename(file).replace(RULE_FILE, "");
 	const { fields, body } = splitFrontmatter(text);
+	if (!text.replace(/^\uFEFF/, "").startsWith("---")) {
+		const literal = text.includes("\\n") && !text.includes("\n---");
+		return { file, problem: `no frontmatter: the file must start with a --- line, then description: and condition: lines, then ---${literal ? " (the file contains a literal \\n, not line breaks)" : ""}` };
+	}
 	const description = fields.description ?? "";
 	const condition = fields.condition ?? "";
 	if (description === "") return { file, problem: "no `description:` in the frontmatter" };
 	if (condition === "") return { file, problem: "no `condition:` in the frontmatter (the regex that makes it fire)" };
 	const pattern = compileCondition(condition);
 	if (pattern === undefined) return { file, problem: `the condition does not compile as a regex: ${condition}` };
+	// a pattern that matches text no rule is about (`(a|b)*` is optional, so it matches everywhere) would fire on every answer
+	if (NEUTRAL_TEXTS.some((sample) => pattern.test(sample))) return { file, problem: `the condition matches ordinary text, so it would fire on every answer: ${condition}` };
 	if (body === "") return { file, problem: "the body is empty, so there is no correction to send" };
 	return { name, kind, file, description, condition, pattern, body, hash: sha256(text) };
 }
@@ -300,3 +309,54 @@ export function firedFromBranch(branch: readonly { type?: string; customType?: s
 
 /** The user's rulebook directory for this agent dir (index.ts and docs/guide.md name it). */
 export const userRuleDir = (agentDir: string): string => resolve(join(agentDir, "pi-keeper", USER_RULE_DIR));
+
+/** The example `ensureUserRuleDir` writes into an empty rules directory. */
+export const EXAMPLE_RULE_FILE = "example-rule.md";
+/** The example's condition: a marker no answer contains, so the example never fires. */
+export const EXAMPLE_RULE_CONDITION = "\\bEXAMPLE_RULE_PLACEHOLDER_NEVER_MATCHES\\b";
+export const EXAMPLE_RULE = `---
+description: Example only, never fires. Copy it to write your own rule.
+condition: ${EXAMPLE_RULE_CONDITION}
+---
+This is a dummy rule. Its condition matches a placeholder word, so it never fires.
+Delete it or edit it.
+
+How to write a rule:
+
+1. Make one .md file per rule in this folder (for all your projects), or in
+   <project>/.pi/rules/ (for one project; pi-keeper asks you to review it once).
+2. The frontmatter has two lines:
+   description: one line on what must not happen (shown by /rules and on the card)
+   condition: a JavaScript regex matched against the end of the model's answer.
+   A leading (?i) makes it case-insensitive. For example: (?i)\\bshould work\\b
+3. This text, below the frontmatter, is the correction the model receives when the
+   condition matches. Say what to do instead.
+4. A rule fires once per session. Rules are re-read every turn: no restart needed.
+
+Shortcut: type /new-rule <what must not happen> and the model writes the file for you.
+`;
+
+/** Written next to the example so it is offered once: deleting the example must not bring it back. Not a `.md` file, so never read as a rule. */
+export const EXAMPLE_MARKER_FILE = ".example-seeded";
+
+/**
+ * Create the user's rules directory and offer the example once, so the format is
+ * visible. Runs at session start and on `/rules`, so an install that is updated
+ * gets the folder and the example without doing anything. The example is written
+ * only when the folder holds no rule file and has not been offered before.
+ * Never throws (a read-only home just means no directory). Returns the directory.
+ */
+export function ensureUserRuleDir(agentDir: string): string {
+	const dir = userRuleDir(agentDir);
+	try {
+		mkdirSync(dir, { recursive: true });
+		const marker = join(dir, EXAMPLE_MARKER_FILE);
+		if (!existsSync(marker)) {
+			if (ruleFilesIn(dir).length === 0) writeFileSync(join(dir, EXAMPLE_RULE_FILE), EXAMPLE_RULE, { flag: "wx" });
+			writeFileSync(marker, "The example rule was offered once; delete it freely.\n", { flag: "wx" });
+		}
+	} catch {
+		// best effort: /rules still lists what it can read
+	}
+	return dir;
+}

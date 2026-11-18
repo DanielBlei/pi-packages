@@ -23,7 +23,7 @@
 
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, readlinkSync, realpathSync, statSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir, tmpdir, userInfo } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
 import {
@@ -55,12 +55,15 @@ import {
 	REMOVAL_SUBCOMMANDS,
 	RTK_RUNNERS,
 	RUNNER_SUBCOMMANDS,
+	RUNNER_VALUE_OPTIONS,
 	SAFE_ENV_PREFIXES,
 	SAFE_ENV_VARS,
 	SAFETY_OFF_FLAGS,
 	SECRET_FILE_PATTERNS,
 	SECRET_HOME_PATHS,
 	SHELLS,
+	SHELL_RESERVED_WORDS,
+	NEVER_RULE_ROOTS,
 	WRAPPERS,
 	WRITE_FLAGS,
 	PROGRAM_FLAGS,
@@ -134,6 +137,11 @@ export function tokenize(command: string, scratch?: string): Segment[] | null {
 		}
 		if (inDouble) {
 			if (ch === "\\") {
+				// backslash-newline is a line continuation: bash removes both
+				if (command[i + 1] === "\n") {
+					i += 2;
+					continue;
+				}
 				word += command[i + 1] ?? "";
 				i += 2;
 				continue;
@@ -145,6 +153,11 @@ export function tokenize(command: string, scratch?: string): Segment[] | null {
 		}
 
 		if (ch === "\\") {
+			// line continuation: the word goes on after the newline, and nothing starts
+			if (command[i + 1] === "\n") {
+				i += 2;
+				continue;
+			}
 			word += command[i + 1] ?? "";
 			wordStarted = true;
 			i += 2;
@@ -221,6 +234,15 @@ export function tokenize(command: string, scratch?: string): Segment[] | null {
 			while (i < command.length && command[i] !== "\n") i++;
 			continue;
 		}
+		// $"…" quotes like "…". $'…' quotes like '…' unless it holds a backslash (its escapes are not read, so the `$` stays)
+		if (ch === "$") {
+			const close = command.indexOf("'", i + 2);
+			const plainAnsi = command[i + 1] === "'" && close !== -1 && !command.slice(i + 2, close).includes("\\");
+			if (command[i + 1] === '"' || plainAnsi) {
+				i++;
+				continue;
+			}
+		}
 		// globs, brace expansion and unquoted $ expansion can turn one word
 		// into several (or into flags: `{-delete,}`, `x${IFS}-delete`)
 		if (ch === "*" || ch === "?" || ch === "[" || ch === "$") wordGlob = true;
@@ -294,16 +316,70 @@ function isBraceExpansion(command: string, start: number): boolean {
  * surrounding quotes trimmed. Only used to FIND deny/ask commands.
  */
 function looseUnits(command: string): string[][] {
-	return command
-		.split(/\$\(|[`;&|\n(){}]/)
-		.map((chunk) =>
-			chunk
-				// redirect operators split words; their targets stay (`x>>.git/y`)
-				.split(/\s+|[0-9]*[<>]+&?/)
-				.map((w) => w.replace(/^['"]+|['"]+$/g, ""))
-				.filter((w) => w !== ""),
-		)
-		.filter((unit) => unit.length > 0);
+	// read the raw text and the continuation-joined copy: `su\<newline>do` is `sudo` to bash
+	const joined = joinContinuations(command);
+	const texts = joined === command ? [command] : [command, joined];
+	return texts.flatMap((text) =>
+		text
+			.split(/\$\(|[`;&|\n(){}]/)
+			.map((chunk) =>
+				chunk
+					// redirect operators split words; their targets stay (`x>>.git/y`)
+					.split(/\s+|[0-9]*[<>]+&?/)
+					.map((w) => w.replace(/^['"]+|['"]+$/g, ""))
+					.filter((w) => w !== ""),
+			)
+			.filter((unit) => unit.length > 0),
+	);
+}
+
+/**
+ * Copy of text with bash line continuations removed: a backslash-newline
+ * outside single quotes, unless the backslash is itself escaped (`\\` then a
+ * real newline keeps both the backslash and the newline).
+ */
+function joinContinuations(text: string): string {
+	let out = "";
+	let quote: string | undefined;
+	let comment = false;
+	let wordStart = true;
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i] ?? "";
+		if (comment) {
+			// a comment does not continue: its backslashes and newline are kept
+			if (ch === "\n") {
+				comment = false;
+				wordStart = true;
+			}
+			out += ch;
+			continue;
+		}
+		if (quote === "'") {
+			if (ch === "'") quote = undefined;
+			out += ch;
+			continue;
+		}
+		if (ch === "\\") {
+			if (text[i + 1] === "\n") {
+				i++;
+				continue;
+			}
+			out += ch + (text[i + 1] ?? "");
+			i++;
+			wordStart = false;
+			continue;
+		}
+		if (quote === '"') {
+			if (ch === '"') quote = undefined;
+		} else if (ch === "'" || ch === '"') {
+			quote = ch;
+			wordStart = false;
+		} else if (ch === "#" && wordStart) {
+			comment = true;
+		} else wordStart = " \t\n;&|()<>".includes(ch);
+		out += ch;
+	}
+	return out;
 }
 
 /** Heredoc body or here-string, and the root of the command reading it. */
@@ -324,6 +400,61 @@ const HERESTRING = /<<<\s*('[^']*'|"(?:[^"\\]|\\.)*"|(?:\$\([^)]*\)|[^\s;&|)])+)
 // Delimiter word: any quote or backslash in it makes the body literal
 const HEREDOC = /<<(-?)[ \t]*((?:\\|['"])?[A-Za-z_][^\s;&|<>()]*)/;
 const PIPE_TO_SHELL = /\|&?\s*(\S*\/)?(ba|z|da|k|fi)?sh\b/;
+
+/**
+ * True when the line text[from, end) ends in a backslash that bash reads as a
+ * continuation: unescaped, outside single quotes, outside a `#` comment, and
+ * not inside an unterminated quote. Scans from `from` so quotes and comments
+ * begun earlier on the logical line count.
+ */
+function continuesAt(text: string, from: number, end: number): boolean {
+	let quote: string | undefined;
+	let comment = false;
+	let wordStart = true;
+	for (let i = from; i < end; i++) {
+		const ch = text[i] ?? "";
+		if (comment) {
+			if (ch === "\n") {
+				comment = false;
+				wordStart = true;
+			}
+			continue;
+		}
+		if (quote === "'") {
+			if (ch === "'") quote = undefined;
+			continue;
+		}
+		if (ch === "\\") {
+			if (i + 1 === end) return quote === undefined;
+			i++;
+			wordStart = false;
+			continue;
+		}
+		if (quote === '"') {
+			if (ch === '"') quote = undefined;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			quote = ch;
+			wordStart = false;
+			continue;
+		}
+		if (ch === "#" && wordStart) {
+			comment = true;
+			continue;
+		}
+		wordStart = " \t\n;&|()<>".includes(ch);
+	}
+	return false;
+}
+
+/** End of the logical line that starts at `from`: the first newline that no backslash continues, or -1. */
+function logicalLineEnd(text: string, from: number): number {
+	for (let end = text.indexOf("\n", from); end !== -1; end = text.indexOf("\n", end + 1)) {
+		if (!continuesAt(text, from, end)) return end;
+	}
+	return -1;
+}
 
 /** Rest of the line from `index`, without the following heredoc body. */
 function restOfLine(text: string, index: number): string {
@@ -359,20 +490,22 @@ function extractStdinFeeds(command: string): { text: string; feeds: StdinFeed[] 
 	for (let m = HEREDOC.exec(text); m !== null; m = HEREDOC.exec(text)) {
 		const consumer = consumerAt(text, m.index);
 		const opEnd = m.index + m[0].length;
-		const lineEnd = text.indexOf("\n", opEnd);
+		// the body starts after the logical line, which a backslash continues; the operator is read joined (`<<EOF\<newline>| sh`)
+		const lineEnd = logicalLineEnd(text, m.index);
 		if (lineEnd === -1) {
 			text = text.slice(0, m.index) + text.slice(opEnd);
 			continue;
 		}
-		const stripTabs = m[1] === "-";
-		const delimiter = m[2].replace(/['"\\]/g, "");
+		const op = HEREDOC.exec(joinContinuations(text.slice(m.index, lineEnd))) ?? m;
+		const stripTabs = op[1] === "-";
+		const delimiter = op[2].replace(/['"\\]/g, "");
 		const lines = text.slice(lineEnd + 1).split("\n");
 		const end = lines.findIndex((l) => (stripTabs ? l.replace(/^\t+/, "") : l) === delimiter);
 		feeds.push({
 			consumer,
-			pipedToShell: PIPE_TO_SHELL.test(restOfLine(text, opEnd)),
+			pipedToShell: PIPE_TO_SHELL.test(joinContinuations(text.slice(opEnd, lineEnd))),
 			script: lines.slice(0, end === -1 ? lines.length : end).join("\n"),
-			expands: !/['"\\]/.test(m[2]),
+			expands: !/['"\\]/.test(op[2]),
 		});
 		const after = end === -1 ? "" : lines.slice(end + 1).join("\n");
 		text = text.slice(0, m.index) + text.slice(opEnd, lineEnd + 1) + after;
@@ -624,7 +757,8 @@ export function maskScratchHeredocs(command: string, scratch: string | undefined
 		const opEnd = at + m[0].length;
 		const lineStart = text.lastIndexOf("\n", at - 1) + 1;
 		const lineEnd = text.indexOf("\n", opEnd);
-		if (lineEnd === -1) continue;
+		// a continued operator line is left to the normal checks
+		if (lineEnd === -1 || continuesAt(text, at, lineEnd)) continue;
 		const consumer = looseUnits(text.slice(lineStart, at)).at(-1)?.[0];
 		const rest = restOfLine(text, opEnd);
 		if (consumer === undefined || basename(consumer) !== "cat" || PIPE_TO_SHELL.test(rest) || !/>/.test(text.slice(lineStart, at) + rest)) continue;
@@ -808,6 +942,7 @@ function awkProgramProblem(program: string): string | undefined {
 	if (/\bgetline\b/.test(program)) return "`awk` program reads from a command or a file (`getline`)";
 	if (/@(?:include|load)\b/.test(program)) return "`awk` program loads another program (`@include`/`@load`)";
 	const code = awkCode(program);
+	if (code === undefined) return "`awk` program has a `/` after `+` or `-` that could be a regex or a division";
 	// a single `|` pipes into a command; `||` is a comparison
 	if (/(^|[^|])\|([^|]|$)/.test(code)) return "`awk` program pipes into a command";
 	if (/\bprintf?\b[^;{}]*>>?/.test(code)) return "`awk` program writes to a file";
@@ -820,7 +955,7 @@ function awkProgramProblem(program: string): string | undefined {
  * word, a number or `)` it is a division and stays, so nothing can hide in
  * what this function removes.
  */
-function awkCode(program: string): string {
+function awkCode(program: string): string | undefined {
 	let out = "";
 	let prev = "";
 	let i = 0;
@@ -838,7 +973,10 @@ function awkCode(program: string): string {
 			prev = '"';
 			continue;
 		}
-		if (ch === "/" && awkRegexStartsAfter(prev)) {
+		// `x++ / 2` and `x-- / 2`: postfix increment or decrement, a division
+		if (ch === "/" && awkRegexStartsAfter(prev) && !/(\+\+|--)$/.test(out.trimEnd())) {
+			// after a single `+` or `-` the slash may start a regex or divide: not read-only
+			if (/[+-]$/.test(out.trimEnd())) return undefined;
 			let j = i + 1;
 			let closed = false;
 			while (j < program.length && program[j] !== "\n") {
@@ -1122,7 +1260,20 @@ const GIT_REPO_FLAGS = new Set(["-C", "--git-dir", "--work-tree"]);
  * Why a git invocation isn't read-only, or undefined when it is (also used
  * for `rtk git ...`; `label` names the command in the reason).
  */
-function gitBlocker(args: string[], cwd: string | undefined, label = "git"): Blocker | undefined {
+/** Git forms that run a program named in their arguments (`rebase --exec`, `submodule foreach`, `bisect run`, `difftool -x`). */
+function gitProgramForm(sub: string, rest: string[]): string | undefined {
+	const longName = (a: string): string => (a.startsWith("--") ? a.split("=")[0] : "");
+	// getopt-style: any unambiguous abbreviation of the long option (at least `min` characters) counts
+	const isLong = (a: string, full: string, min: number): boolean => longName(a).length >= min && full.startsWith(longName(a));
+	const firstWord = rest.find((a) => !a.startsWith("-"));
+	if (sub === "rebase" && rest.some((a) => /^-[a-zA-Z]*x/.test(a) || isLong(a, "--exec", 4))) return "`git rebase --exec` runs a command";
+	if (sub === "submodule" && firstWord === "foreach") return "`git submodule foreach` runs a command in each submodule";
+	if (sub === "bisect" && firstWord === "run") return "`git bisect run` runs a command";
+	if (sub === "difftool" && rest.some((a) => a === "-x" || isLong(a, "--extcmd", 5))) return "`git difftool -x` runs a command";
+	return undefined;
+}
+
+function gitBlocker(args: string[], cwd: string | undefined, label = "git", gitRepos?: readonly string[]): Blocker | undefined {
 	const outputs = optionValues(args, "", ["--output"], "", false, 4);
 	if (outputs === null || outputs.length > 0) {
 		const words = outputs ?? [];
@@ -1146,7 +1297,7 @@ function gitBlocker(args: string[], cwd: string | undefined, label = "git"): Blo
 		if (GIT_REPO_FLAGS.has(flag)) {
 			const dir = inline ?? args[i + 1];
 			// the target must be inside the cwd and in the cwd's own repo (a nested repo's hooks and fsmonitor would run)
-			if (cwd === undefined || dir === undefined || crossesRepoBoundary(resolvePath(dir, cwd), cwd)) {
+			if (cwd === undefined || dir === undefined || foreignGitDir(resolvePath(dir, cwd), cwd, gitRepos)) {
 				return execBlock(`\`${label} ${flag}\` points git outside the working directory (that repo's config and hooks would run)`);
 			}
 			if (inline === undefined) i++;
@@ -1163,6 +1314,8 @@ function gitBlocker(args: string[], cwd: string | undefined, label = "git"): Blo
 		const opensPager = sub === "grep" && rest.some((a) => /^-O/.test(a) || a.startsWith("--open-files-in-pager"));
 		return opensPager ? execBlock(`\`${label} grep -O\` opens matches in another program`) : undefined;
 	}
+	const program = gitProgramForm(sub, rest);
+	if (program !== undefined) return execBlock(program);
 	const withArgs = plain(`\`${[label, sub, rest[0]].filter((w) => w !== undefined).join(" ")}\` can change the repository`);
 	switch (sub) {
 		case "branch":
@@ -1256,7 +1409,7 @@ function globReachesOutside(word: string, cwd: string | undefined): boolean {
 const RTK_NATIVE: Record<string, string> = { find: "find", rg: "rg", grep: "rg", tree: "tree" };
 
 /** Why an rtk invocation isn't read-only, or undefined when it is. */
-function rtkBlocker(args: string[], globs: boolean[], cwd: string | undefined): Blocker | undefined {
+function rtkBlocker(args: string[], globs: boolean[], cwd: string | undefined, gitRepos?: readonly string[]): Blocker | undefined {
 	let i = 0;
 	// only display-only global flags are known; any other changes what rtk does
 	while (i < args.length && args[i].startsWith("-")) {
@@ -1267,7 +1420,7 @@ function rtkBlocker(args: string[], globs: boolean[], cwd: string | undefined): 
 	if (sub === undefined) return plain("`rtk` without a subcommand");
 	const rest = args.slice(i + 1);
 	const restGlobs = globs.slice(i + 1);
-	if (sub === "git") return gitBlocker(rest, cwd, "rtk git");
+	if (sub === "git") return gitBlocker(rest, cwd, "rtk git", gitRepos);
 	const native = RTK_NATIVE[sub];
 	if (native !== undefined) {
 		const glob = rest.find((word, k) => restGlobs[k] && globMayBecomeFlag(word));
@@ -1404,7 +1557,7 @@ const SHELL_SYNTAX_WORDS = new Set(["for", "while", "until", "if", "then", "else
  * single source of truth for read-only detection: isReadOnlySegment and
  * the dialog's "Why" line both come from here.
  */
-function segmentBlocker(segment: Segment, cwd: string | undefined, scratch?: string, viaXargs = false, dir?: string, fetchHosts?: readonly string[]): Blocker | undefined {
+function segmentBlocker(segment: Segment, cwd: string | undefined, scratch?: string, viaXargs = false, dir?: string, fetchHosts?: readonly string[], gitRepos?: readonly string[]): Blocker | undefined {
 	const stripped = stripPrefixes(segment.argv, segment.globs, true);
 	if (stripped === null) {
 		const name = segment.argv.map((w) => ASSIGNMENT.exec(w)?.[1]).find((n) => n !== undefined && !isSafeEnvVar(n));
@@ -1415,7 +1568,7 @@ function segmentBlocker(segment: Segment, cwd: string | undefined, scratch?: str
 	// a 1:1 rtk proxy is analysed as the real command (`rtk npm test` → `npm test`)
 	const canon = canonicalize(stripped.argv);
 	if (canon.length !== stripped.argv.length) {
-		return segmentBlocker({ argv: canon, globs: stripped.globs.slice(stripped.argv.length - canon.length) }, cwd, scratch, viaXargs, dir, fetchHosts);
+		return segmentBlocker({ argv: canon, globs: stripped.globs.slice(stripped.argv.length - canon.length) }, cwd, scratch, viaXargs, dir, fetchHosts, gitRepos);
 	}
 	const [root, ...args] = stripped.argv;
 	const argGlobs = stripped.globs.slice(1);
@@ -1459,9 +1612,9 @@ function segmentBlocker(segment: Segment, cwd: string | undefined, scratch?: str
 
 	switch (root) {
 		case "git":
-			return gitBlocker(args, cwd);
+			return gitBlocker(args, cwd, "git", gitRepos);
 		case "rtk":
-			return rtkBlocker(args, argGlobs, cwd);
+			return rtkBlocker(args, argGlobs, cwd, gitRepos);
 		case "node":
 			return args.length > 0 && args.every((a) => a === "--version" || a === "-v") ? undefined : plain("`node` runs code (only `node --version` is read-only)");
 		case "npm":
@@ -1471,7 +1624,8 @@ function segmentBlocker(segment: Segment, cwd: string | undefined, scratch?: str
 				? undefined
 				: plain(`\`${[root, args[0]].filter(Boolean).join(" ")}\` isn't a read-only ${root} command`);
 		case "cd":
-			return cwd !== undefined && args.length === 1 && (isInside(resolvePath(args[0], cwd), resolve(cwd)) || cdIntoScratch(args[0], dir ?? cwd, scratch))
+			// a cd into a git repo the user granted (see inGrantedRepo) is no blocker, so git there can be judged
+			return cwd !== undefined && args.length === 1 && (isInside(resolvePath(args[0], cwd), resolve(cwd)) || cdIntoScratch(args[0], dir ?? cwd, scratch) || inGrantedRepo(resolvePath(args[0], dir ?? cwd), gitRepos))
 				? undefined
 				: plain("`cd` leaves the working directory");
 		case "uniq":
@@ -1990,12 +2144,15 @@ const HARMLESS_DEVICES = new Set(["/dev/null", "/dev/stdout", "/dev/stderr"]);
  * leading `~` resolves to home and is judged like any path.
  */
 function targetProblem(target: Target, cwd: string | undefined, dir: string | null | undefined, scratch: string | undefined): TargetProblem | undefined {
-	const word = target.word;
 	if (target.remote === true) return "outside";
-	if (HARMLESS_DEVICES.has(word)) return undefined;
+	if (HARMLESS_DEVICES.has(target.word)) return undefined;
+	if (otherUserTilde(target.word)) return "outside";
 	if (cwd === undefined) return "unchecked";
 	const where = dir === undefined ? cwd : (dir ?? undefined);
-	if (target.glob || word === "" || /[$`]/.test(word) || (word.startsWith("~") && word !== "~" && !word.startsWith("~/"))) return "unchecked";
+	// `~` and `~<current user>` are the home dir and `~+` the directory the command runs in: judged as the paths they stand for
+	if (target.word.startsWith("~+") && where === undefined) return "unchecked";
+	const word = expandHome(target.word, homedir(), where);
+	if (target.glob || word === "" || /[$`]/.test(word)) return "unchecked";
 	if (where === undefined && !/^[/~]/.test(word)) return "unchecked";
 	const resolved = resolvePath(word, where ?? "/");
 	const inScratch = scratch !== undefined && isInsideScratch(resolved, scratch);
@@ -2063,14 +2220,14 @@ function segmentDirs(segments: readonly Segment[], cwd: string | undefined): (st
  * "plain" (just not on the list), "write" or "exec". undefined when the
  * command can't be parsed. For tests and diagnostics.
  */
-export function commandEffects(command: string, cwd?: string, scratch?: string, fetchHosts?: readonly string[]): Array<"read-only" | "plain" | "write" | "exec"> | undefined {
+export function commandEffects(command: string, cwd?: string, scratch?: string, fetchHosts?: readonly string[], gitRepos?: readonly string[]): Array<"read-only" | "plain" | "write" | "exec"> | undefined {
 	const tokens = tokenize(maskForAnalysis(command.trim(), scratch), scratch);
-	return tokens?.map((segment) => segmentBlocker(segment, cwd, scratch, false, undefined, fetchHosts)).map((b) => (b === undefined ? "read-only" : (b.effect ?? "plain")));
+	return tokens?.map((segment) => segmentBlocker(segment, cwd, scratch, false, undefined, fetchHosts, gitRepos)).map((b) => (b === undefined ? "read-only" : (b.effect ?? "plain")));
 }
 
 /** True when one simple command is read-only. */
-function isReadOnlySegment(segment: Segment, cwd: string | undefined, scratch?: string, fetchHosts?: readonly string[]): boolean {
-	return segmentBlocker(segment, cwd, scratch, false, undefined, fetchHosts) === undefined;
+function isReadOnlySegment(segment: Segment, cwd: string | undefined, scratch?: string, fetchHosts?: readonly string[], gitRepos?: readonly string[]): boolean {
+	return segmentBlocker(segment, cwd, scratch, false, undefined, fetchHosts, gitRepos) === undefined;
 }
 
 function rootOf(segment: Segment): string | undefined {
@@ -2133,6 +2290,7 @@ function classifySegments(
 	covered: readonly CoverSource[],
 	scratch: string | undefined,
 	fetchHosts?: readonly string[],
+	gitRepos?: readonly string[],
 ): { problem?: string; items: ClassifiedSegment[]; changesDirWithGit: boolean } {
 	const none = { items: [], changesDirWithGit: false };
 	const original = command.trim();
@@ -2143,20 +2301,27 @@ function classifySegments(
 	if (segments === null) return { ...none, problem: unparseableReason(trimmed) };
 	if (segments.length === 0) return { ...none, problem: "has no command (only a comment)" };
 	// coverage is judged on the git -C normalized form, like isCoveredByPrefixes
-	const normalized = normalizeGitSegments(segments, cwd);
+	const normalized = normalizeGitSegments(segments, cwd, gitRepos);
 	const dirs = segmentDirs(segments, cwd);
 	const items = segments.map((segment, k): ClassifiedSegment => {
-		const blocker = segmentBlocker(segment, cwd, scratch, false, dirs[k] ?? undefined, fetchHosts);
+		const blocker = segmentBlocker(segment, cwd, scratch, false, dirs[k] ?? undefined, fetchHosts, gitRepos);
 		if (blocker === undefined) return { segment };
-		const source = covered.find((c) => isCoveredSegment(normalized[k], c.prefixes, cwd, c.exact, scratch, dirs[k]));
+		const source = covered.find((c) => isCoveredSegment(normalized[k], c.prefixes, cwd, c.exact, scratch, dirs[k], gitRepos));
 		return { segment, blocker, reason: reasonOf(blocker, cwd, dirs[k], scratch), coveredBy: source?.label };
 	});
-	// git after a cd into a nested repo, outside the cwd, or an unresolvable
-	// dir; a subdirectory of the same repo uses the same config and hooks
-	// (-C left after normalization is gitBlocker's reason, not this one)
+	return { items, changesDirWithGit: gitInOtherRepoAfterCd(segments, normalized, cwd, gitRepos) };
+}
+
+/**
+ * True when a `cd`/`pushd`/`popd` is in the command and git then runs in
+ * another repository (see gitRunsInOtherRepo): the case CD_GIT_REASON names.
+ * git after a cd into a nested repo, outside the cwd, or an unresolvable dir;
+ * a subdirectory of the same repo uses the same config and hooks (-C left
+ * after normalization is gitBlocker's reason, not this one).
+ */
+function gitInOtherRepoAfterCd(segments: readonly Segment[], normalized: Segment[], cwd: string | undefined, gitRepos?: readonly string[]): boolean {
 	const changesDir = segments.some((s) => DIR_CHANGERS.has(basename(rootOf(s) ?? "")));
-	const changesDirWithGit = cwd !== undefined && changesDir && gitRunsInOtherRepo(normalized, cwd, false);
-	return { items, changesDirWithGit };
+	return cwd !== undefined && changesDir && gitRunsInOtherRepo(normalized, cwd, false, gitRepos);
 }
 
 const CD_GIT_REASON = "`cd` into another repository or outside the working directory combined with git (that repo's config and hooks would run)";
@@ -2166,8 +2331,8 @@ const CD_GIT_REASON = "`cd` into another repository or outside the working direc
  * don't (read-only, or covered by one of `covered`). An unparseable command
  * is one `needs` entry with an empty segment.
  */
-export function approvalBreakdown(command: string, cwd?: string, covered: readonly CoverSource[] = [], scratch?: string, fetchHosts?: readonly string[]): ApprovalBreakdown {
-	const { problem, items, changesDirWithGit } = classifySegments(command, cwd, covered, scratch, fetchHosts);
+export function approvalBreakdown(command: string, cwd?: string, covered: readonly CoverSource[] = [], scratch?: string, fetchHosts?: readonly string[], gitRepos?: readonly string[]): ApprovalBreakdown {
+	const { problem, items, changesDirWithGit } = classifySegments(command, cwd, covered, scratch, fetchHosts, gitRepos);
 	if (problem !== undefined) return { needs: [{ segment: "", reason: problem }], ok: [] };
 	const needs: ApprovalBreakdown["needs"] = [];
 	const ok: string[] = [];
@@ -2211,9 +2376,9 @@ export function formatBreakdown(breakdown: ApprovalBreakdown): string[] {
  * `cd` that changes directory combined with git is not read-only (git
  * would run that directory's hooks/config).
  */
-export function readOnlyBlockers(command: string, cwd?: string, limit = 3, covered: readonly (readonly string[])[] = [], scratch?: string, fetchHosts?: readonly string[]): string[] {
+export function readOnlyBlockers(command: string, cwd?: string, limit = 3, covered: readonly (readonly string[])[] = [], scratch?: string, fetchHosts?: readonly string[], gitRepos?: readonly string[]): string[] {
 	const sources = covered.length === 0 ? [] : [{ label: "covered", prefixes: covered, exact: [] }];
-	const { problem, items, changesDirWithGit } = classifySegments(command, cwd, sources, scratch, fetchHosts);
+	const { problem, items, changesDirWithGit } = classifySegments(command, cwd, sources, scratch, fetchHosts, gitRepos);
 	if (problem !== undefined) return [problem];
 	const reasons = new Set<string>();
 	for (const { blocker, reason, coveredBy } of items) if (blocker !== undefined && coveredBy === undefined) reasons.add(reason ?? blocker.reason);
@@ -2222,8 +2387,8 @@ export function readOnlyBlockers(command: string, cwd?: string, limit = 3, cover
 }
 
 /** True when the command is read-only (see readOnlyBlockers). */
-export function isReadOnlyCommand(command: string, cwd?: string, scratch?: string, fetchHosts?: readonly string[]): boolean {
-	return readOnlyBlockers(command, cwd, 1, [], scratch, fetchHosts).length === 0;
+export function isReadOnlyCommand(command: string, cwd?: string, scratch?: string, fetchHosts?: readonly string[], gitRepos?: readonly string[]): boolean {
+	return readOnlyBlockers(command, cwd, 1, [], scratch, fetchHosts, gitRepos).length === 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -2235,7 +2400,7 @@ export function isReadOnlyCommand(command: string, cwd?: string, scratch?: strin
  * commands inside `sh -c '<script>'` and `eval ...`. Falls back to a loose
  * split when the tokenizer rejects the command.
  */
-function scanUnits(command: string, depth = 0): string[][] {
+function scanUnits(command: string, depth = 0, remote = true): string[][] {
 	const segments = command.length <= MAX_COMMAND_LENGTH ? tokenize(command) : null;
 	const units: string[][] = [];
 	let raw: string[][];
@@ -2245,11 +2410,15 @@ function scanUnits(command: string, depth = 0): string[][] {
 		// heredoc/here-string text is data, except when a shell reads it or bash expands substitutions in it
 		const { text, feeds } = extractStdinFeeds(command);
 		raw = looseUnits(text);
-		if (depth < 4) for (const script of feedScripts(feeds)) units.push(...scanUnits(script, depth + 1));
+		if (depth < 4) for (const script of feedScripts(feeds)) units.push(...scanUnits(script, depth + 1, remote));
 	}
 	for (const argv of raw) {
 		const unit = stripPrefixes(argv, argv.map(() => false), false)?.argv ?? argv;
-		if (unit.length === 0) continue;
+		if (unit.length === 0) {
+			// a bare `env` (options and NAME=value words only) prints the environment: keep it as a unit
+			if (basename(argv[0] ?? "") === "env") units.push(argv);
+			continue;
+		}
 		units.push(unit);
 		if (depth >= 4) continue;
 		const [root, ...args] = unit;
@@ -2262,10 +2431,12 @@ function scanUnits(command: string, depth = 0): string[][] {
 				s++;
 			}
 			const script = c === -1 ? undefined : args[s];
-			if (script !== undefined) units.push(...scanUnits(script, depth + 1));
+			if (script !== undefined) units.push(...scanUnits(script, depth + 1, remote));
 		}
-		if (root === "eval") units.push(...scanUnits(args.join(" "), depth + 1));
+		if (root === "eval") units.push(...scanUnits(args.join(" "), depth + 1, remote));
 		if (root === "rtk") units.push(...rtkInnerUnits(args, depth));
+		// the command a runner or launcher runs (`exec make deploy`, `ionice sudo id`): scanned like any command
+		for (const inner of runnerInner(unit, remote)) units.push(...scanUnits(inner.map(shellWord).join(" "), depth + 1, remote));
 	}
 	return units;
 }
@@ -2311,6 +2482,97 @@ function innerCommands(unit: string[]): string[][] {
 	return positions.map((j) => args.slice(j)).filter((inner) => inner[0] !== root);
 }
 
+/** A command that runs another command given in its arguments: never a rememberable prefix, and never covers what it launches. */
+function isRunnerName(name: string): boolean {
+	return COMMAND_RUNNERS.has(name) || Object.hasOwn(RUNNER_VALUE_OPTIONS, name) || name === "builtin";
+}
+
+/** A word as one single-quoted shell word, so re-tokenizing the joined words gives the same argv. */
+const shellWord = (word: string): string => `'${word.replace(/'/g, "'\\''")}'`;
+
+/**
+ * The commands a unit runs as its arguments: `script -c 'cmd'` runs `sh -c 'cmd'`;
+ * a launcher in RUNNER_VALUE_OPTIONS (`ionice -c 2 cmd`, `ssh -p 22 host cmd`,
+ * `busybox sh -c …`) runs the command from each word that is not one of its value
+ * options; the other runners go through innerCommands.
+ */
+function runnerInner(unit: string[], remote = true): string[][] {
+	const [root, ...args] = unit;
+	const name = basename(root ?? "");
+	if (name === "script") {
+		const c = args.findIndex((a) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(a));
+		return c === -1 || args[c + 1] === undefined ? [] : [["sh", "-c", args[c + 1]]];
+	}
+	// ssh runs its -o ProxyCommand / LocalCommand locally; the words after the host run on the remote side
+	if (name === "ssh") return [...sshLocalCommands(args), ...(remote ? valueShapedInner(args, RUNNER_VALUE_OPTIONS.ssh) : [])];
+	if (name === "tmux") return tmuxInner(args);
+	if (name === "screen") return screenInner(args);
+	if (!Object.hasOwn(RUNNER_VALUE_OPTIONS, name)) return innerCommands(unit);
+	return valueShapedInner(args, RUNNER_VALUE_OPTIONS[name]);
+}
+
+/** The command from each word that is not one of the launcher's value options (`ionice -c 2 cmd`). */
+function valueShapedInner(args: string[], values: readonly string[]): string[][] {
+	const inner: string[][] = [];
+	for (let j = 0; j < args.length; j++) {
+		if (args[j].startsWith("-")) {
+			if (values.includes(args[j])) j++;
+			continue;
+		}
+		inner.push(args.slice(j));
+	}
+	return inner;
+}
+
+/** `ssh -o ProxyCommand=CMD` and `-o LocalCommand=CMD`: a local shell command. */
+function sshLocalCommands(args: string[]): string[][] {
+	const out: string[][] = [];
+	for (let j = 0; j < args.length; j++) {
+		let option: string | undefined;
+		if (args[j] === "-o") option = args[++j];
+		else if (/^-o./.test(args[j])) option = args[j].slice(2);
+		const m = option === undefined ? null : /^(ProxyCommand|LocalCommand)\s*=?\s*(.+)$/i.exec(option);
+		if (m !== null) out.push(["sh", "-c", m[2]]);
+	}
+	return out;
+}
+
+/** tmux options that take a value (the union over the commands below). */
+const TMUX_VALUE_OPTIONS = ["-c", "-e", "-F", "-f", "-l", "-n", "-L", "-p", "-S", "-s", "-t", "-x", "-y"];
+/** tmux commands whose trailing words are a shell command (`new -d 'cmd'`, `run-shell cmd`). */
+const TMUX_COMMAND_SUBCOMMANDS = new Set(["new", "new-session", "new-window", "split-window", "respawn-pane", "run-shell", "run"]);
+
+/** Index of the first word after the options (a value option takes the next word too). */
+function skipOptionWords(words: readonly string[], values: readonly string[]): number {
+	let k = 0;
+	while (k < words.length && words[k].startsWith("-")) k += values.includes(words[k]) ? 2 : 1;
+	return k;
+}
+
+/** tmux: the trailing command of new/split/respawn/run-shell, and the keys of send-keys (typed into a shell). */
+function tmuxInner(args: string[]): string[][] {
+	const s = skipOptionWords(args, TMUX_VALUE_OPTIONS);
+	const sub = args[s];
+	const rest = args.slice(s + 1);
+	if (sub === "send-keys" || sub === "send") {
+		const keys = rest.slice(skipOptionWords(rest, TMUX_VALUE_OPTIONS)).filter((w) => w !== "Enter");
+		return keys.length > 0 ? [["sh", "-c", keys.join(" ")]] : [];
+	}
+	if (!TMUX_COMMAND_SUBCOMMANDS.has(sub ?? "")) return [];
+	const k = skipOptionWords(rest, TMUX_VALUE_OPTIONS);
+	return k < rest.length ? [["sh", "-c", rest.slice(k).join(" ")]] : [];
+}
+
+/** screen: the command after its options (`-dmS name cmd`; the -S, -c and -T values are skipped). */
+function screenInner(args: string[]): string[][] {
+	let k = 0;
+	while (k < args.length && args[k].startsWith("-")) {
+		if (/^-[A-Za-z]+$/.test(args[k]) && /[ScT]/.test(args[k].slice(1))) k++;
+		k++;
+	}
+	return k < args.length ? [args.slice(k)] : [];
+}
+
 function isPrivilegedUnit(unit: string[], depth = 0): boolean {
 	const root = basename(unit[0] ?? "");
 	if (PRIVILEGE_COMMANDS.has(root)) return true;
@@ -2318,7 +2580,8 @@ function isPrivilegedUnit(unit: string[], depth = 0): boolean {
 		const inner = rtkInnerUnits(unit.slice(1), depth).map((u) => stripPrefixes(u, u.map(() => false), false)?.argv ?? u);
 		if (inner.some((u) => isPrivilegedUnit(u, depth + 1))) return true;
 	}
-	return innerCommands(unit).some((inner) => PRIVILEGE_COMMANDS.has(basename(inner[0] ?? "")));
+	// a remote command (after the ssh host) runs under the remote account, not locally: only local commands count here
+return depth < 4 && runnerInner(unit, false).some((inner) => isPrivilegedUnit(inner, depth + 1));
 }
 
 /**
@@ -2327,7 +2590,7 @@ function isPrivilegedUnit(unit: string[], depth = 0): boolean {
  * command names one (`x=sudo; $x ls`).
  */
 export function isPrivilegedCommand(command: string): boolean {
-	const units = scanUnits(command);
+	const units = scanUnits(command, 0, false);
 	if (units.some(isPrivilegedUnit)) return true;
 	if (!units.some((unit) => (unit[0] ?? "").startsWith("$"))) return false;
 	return looseUnits(command)
@@ -2354,6 +2617,8 @@ export interface PathContext {
 	skillDirs?: readonly string[];
 	/** Hosts the user allowed fetching from (session and project grants); no host is allowed by default. */
 	fetchHosts?: readonly string[];
+	/** Realpaths of git repository roots the user allowed git to run in from another directory (session grants, see gitRepoRootOf). */
+	gitRepos?: readonly string[];
 }
 
 /**
@@ -2377,7 +2642,7 @@ function isDangerousUnit(unit: string[], ctx: PathContext, cwd: string | undefin
 		const inner = rtkInnerUnits(args, depth).map((u) => stripPrefixes(u, u.map(() => false), false)?.argv ?? u);
 		if (inner.some((u) => isDangerousUnit(u, ctx, cwd, depth + 1))) return true;
 	}
-	if (depth < 3) return innerCommands(unit).some((inner) => isDangerousUnit(inner, ctx, cwd, depth + 1));
+	if (depth < 3) return runnerInner(unit).some((inner) => isDangerousUnit(inner, ctx, cwd, depth + 1));
 	return false;
 }
 
@@ -2468,7 +2733,8 @@ export function isDangerousCommand(command: string, ctx: PathContext): boolean {
 	// heredoc/here-string text is data, except when a shell reads it or bash expands substitutions in it
 	const { text, feeds } = extractStdinFeeds(command);
 	if (feedScripts(feeds).some((script) => isDangerousCommand(script, ctx))) return true;
-	if (DANGEROUS_RAW_PATTERNS.some((pattern) => pattern.test(text))) return true;
+	const joined = joinContinuations(text);
+	if (DANGEROUS_RAW_PATTERNS.some((pattern) => pattern.test(text) || pattern.test(joined))) return true;
 	const units = scanUnits(command);
 	// units run in order: a `cd` changes where later relative paths point
 	let cwd: string | undefined = ctx.cwd;
@@ -2489,7 +2755,87 @@ export function isDangerousCommand(command: string, ctx: PathContext): boolean {
  * directly or through a glob that can match a .env file (`.en*`, `.e[n]v`).
  */
 export function isSecretCommand(command: string, ctx?: SecretContext): boolean {
-	return scanUnits(command).some((unit) => unit.some((w) => isSecretFile(w, ctx) || globMatchesSecretFile(w) || globMatchesSecretOnDisk(w, ctx))) || printsSecretVariable(command);
+	const quoted = quotedLiteralWords(command);
+	return (
+		scanUnits(command).some((unit) => {
+			const gitObject = isGitObjectRead(unit);
+			const root = basename(unit[0] ?? "");
+			return unit.some((word, k) => {
+				// `ls -I PATTERN` (and --hide, --ignore) names a filter, not a file: the word after it is not checked
+				if ((root === "ls" || root === "tree") && k > 0 && LISTING_FILTER_OPTIONS.has(unit[k - 1] ?? "")) return false;
+				return secretCandidates(word, gitObject, root).some((w) => {
+					// a glob under ~ or $HOME is judged on the directory it names, like the same path without a glob
+					const expanded = expandHome(w, homedir(), ctx?.cwd);
+					const capped = !quoted.has(w);
+					return isSecretFile(w, ctx) || globMatchesSecretFile(expanded, capped) || globMatchesSecretOnDisk(expanded, ctx, capped);
+				});
+			});
+		}) || printsSecretVariable(command) || dumpsEnvironment(command)
+	);
+}
+
+/**
+ * Words the command passes quoted, with no unquoted glob, brace or `$` in them (`'a*b'`): the shell does not
+ * expand them, so the star cap does not apply. Only top-level words are read; a word also seen unquoted counts
+ * as unquoted, and a command the tokenizer rejects has none (every word is capped).
+ */
+function quotedLiteralWords(command: string): Set<string> {
+	const quoted = new Set<string>();
+	const unquoted = new Set<string>();
+	const segments = command.length <= MAX_COMMAND_LENGTH ? tokenize(command) : null;
+	for (const segment of segments ?? []) {
+		segment.argv.forEach((word, i) => (segment.globs[i] === true ? unquoted : quoted).add(word));
+	}
+	for (const word of unquoted) quoted.delete(word);
+	return quoted;
+}
+
+/** Options of a listing command whose next word is a filter pattern, not a file. */
+const LISTING_FILTER_OPTIONS = new Set(["-I", "--hide", "--ignore"]);
+
+/** Long options whose value is a filter pattern, not a file read (`--exclude-from` and `--ignore-file` do read their file). */
+const FILTER_LONG_OPTIONS = new Set(["exclude", "exclude-dir", "ignore", "ignore-dir", "hide"]);
+
+/** Global git options that take a value as the next word (`git -c k=v show`). */
+const GIT_VALUE_GLOBALS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"]);
+
+/**
+ * The texts of one word that may name a file: the word itself, the value after `--flag=` (`--file=.env`),
+ * the value after a short flag letter (`-f.env`) and every suffix of a clustered short-flag word from its
+ * second letter (`-nf.env` names `f.env` and `.env`; `ls -aI.env` stops at its `I`), and, for `git show` and
+ * `git cat-file`, the part after the last `:` (`HEAD:.env`, `:.env`).
+ */
+function secretCandidates(word: string, gitObject: boolean, root: string): string[] {
+	const out = [word];
+	const long = /^--([^=]*)=(.*)$/.exec(word);
+	const short = long === null ? /^-([A-Za-z])(.+)$/.exec(word) : null;
+	const value = long?.[2] ?? short?.[2];
+	if (value !== undefined && !isFilterOption(long?.[1], short?.[1], value, root)) out.push(value);
+	if (long === null && /^-[A-Za-z]{2}/.test(word)) {
+		const listing = root === "ls" || root === "tree";
+		const filter = listing ? word.indexOf("I") : -1;
+		const end = filter > 0 ? filter : word.length;
+		for (let k = 2; k < end; k++) out.push(word.slice(k));
+	}
+	if (gitObject && word.includes(":")) out.push(word.slice(word.lastIndexOf(":") + 1));
+	return out;
+}
+
+/**
+ * An option whose value is a filter, not a file it reads: the long options in FILTER_LONG_OPTIONS,
+ * `-g`/`--glob`/`--iglob` with a `!` (ripgrep's negated glob), and `-I` of ls and tree.
+ */
+function isFilterOption(longName: string | undefined, shortLetter: string | undefined, value: string, root: string): boolean {
+	if (longName !== undefined) return FILTER_LONG_OPTIONS.has(longName) || (/^i?glob$/.test(longName) && value.startsWith("!"));
+	if (shortLetter === "g") return value.startsWith("!");
+	return shortLetter === "I" && (root === "ls" || root === "tree");
+}
+
+/** True for `git show` and `git cat-file`, which read the object a `<rev>:<path>` word names. */
+function isGitObjectRead(unit: string[]): boolean {
+	if (basename(unit[0] ?? "") !== "git") return false;
+	const sub = unit.slice(1).find((a, k, all) => !a.startsWith("-") && !(k > 0 && GIT_VALUE_GLOBALS.has(all[k - 1] ?? "")));
+	return sub === "show" || sub === "cat-file";
 }
 
 /**
@@ -2526,10 +2872,35 @@ function maskLiteralDollars(command: string): string {
 }
 
 /** True when echo or printf is given a credential-named variable (`$NAME`, `${NAME}`) that the shell expands. */
+/** Names echo/printf must not print: credential words, passwords (`PGPASSWORD`), and PWD except the directory variables themselves. */
+function isSecretPrintName(name: string): boolean {
+	if (SECRET_PRINT_NAME.test(name) || /PASS(WORD|WD)/i.test(name)) return true;
+	const upper = name.toUpperCase();
+	return upper.includes("PWD") && upper !== "PWD" && upper !== "OLDPWD";
+}
+
+/** `jq` with the `env` or `$ENV` builtin, or awk reading ENVIRON: each prints every variable, credentials included. */
+function dumpsEnvironment(command: string): boolean {
+	return scanUnits(command).some(([root = "", ...args]) => {
+		const name = basename(root);
+		if (name === "jq") return args.some((a) => !a.startsWith("-") && /(^|[^.\w$])env\b|\$ENV\b/.test(a));
+		if (AWK_COMMANDS.has(name)) return args.some((a) => /\bENVIRON\b/.test(a));
+		// `env` with no command after its options and NAME=value words prints the environment
+		if (name === "env") return args.every((a) => a.startsWith("-") || ASSIGNMENT.test(a));
+		if (name === "printenv") return args.every((a) => a.startsWith("-")) || args.some((a) => !a.startsWith("-") && isSecretPrintName(a));
+		// bare set, export -p / export, declare and typeset with -p or -x (no name): the variables and their values
+		if (name === "set") return args.length === 0;
+		if (name === "export") return args.every((a) => a === "-p");
+		if (name === "declare" || name === "typeset") return args.every((a) => a.startsWith("-") && /[px]/.test(a));
+		if (name === "compgen") return args.some((a) => a === "-e" || a === "-v");
+		return false;
+	});
+}
+
 function printsSecretVariable(command: string): boolean {
 	return scanUnits(maskLiteralDollars(command)).some(([root = "", ...args]) => {
 		if (!["echo", "printf"].includes(basename(root))) return false;
-		return args.some((arg) => [...arg.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)].some((m) => SECRET_PRINT_NAME.test(m[1] ?? "")));
+		return args.some((arg) => [...arg.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)].some((m) => isSecretPrintName(m[1] ?? "")));
 	});
 }
 
@@ -2551,12 +2922,16 @@ const NON_READING_COMMANDS = new Set(["echo", "printf", "which", "type", "comman
  */
 export function outsideCwdReadPaths(command: string, ctx: PathContext): string[] {
 	const found = new Set<string>();
+	const quoted = quotedLiteralWords(command);
 	// units run in order: a `cd` changes which directory later relative words name
 	let cwd: string | undefined = ctx.cwd;
 	for (const [root, ...args] of scanUnits(command)) {
 		if (root === undefined) continue;
 		const name = basename(root);
 		if (DIR_CHANGERS.has(name)) {
+			// `cd ~root` or `cd ~-` enters another account's directory: an outside read whatever follows
+			const target = args.find((a) => !a.startsWith("-") || a === "-");
+			if (target !== undefined && otherUserTilde(target)) found.add(target);
 			cwd = changedDir(name, args, cwd);
 			continue;
 		}
@@ -2564,16 +2939,25 @@ export function outsideCwdReadPaths(command: string, ctx: PathContext): string[]
 		// the command runs outside the cwd (after a `cd`): the directory it reads in
 		if (cwd !== undefined && !isSamePath(cwd, ctx.cwd, ctx.cwd) && isOutsideCwdRead(cwd, ctx)) found.add(cwd);
 		for (const arg of args) {
+			const raw = arg.startsWith("-") ? arg.slice(arg.indexOf("=") + 1) : arg;
+			// another account's home is outside whether or not the path exists here
+			if (otherUserTilde(raw)) {
+				found.add(raw);
+				continue;
+			}
 			// $HOME is expanded first, so `$HOME/x` is judged like `~/x`; a `..` segment can climb out of the cwd anywhere in the word
-			const value = expandHome(arg.startsWith("-") ? arg.slice(arg.indexOf("=") + 1) : arg, homedir(), cwd);
-			if (/^(\/|~|\.\.)|(^|\/)\.\.(\/|$)/.test(value) && isOutsideCwdRead(value, ctx)) found.add(value);
+			const value = expandHome(raw, homedir(), cwd);
+			// a glob is outside when the directory above its first glob character is (`/etc/pass*`); its matches are not walked
+			const dir = /[*?[{]/.test(value) ? globDirectory(value) : undefined;
+			if (dir !== undefined && cwd !== undefined && isOutsideCwdRead(resolvePath(dir, cwd), ctx)) found.add(value);
+			else if (/^(\/|~|\.\.)|(^|\/)\.\.(\/|$)/.test(value) && isOutsideCwdRead(value, ctx)) found.add(value);
 			// a path or glob inside the project can still be, or match, a link that leads out of it
 			// (a path that is itself outside is the case above, or the `cd` directory already reported)
 			else if (cwd !== undefined && !arg.startsWith("-") && isInside(resolve(cwd), resolve(ctx.cwd))) {
 				const here: string = cwd;
 				const leadsOut = (path: string): boolean => isInside(resolvePath(path, here), resolve(ctx.cwd)) && isOutsideCwdRead(resolvePath(path, here), ctx);
 				if (/[*?[{]/.test(arg)) {
-					const matches = expandGlob(arg, cwd);
+					const matches = expandGlob(arg, cwd, !quoted.has(arg));
 					if (matches === null) found.add(arg);
 					else for (const match of matches) if (leadsOut(match)) found.add(match);
 				} else if (lstatOk(resolvePath(arg, cwd)) && leadsOut(arg)) found.add(arg);
@@ -2581,6 +2965,14 @@ export function outsideCwdReadPaths(command: string, ctx: PathContext): string[]
 		}
 	}
 	return [...found];
+}
+
+/** The directory above a glob word's first glob character (`/etc` for `/etc/pass*`, `.` for `*.py`). */
+function globDirectory(word: string): string | undefined {
+	const glob = word.search(/[*?[{]/);
+	if (glob === -1) return undefined;
+	const slash = word.lastIndexOf("/", glob);
+	return slash === -1 ? "." : slash === 0 ? "/" : word.slice(0, slash);
 }
 
 /**
@@ -2750,18 +3142,44 @@ export function bashWritesInsideArtifactDirs(command: string, ctx: PathContext):
 export function outsideCwdBashWrites(command: string, ctx: PathContext): string[] {
 	const trimmed = command.trim();
 	if (trimmed === "" || trimmed.length > MAX_COMMAND_LENGTH) return [];
-	const tokens = tokenize(maskForAnalysis(trimmed, ctx.scratchDir), ctx.scratchDir);
-	if (tokens === null) return [];
+	const { text, inner } = unsubstituted(maskForAnalysis(trimmed, ctx.scratchDir));
+	// a substitution runs its own commands: judged like a line of their own
+	const found: string[] = inner.flatMap((script) => outsideCwdBashWrites(script, ctx));
+	found.push(...redirectOutsideTargets(text, ctx));
+	const tokens = tokenize(text, ctx.scratchDir);
+	if (tokens === null) return found;
 	const dirs = segmentDirs(tokens, ctx.cwd);
-	const found: string[] = [];
-	for (const [k, segment] of tokens.entries()) {
+	// a command a launcher runs (`env cp a /etc/x`, `ionice cp a /etc/x`) is judged the same way
+	const judge = (segment: Segment, dir: string | null | undefined, depth: number): void => {
 		const blocker = segmentBlocker(segment, ctx.cwd, ctx.scratchDir);
-		if (blocker?.effect !== "write" || !Array.isArray(blocker.targets)) continue;
-		for (const target of blocker.targets) {
-			if (targetProblem(target, ctx.cwd, dirs[k], ctx.scratchDir) === "outside") found.push(target.word);
+		if (blocker?.effect === "write" && Array.isArray(blocker.targets)) {
+			for (const target of blocker.targets) {
+				if (targetProblem(target, ctx.cwd, dir, ctx.scratchDir) === "outside") found.push(target.word);
+			}
 		}
-	}
+		if (depth < 4) for (const argv of runnerInner(segment.argv)) judge({ argv, globs: argv.map(() => false) }, dir, depth + 1);
+	};
+	for (const [k, segment] of tokens.entries()) judge(segment, dirs[k], 0);
 	return found;
+}
+
+/**
+ * The line with each `$(…)` and backquoted substitution replaced by the word `X`, and each here-string or
+ * heredoc operator dropped, so the writes around them can be read. The substitutions' own text is returned.
+ */
+function unsubstituted(command: string): { text: string; inner: string[] } {
+	const inner: string[] = [];
+	let text = command;
+	for (let pass = 0; pass < 8; pass++) {
+		const next = text.replace(/\$\(\([^]*?\)\)|\$\(([^()]*)\)|`([^`]*)`/g, (_m, a: string | undefined, b: string | undefined) => {
+			if (a !== undefined || b !== undefined) inner.push(a ?? b ?? "");
+			return "X";
+		});
+		if (next === text) break;
+		text = next;
+	}
+	text = text.replace(/<<<\s*("[^"]*"|'[^']*'|\S+)/g, " ").replace(/<<-?\s*(["']?)([A-Za-z_][A-Za-z0-9_]*)\1/g, " ");
+	return { text, inner };
 }
 
 /**
@@ -2985,6 +3403,13 @@ export interface SearchHit {
 	why: "secret" | "unchecked" | "limit";
 }
 
+/** Most `*` a glob word may have: more is not expanded or matched (its nested `.*` backtracks for too long). */
+const GLOB_STAR_LIMIT = 8;
+
+function starCount(word: string): number {
+	return word.split("*").length - 1;
+}
+
 /** A glob pattern matched against a file name; null patterns match everything (fail closed). */
 function globMatches(glob: string, name: string): boolean {
 	return globToRegExp(glob)?.test(name) ?? true;
@@ -3110,6 +3535,7 @@ export function secretSearchHits(command: string, ctx: PathContext): SearchHit[]
 		const rel = relative(ctx.cwd, path);
 		return rel !== "" && !rel.startsWith("..") && !rel.startsWith(sep) ? rel : path;
 	};
+	const searches: Array<{ roots: Array<string | undefined>; scan: SearchScan; pipe?: boolean }> = [];
 	for (const { unit, dir } of unitsWithDirs(command, ctx)) {
 		const viaRtk = basename(unit[0] ?? "") === "rtk";
 		let name = basename(unit[0] ?? "");
@@ -3131,21 +3557,483 @@ export function secretSearchHits(command: string, ctx: PathContext): SearchHit[]
 			return expandSearchRoot(word, dir ?? "/");
 		});
 		const triggers = kind === "grep" ? scan.recursive : kind === "rtkgrep" ? scan.recursive || scan.unrestricted : scan.unrestricted;
-		if (!triggers) continue;
+		if (triggers) searches.push({ roots, scan });
+	}
+	searches.push(...pipedListSearches(command, ctx));
+	for (const { roots, scan, pipe } of searches) {
 		for (const root of roots) {
 			if (root === undefined) {
 				hits.push({ path: "(search path)", why: "unchecked" });
 				continue;
 			}
-			const { secrets, limit } = secretFilesUnder(root, ctx, scan);
 			// a committed fixture under a directory this session may read is repository content, not the user's credential
 			const real = realpathLoose(resolve(root));
 			const readable = isInside(real, resolve(ctx.cwd)) || (ctx.outsideReadDirs ?? []).some((dir) => isInside(real, dir));
+			// a file list of a directory outside the project is not walked: it is an outside read
+			if (pipe === true && !readable) {
+				hits.push({ path: shown(root), why: "unchecked" });
+				continue;
+			}
+			const { secrets, limit } = secretFilesUnder(root, ctx, scan);
 			for (const secret of uncommittedSecrets(secrets, readable)) hits.push({ path: shown(secret), why: "secret" });
 			if (limit && secrets.length === 0) hits.push({ path: shown(root), why: "limit" });
 		}
 	}
 	return hits;
+}
+
+/** A token of a shell line: a word (quotes removed), an operator, or the target word of a redirection. */
+type LineToken = { word: string } | { op: string } | { redirect: string };
+
+/**
+ * The tokens of a shell line as bash reads them for these checks: quotes removed, operators split out, a
+ * newline as `;`, and each redirection as a `redirect` token holding its target (`2>&1` and `>&2` have none).
+ * Null where the line is not read with confidence: a substitution, a process substitution, a heredoc, an
+ * unterminated quote, a redirection with no target.
+ */
+function lexLine(command: string): LineToken[] | null {
+	if (/\$\(|`|<\(|>\(|<</.test(command)) return null;
+	const out: LineToken[] = [];
+	let word = "";
+	let started = false;
+	let bare = true;
+	let pendingRedirect = false;
+	let pendingWrite = false;
+	let failed = false;
+	const flush = (): void => {
+		if (!started) return;
+		if (pendingRedirect) {
+			if (pendingWrite) out.push({ redirect: word });
+		} else out.push(bare && (word === "{" || word === "}") ? { op: word } : { word });
+		pendingRedirect = false;
+		pendingWrite = false;
+		word = "";
+		started = false;
+		bare = true;
+	};
+	const operator = (text: string): void => {
+		flush();
+		if (pendingRedirect) failed = true;
+		out.push({ op: text });
+	};
+	let i = 0;
+	while (i < command.length && !failed) {
+		const ch = command[i] ?? "";
+		if (ch === " " || ch === "\t") {
+			flush();
+			i++;
+			continue;
+		}
+		if (ch === "\n") {
+			operator(";");
+			i++;
+			continue;
+		}
+		if (ch === "#" && !started) {
+			while (i < command.length && command[i] !== "\n") i++;
+			continue;
+		}
+		if (ch === "'") {
+			const end = command.indexOf("'", i + 1);
+			if (end === -1) return null;
+			word += command.slice(i + 1, end);
+			started = true;
+			bare = false;
+			i = end + 1;
+			continue;
+		}
+		if (ch === '"') {
+			let j = i + 1;
+			while (j < command.length && command[j] !== '"') {
+				const c = command[j] ?? "";
+				if (c === "\\" && "$`\"\\\n".includes(command[j + 1] ?? "\u0000")) {
+					if (command[j + 1] !== "\n") word += command[j + 1];
+					j += 2;
+					continue;
+				}
+				word += c;
+				j++;
+			}
+			if (j >= command.length) return null;
+			started = true;
+			bare = false;
+			i = j + 1;
+			continue;
+		}
+		if (ch === "\\") {
+			if (i + 1 >= command.length) return null;
+			if (command[i + 1] !== "\n") {
+				word += command[i + 1];
+				started = true;
+				bare = false;
+			}
+			i += 2;
+			continue;
+		}
+		if (ch === ">" || ch === "<" || (ch === "&" && command[i + 1] === ">")) {
+			// a number right before the operator, with no space, is the fd it redirects (`2>`)
+			if (started && bare && !pendingRedirect && /^\d+$/.test(word)) {
+				word = "";
+				started = false;
+			} else flush();
+			if (pendingRedirect) {
+				failed = true;
+				break;
+			}
+			let j = i + (ch === "&" ? 2 : 1);
+			if (ch === "<" && command[j] === "<") return null;
+			if (command[j] === ">" || command[j] === "|") j++;
+			if (command[j] === "&") {
+				// a duplication or close (`>&2`, `2>&-`) writes no file; `>&file` does
+				if (/[0-9-]/.test(command[j + 1] ?? "")) {
+					j++;
+					while (/[0-9]/.test(command[j] ?? "")) j++;
+					if (command[j] === "-") j++;
+					i = j;
+					continue;
+				}
+				j++;
+			}
+			pendingRedirect = true;
+			pendingWrite = ch !== "<" || command[i + 1] === ">";
+			i = j;
+			continue;
+		}
+		if (ch === "|") {
+			const double = command[i + 1] === "|";
+			operator(double ? "||" : "|");
+			i += double || command[i + 1] === "&" ? 2 : 1;
+			continue;
+		}
+		if (ch === "&") {
+			if (command[i + 1] === "&") {
+				operator("&&");
+				i += 2;
+			} else {
+				operator("&");
+				i++;
+			}
+			continue;
+		}
+		if (ch === ";") {
+			const double = command[i + 1] === ";";
+			operator(double ? ";;" : ";");
+			i += double ? 2 : 1;
+			continue;
+		}
+		if (ch === "(" || ch === ")") {
+			operator(ch);
+			i++;
+			continue;
+		}
+		word += ch;
+		started = true;
+		i++;
+	}
+	if (failed) return null;
+	flush();
+	return pendingRedirect ? null : out;
+}
+
+/** A simple command of a line, and the indexes of the commands whose output it reads through a pipe. */
+interface LineCommand {
+	argv: string[];
+	feeders: number[];
+}
+
+/**
+ * The simple commands of a line, in order. A command after `|` is fed by the command before it, or, when that
+ * is a group `( … )` or `{ … }`, by every command of the group. Redirect targets are not words.
+ */
+function lineCommands(tokens: LineToken[]): LineCommand[] {
+	const cmds: LineCommand[] = [];
+	const groups: number[] = [];
+	let argv: string[] = [];
+	let feeders: number[] = [];
+	let last: number[] = [];
+	const finish = (): void => {
+		if (argv.length === 0) return;
+		cmds.push({ argv, feeders });
+		last = [cmds.length - 1];
+		argv = [];
+	};
+	for (const token of tokens) {
+		if ("redirect" in token) continue;
+		if ("word" in token) {
+			argv.push(token.word);
+			continue;
+		}
+		switch (token.op) {
+			case "|":
+				finish();
+				feeders = last;
+				break;
+			case "(":
+			case "{":
+				finish();
+				groups.push(cmds.length);
+				break;
+			case ")":
+			case "}": {
+				finish();
+				const start = groups.pop() ?? 0;
+				last = Array.from({ length: cmds.length - start }, (_, k) => start + k);
+				break;
+			}
+			default:
+				finish();
+				feeders = [];
+		}
+	}
+	finish();
+	return cmds;
+}
+
+/** Commands that print their input's lines unchanged or filtered: a file list piped through them keeps its names. */
+const PASS_THROUGH = new Set(["sort", "uniq", "head", "tail", "grep", "egrep", "fgrep", "sed", "tr", "cut", "tee", "awk", "cat", "rev", "shuf"]);
+
+/** Commands that print no file's text when given files (a count, a size, a type, a digest, or they change the file). */
+const NON_READING = new Set(["echo", "printf", "wc", "ls", "stat", "file", "du", "basename", "dirname", "realpath", "readlink", "md5sum", "sha1sum", "sha256sum", "sha512sum", "touch", "mkdir", "rmdir", "rm", "chmod"]);
+
+/** Launchers stripped before a command is judged: the wrappers, and the runners of RUNNER_VALUE_OPTIONS (not ssh: its first operand is a host). */
+const PIPE_WRAPPERS = new Set(["nice", "time", "nohup", "command", "env", "stdbuf", "timeout", "setsid", "chronic", ...Object.keys(RUNNER_VALUE_OPTIONS).filter((name) => name !== "ssh")]);
+
+/** Options of the wrappers above that take a separate value (`nice -n 5`, `timeout -s KILL 5`). */
+const LAUNCHER_VALUES: Record<string, string[]> = {
+	nice: ["-n", "--adjustment"],
+	timeout: ["-s", "-k", "--signal", "--kill-after"],
+	env: ["-u", "--unset", "-C", "--chdir"],
+	stdbuf: ["-i", "-o", "-e"],
+	time: ["-f", "-o"],
+};
+
+/** The command a launcher runs: its options (with their values), `NAME=value` words (env), and the positional word of timeout, chrt and taskset are dropped. */
+function stripPipeWrappers(argv: string[]): string[] {
+	let k = 0;
+	while (k < argv.length && PIPE_WRAPPERS.has(basename(argv[k] ?? ""))) {
+		const name = basename(argv[k] ?? "");
+		const values = [...(LAUNCHER_VALUES[name] ?? []), ...(RUNNER_VALUE_OPTIONS[name] ?? [])];
+		k++;
+		let cpuGiven = false;
+		while (k < argv.length) {
+			const word = argv[k] ?? "";
+			if (word.startsWith("-")) {
+				k++;
+				if (word === "-c" || word === "--cpu-list") cpuGiven = true;
+				if (values.includes(word)) k++;
+				continue;
+			}
+			if (name === "env" && /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
+				k++;
+				continue;
+			}
+			break;
+		}
+		// the positional word before the command: timeout's duration, chrt's priority, taskset's mask (not with -c)
+		const positional = name === "timeout" || name === "chrt" || (name === "taskset" && !cpuGiven);
+		if (positional && k < argv.length) k++;
+	}
+	return argv.slice(k);
+}
+
+/** True when a command named as the first word reads the files it is given (not in NON_READING; nothing named is the default `echo`). */
+function isReadingCommand(root: string | undefined): boolean {
+	return root !== undefined && !NON_READING.has(basename(root));
+}
+
+/** Short xargs options that take a value (`-I {}`, `-n 1`); `-i`, `-e`, `-l` take an attached value only. */
+const XARGS_VALUE_SHORT = "ILnPsEadj";
+const XARGS_LONG_VALUE = new Set(["max-args", "max-procs", "max-chars", "delimiter", "arg-file", "process-slot-var", "jobs"]);
+
+/** The command xargs runs: its first word after xargs' own options (none: the default `echo`). */
+function xargsCommand(args: string[]): string[] {
+	for (let k = 0; k < args.length; k++) {
+		const a = args[k] ?? "";
+		if (a === "--") return args.slice(k + 1);
+		if (a.startsWith("--")) {
+			if (!a.includes("=") && XARGS_LONG_VALUE.has(a.slice(2))) k++;
+			continue;
+		}
+		if (a.startsWith("-") && a.length > 1) {
+			for (let c = 1; c < a.length; c++) {
+				if (!XARGS_VALUE_SHORT.includes(a[c] ?? "")) continue;
+				if (c === a.length - 1) k++;
+				break;
+			}
+			continue;
+		}
+		return args.slice(k);
+	}
+	return [];
+}
+
+/** Short ls options that take a value (`-I PATTERN`, `-w N`, `-T N`), and the long ones. */
+const LS_VALUE_SHORT = "IwT";
+const LS_LONG_VALUE = new Set(["hide", "ignore", "width", "tabsize", "block-size", "format", "sort", "time-style", "time"]);
+
+/** The directories an ls lists: its operands (not option values); `.` when none. */
+function lsOperands(args: string[]): string[] {
+	const out: string[] = [];
+	let options = true;
+	for (let k = 0; k < args.length; k++) {
+		const a = args[k] ?? "";
+		if (options && a === "--") {
+			options = false;
+			continue;
+		}
+		if (options && a.startsWith("--")) {
+			if (!a.includes("=") && LS_LONG_VALUE.has(a.slice(2))) k++;
+			continue;
+		}
+		if (options && a.startsWith("-") && a.length > 1) {
+			for (let c = 1; c < a.length; c++) {
+				if (!LS_VALUE_SHORT.includes(a[c] ?? "")) continue;
+				if (c === a.length - 1) k++;
+				break;
+			}
+			continue;
+		}
+		out.push(a);
+	}
+	return out.length > 0 ? out : ["."];
+}
+
+/** The roots a find walks: the paths before its expression (after -H/-L/-P), `.` when none. */
+function findRoots(args: string[]): string[] {
+	let k = 0;
+	while (k < args.length && (args[k] === "-H" || args[k] === "-L" || args[k] === "-P")) k++;
+	const roots: string[] = [];
+	for (; k < args.length && !/^[-(!]/.test(args[k] ?? ""); k++) roots.push(args[k] ?? "");
+	return roots.length > 0 ? roots : ["."];
+}
+
+/** find's expression words that can keep names other than the `-name` glob: a negation, an alternative, a group, a prune. */
+const FIND_COMPLEX = new Set(["!", "-not", "-o", "-or", "(", "-prune"]);
+const FIND_EXEC = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
+
+/**
+ * The walk of a find: every file under its roots, or, when its expression is a plain `-name G` / `-iname G`,
+ * only the files whose name G matches (the same test as a recursive search's include).
+ */
+function findScan(args: string[]): SearchScan {
+	const scan = treeScan();
+	if (args.some((a) => FIND_COMPLEX.has(a))) return scan;
+	const at = args.findIndex((a) => a === "-name" || a === "-iname");
+	const glob = at === -1 ? undefined : args[at + 1];
+	if (glob !== undefined) scan.includes = [args[at] === "-iname" ? caseless(glob) : glob];
+	return scan;
+}
+
+/** True for `git ls-files` that lists untracked files: `--others`, or a short cluster holding `o` (`-o`, `-io`). */
+function gitUntracked(args: string[]): boolean {
+	return args.some((a) => a === "--others" || (/^-[A-Za-z]+$/.test(a) && a.includes("o")));
+}
+
+/** A walk of every file under the roots, with no include filter. */
+function treeScan(): SearchScan {
+	return { recursive: true, unrestricted: false, roots: [], includes: [], excludes: [], excludeDirs: [] };
+}
+
+/** A search over `roots` from a file list: `pipe` is set, so a root outside the project is not walked. */
+interface ListSearch {
+	roots: Array<string | undefined>;
+	scan: SearchScan;
+	pipe: boolean;
+}
+
+/**
+ * The searches a file list makes, when a reader gets the names: `ls`, `find` or `git ls-files` (untracked)
+ * whose output reaches `xargs <reader>` through pass-through filters, groups and wrappers; and a `find` whose
+ * `-exec` / `-ok` runs a reader. Every reader but the NON_READING ones counts. The tree a list walks is
+ * searched the way a recursive search is. A `cd` in the command, or a path that can't be resolved, is
+ * unchecked. Tracked files (`git ls-files`) are content, and a list the lexer can't read is unchecked.
+ */
+function pipedListSearches(command: string, ctx: PathContext): ListSearch[] {
+	const tokens = lexLine(command);
+	if (tokens === null) {
+		const mayList = /\b(xargs|find|ls|git)\b/.test(command) && /\b(xargs|-exec|-execdir|-ok|-okdir)\b/.test(command);
+		return mayList ? [{ roots: [undefined], scan: treeScan(), pipe: true }] : [];
+	}
+	const cmds = lineCommands(tokens);
+	const changesDir = scanUnits(command).some((unit) => DIR_CHANGERS.has(basename(unit[0] ?? "")));
+	const rootsOf = (words: string[]): Array<string | undefined> =>
+		words.flatMap((word) => (changesDir || /[$`]/.test(word) ? [undefined] : expandSearchRoot(word, ctx.cwd)));
+	// the search a list-making command is, or undefined for any other command
+	const listOf = (argv: string[]): ListSearch | undefined => {
+		const [name = "", ...args] = argv;
+		const base = basename(name);
+		if (base === "ls") return { roots: rootsOf(lsOperands(args)), scan: treeScan(), pipe: true };
+		if (base === "find") return { roots: rootsOf(findRoots(args)), scan: findScan(args), pipe: true };
+		if (base === "git") {
+			const at = args.indexOf("ls-files");
+			if (at === -1 || !gitUntracked(args.slice(at + 1))) return undefined;
+			// `git -C <dir> ls-files` names another repository than the cwd's: not judged
+			return { roots: at === 0 ? rootsOf(["."]) : [undefined], scan: treeScan(), pipe: true };
+		}
+		return undefined;
+	};
+	// the lists that reach a command through its pipe, walking back through pass-through filters
+	const feeding = (indexes: number[], depth: number): ListSearch[] =>
+		indexes.flatMap((idx) => {
+			const cmd = cmds[idx];
+			if (cmd === undefined) return [];
+			const argv = stripPipeWrappers(cmd.argv);
+			const found = listOf(argv);
+			if (found !== undefined) return [found];
+			if (!PASS_THROUGH.has(basename(argv[0] ?? ""))) return [];
+			// a chain this deep is not followed: its list is unchecked
+			return depth < 16 ? feeding(cmd.feeders, depth + 1) : [{ roots: [undefined], scan: treeScan(), pipe: true }];
+		});
+	const out: ListSearch[] = [];
+	for (const cmd of cmds) {
+		const argv = stripPipeWrappers(cmd.argv);
+		const root = basename(argv[0] ?? "");
+		if (root === "find" && argv.slice(1).some((a, k, all) => FIND_EXEC.has(a) && isReadingCommand(all[k + 1]))) {
+			const found = listOf(argv);
+			if (found !== undefined) out.push(found);
+		}
+		if ((root === "xargs" || root === "parallel") && isReadingCommand(stripPipeWrappers(xargsCommand(argv.slice(1)))[0])) out.push(...feeding(cmd.feeders, 0));
+	}
+	return out;
+}
+
+/**
+ * Literal redirection targets that are outside the project (`> f`, `>> f`, `&> f`, `>| f`, `2> f`), judged from
+ * the cwd and every directory a unit runs in (a `cd` moves them). /dev/null, fd duplications and unresolvable
+ * targets are not outside.
+ */
+function redirectOutsideTargets(command: string, ctx: PathContext): string[] {
+	const tokens = lexLine(command);
+	const targets = tokens === null ? redirectTextTargets(command) : tokens.flatMap((token) => ("redirect" in token ? [token.redirect] : []));
+	if (targets.length === 0) return [];
+	const dirs = [...new Set<string | null | undefined>([ctx.cwd, ...unitsWithDirs(command, ctx).map((unit) => unit.dir ?? null)])];
+	const judged = new Map<string, boolean>();
+	const outside = (target: string): boolean => {
+		const known = judged.get(target);
+		if (known !== undefined) return known;
+		const result = dirs.some((dir) => targetProblem({ word: target, glob: false }, ctx.cwd, dir, ctx.scratchDir) === "outside");
+		judged.set(target, result);
+		return result;
+	};
+	return targets.filter((target) => target !== "/dev/null" && outside(target));
+}
+
+/**
+ * The `>`-class redirect targets of a line the lexer can't read, found in the text: `>`, `>>`, `&>`, `>|`, `N>`,
+ * with the quotes removed from the target. Input (`<`) is not one. A quoted `>` counts too (fails closed).
+ */
+function redirectTextTargets(command: string): string[] {
+	const targets: string[] = [];
+	for (const match of command.matchAll(/(?:^|[\s;&|(])(?:\d*|&)>>?\|?\s*([^\s;&|<>()]+)/g)) {
+		const target = (match[1] ?? "").replace(/['"]/g, "");
+		if (target !== "") targets.push(target);
+	}
+	return targets;
+}
+
+/** A glob that matches the same names ignoring case: each letter becomes both cases (a glob with its own brackets is kept). */
+function caseless(glob: string): string {
+	return glob.includes("[") ? glob : glob.replace(/[A-Za-z]/g, (c) => `[${c.toLowerCase()}${c.toUpperCase()}]`);
 }
 
 // ---------------------------------------------------------------------------
@@ -3230,11 +4118,13 @@ export function secretUploads(command: string, ctx: PathContext): string[] {
 const SECRET_FILE_SAMPLES = [".env", ".env.local", ".env.development", ".env.production", ".env.test"];
 
 /** A glob whose basename can match a .env file. Leading `*`/`?`/`[` never match dotfiles. */
-function globMatchesSecretFile(word: string): boolean {
+function globMatchesSecretFile(word: string, capped = true): boolean {
+	// too many stars to check: it may match anything, a secret included
+	if (capped && starCount(word) > GLOB_STAR_LIMIT) return true;
 	const name = basename(word);
 	if (!name.startsWith(".") || !/[*?[]/.test(name)) return false;
-	const pattern = globToRegExp(name);
-	return pattern !== null && SECRET_FILE_SAMPLES.some((sample) => pattern.test(sample));
+	const pattern = globToRegExp(name, capped);
+	return pattern === null || SECRET_FILE_SAMPLES.some((sample) => pattern.test(sample));
 }
 
 /** Most files a glob operand may match before it is no longer checked one by one. */
@@ -3275,7 +4165,8 @@ function braceAlternatives(word: string, depth = 0): string[] | null {
  * Null when more than GLOB_EXPANSION_LIMIT names would be read, so the caller
  * can fail closed.
  */
-function expandGlob(word: string, cwd: string): string[] | null {
+function expandGlob(word: string, cwd: string, capped = true): string[] | null {
+	if (capped && starCount(word) > GLOB_STAR_LIMIT) return null;
 	const alternatives = braceAlternatives(word);
 	if (alternatives === null) return null;
 	const found: string[] = [];
@@ -3288,7 +4179,7 @@ function expandGlob(word: string, cwd: string): string[] | null {
 			if (!/[*?[]/.test(segment)) {
 				for (const base of paths) next.push(joined(base, segment));
 			} else {
-				const pattern = globToRegExp(segment);
+				const pattern = globToRegExp(segment, capped);
 				if (pattern === null) return null;
 				for (const base of paths) {
 					let names: string[];
@@ -3324,17 +4215,21 @@ function lstatOk(path: string): boolean {
  * by looking at the directory: `conf/*` holding an `id_rsa` is a secret read
  * that no pattern on the word can show. Unreadable by the limit counts as one.
  */
-function globMatchesSecretOnDisk(word: string, ctx: SecretContext | undefined): boolean {
+function globMatchesSecretOnDisk(word: string, ctx: SecretContext | undefined, capped = true): boolean {
 	if (ctx?.cwd === undefined || !/[*?[{]/.test(word) || word.startsWith("-")) return false;
-	const matches = expandGlob(word, ctx.cwd);
+	const matches = expandGlob(word, ctx.cwd, capped);
 	return matches === null || matches.some((match) => isSecretFile(match, ctx));
 }
 
-function globToRegExp(glob: string): RegExp | null {
+function globToRegExp(glob: string, capped = true): RegExp | null {
+	if (capped && starCount(glob) > GLOB_STAR_LIMIT) return null;
 	let source = "";
 	for (let i = 0; i < glob.length; i++) {
 		const ch = glob[i];
-		if (ch === "*") source += ".*";
+		// a run of stars is one `.*`: each extra one only adds backtracking
+		if (ch === "*") {
+			if (glob[i - 1] !== "*") source += ".*";
+		}
 		else if (ch === "?") source += ".";
 		else if (ch === "[" && glob.indexOf("]", i + 2) !== -1) {
 			const end = glob.indexOf("]", i + 2);
@@ -3370,11 +4265,13 @@ export function deriveCommandPrefixes(command: string, ctx: PathContext): string
 	if (trimmed.length > MAX_COMMAND_LENGTH) return undefined;
 	const tokens = tokenize(maskForAnalysis(trimmed, ctx.scratchDir), ctx.scratchDir);
 	if (tokens === null) return undefined;
-	const segments = normalizeGitSegments(tokens, ctx.cwd);
+	const segments = normalizeGitSegments(tokens, ctx.cwd, ctx.gitRepos);
+	// a remembered `cd` never lifts a git run in another repo: only a repo grant does (CD_GIT_REASON)
+	if (gitInOtherRepoAfterCd(tokens, segments, ctx.cwd, ctx.gitRepos)) return undefined;
 	const dirs = segmentDirs(tokens, ctx.cwd);
 	const prefixes: string[][] = [];
 	for (const [k, segment] of segments.entries()) {
-		const blocker = segmentBlocker(segment, ctx.cwd, ctx.scratchDir);
+		const blocker = segmentBlocker(segment, ctx.cwd, ctx.scratchDir, false, undefined, undefined, ctx.gitRepos);
 		if (blocker === undefined) continue;
 		// exec can't be covered; a write is offered only when this call's targets stay in the project
 		if (blocker.effect === "exec" || writeProblem(blocker, ctx.cwd, dirs[k], ctx.scratchDir) !== undefined) return undefined;
@@ -3399,7 +4296,7 @@ const INSIDE_ONLY = " (inside the project only)";
 export function scopeSuffix(command: string, ctx: PathContext): string {
 	const tokens = tokenize(maskForAnalysis(command.trim(), ctx.scratchDir), ctx.scratchDir);
 	if (tokens === null) return "";
-	return normalizeGitSegments(tokens, ctx.cwd).some((segment) => segmentBlocker(segment, ctx.cwd, ctx.scratchDir)?.effect === "write") ? INSIDE_ONLY : "";
+	return normalizeGitSegments(tokens, ctx.cwd, ctx.gitRepos).some((segment) => segmentBlocker(segment, ctx.cwd, ctx.scratchDir, false, undefined, undefined, ctx.gitRepos)?.effect === "write") ? INSIDE_ONLY : "";
 }
 
 /** One choice of the "different command pattern" picker. */
@@ -3433,9 +4330,9 @@ export function patternLadder(command: string, ctx: PathContext): PatternChoice[
 	const tokens = tokenize(maskForAnalysis(trimmed, ctx.scratchDir), ctx.scratchDir);
 	if (tokens === null) return undefined;
 	const dirs = segmentDirs(tokens, ctx.cwd);
-	const needing = normalizeGitSegments(tokens, ctx.cwd).flatMap((segment, k) => (isReadOnlySegment(segment, ctx.cwd, ctx.scratchDir) ? [] : [{ segment, dir: dirs[k] }]));
+	const needing = normalizeGitSegments(tokens, ctx.cwd, ctx.gitRepos).flatMap((segment, k) => (isReadOnlySegment(segment, ctx.cwd, ctx.scratchDir, undefined, ctx.gitRepos) ? [] : [{ segment, dir: dirs[k] }]));
 	if (needing.length !== 1) return undefined;
-	const blocker = segmentBlocker(needing[0].segment, ctx.cwd, ctx.scratchDir);
+	const blocker = segmentBlocker(needing[0].segment, ctx.cwd, ctx.scratchDir, false, undefined, undefined, ctx.gitRepos);
 	const stripped = stripPrefixes(needing[0].segment.argv, needing[0].segment.globs, true);
 	if (stripped === null || blocker?.effect === "exec" || (blocker !== undefined && writeProblem(blocker, ctx.cwd, needing[0].dir, ctx.scratchDir) !== undefined)) return undefined;
 	const suffix = blocker?.effect === "write" ? INSIDE_ONLY : "";
@@ -3471,9 +4368,9 @@ export function exactRuleTokens(command: string, ctx: PathContext): string[] | u
 	const tokens = tokenize(maskForAnalysis(trimmed, ctx.scratchDir), ctx.scratchDir);
 	if (tokens === null) return undefined;
 	const dirs = segmentDirs(tokens, ctx.cwd);
-	const needing = normalizeGitSegments(tokens, ctx.cwd).flatMap((segment, k) => (isReadOnlySegment(segment, ctx.cwd, ctx.scratchDir) ? [] : [{ segment, dir: dirs[k] }]));
+	const needing = normalizeGitSegments(tokens, ctx.cwd, ctx.gitRepos).flatMap((segment, k) => (isReadOnlySegment(segment, ctx.cwd, ctx.scratchDir, undefined, ctx.gitRepos) ? [] : [{ segment, dir: dirs[k] }]));
 	if (needing.length !== 1) return undefined;
-	const blocker = segmentBlocker(needing[0].segment, ctx.cwd, ctx.scratchDir);
+	const blocker = segmentBlocker(needing[0].segment, ctx.cwd, ctx.scratchDir, false, undefined, undefined, ctx.gitRepos);
 	const stripped = stripPrefixes(needing[0].segment.argv, needing[0].segment.globs, true);
 	// removals never get a rule (privilege and the file-format checks are parseRule's call)
 	if (stripped === null || isRemoval(stripped.argv) || blocker?.effect === "exec" || (blocker !== undefined && writeProblem(blocker, ctx.cwd, needing[0].dir, ctx.scratchDir) !== undefined)) return undefined;
@@ -3511,11 +4408,12 @@ export function planCommandPrefixes(commands: readonly string[], ctx: PathContex
  * would be broader than the table intends).
  */
 function prefixFor(command: string[]): string[] | undefined {
+	if (NEVER_RULE_ROOTS.has(command[0] ?? "")) return undefined;
 	const argv = canonicalize(command);
 	const [root, ...args] = argv;
 	if (root === undefined || isRemoval(argv)) return undefined;
 	const name = basename(root);
-	if (INTERPRETERS.has(name) || COMMAND_RUNNERS.has(name) || PRIVILEGE_COMMANDS.has(name)) return undefined;
+	if (INTERPRETERS.has(name) || isRunnerName(name) || PRIVILEGE_COMMANDS.has(name)) return undefined;
 
 	if (name === "rtk") {
 		// not a 1:1 proxy: remember the rtk form (`rtk test cargo test`, `rtk read`)
@@ -3573,11 +4471,12 @@ function isRemoval(command: string[]): boolean {
  * (`npm run` would allow every script).
  */
 export function isRememberablePrefix(typed: readonly string[]): boolean {
+	if (NEVER_RULE_ROOTS.has(typed[0] ?? "")) return false;
 	const tokens = canonicalize(typed);
 	const [root, ...args] = tokens;
 	if (root === undefined || isRemoval([...tokens])) return false;
 	const name = basename(root);
-	if (INTERPRETERS.has(name) || COMMAND_RUNNERS.has(name) || PRIVILEGE_COMMANDS.has(name)) return false;
+	if (INTERPRETERS.has(name) || isRunnerName(name) || PRIVILEGE_COMMANDS.has(name)) return false;
 	if (name === "rtk") {
 		const sub = args[0];
 		if (sub === undefined || sub.startsWith("-") || sub === "run") return false;
@@ -3597,6 +4496,7 @@ export function isRememberablePrefix(typed: readonly string[]): boolean {
  * runners (`npm run build`) are fine: only that command runs unasked.
  */
 export function isRememberableExact(typed: readonly string[]): boolean {
+	if (NEVER_RULE_ROOTS.has(typed[0] ?? "")) return false;
 	const tokens = canonicalize(typed);
 	const [root, ...args] = tokens;
 	if (root === undefined || isRemoval([...tokens])) return false;
@@ -3616,16 +4516,16 @@ export function isRememberableExact(typed: readonly string[]): boolean {
  * `npm test && rm x` is not covered by `npm test`, and removals are never
  * covered, even by a prefix the user typed (`git` does not cover `git rm`).
  */
-export function isCoveredByPrefixes(command: string, prefixes: readonly (readonly string[])[], cwd: string, exact: readonly (readonly string[])[] = [], scratch?: string, fetchHosts?: readonly string[]): boolean {
+export function isCoveredByPrefixes(command: string, prefixes: readonly (readonly string[])[], cwd: string, exact: readonly (readonly string[])[] = [], scratch?: string, fetchHosts?: readonly string[], gitRepos?: readonly string[]): boolean {
 	if (prefixes.length === 0 && exact.length === 0) return false;
 	const trimmed = command.trim();
 	if (trimmed === "" || trimmed.length > MAX_COMMAND_LENGTH) return false;
 	const tokens = tokenize(maskForAnalysis(trimmed, scratch), scratch);
 	if (tokens === null || tokens.length === 0) return false;
-	const segments = normalizeGitSegments(tokens, cwd);
+	const segments = normalizeGitSegments(tokens, cwd, gitRepos);
 	const dirs = segmentDirs(tokens, cwd);
-	if (!segments.every((segment, k) => isReadOnlySegment(segment, cwd, scratch, fetchHosts) || isCoveredSegment(segment, prefixes, cwd, exact, scratch, dirs[k]))) return false;
-	return !gitRunsInOtherRepo(segments, cwd);
+	if (!segments.every((segment, k) => isReadOnlySegment(segment, cwd, scratch, fetchHosts, gitRepos) || isCoveredSegment(segment, prefixes, cwd, exact, scratch, dirs[k], gitRepos))) return false;
+	return !gitRunsInOtherRepo(segments, cwd, true, gitRepos);
 }
 
 /**
@@ -3634,7 +4534,7 @@ export function isCoveredByPrefixes(command: string, prefixes: readonly (readonl
  * repo: that repo's hooks and config (fsmonitor) would run. A `cd` into a
  * plain subdirectory of the same repo is fine.
  */
-function gitRunsInOtherRepo(segments: Segment[], cwd: string, checkRepoFlags = true): boolean {
+function gitRunsInOtherRepo(segments: Segment[], cwd: string, checkRepoFlags = true, gitRepos?: readonly string[]): boolean {
 	let dir: string | undefined = cwd;
 	for (const segment of segments) {
 		const stripped = stripPrefixes(segment.argv, segment.globs, true);
@@ -3647,10 +4547,81 @@ function gitRunsInOtherRepo(segments: Segment[], cwd: string, checkRepoFlags = t
 			// -C / --git-dir / --work-tree left after normalization point at another repo
 			const flags = args.slice(0, Math.max(0, args.findIndex((x) => !x.startsWith("-"))));
 			if (checkRepoFlags && flags.some((f) => f === "-C" || /^--(git-dir|work-tree)(=|$)/.test(f))) return true;
-			if (dir === undefined || (dir !== cwd && crossesRepoBoundary(dir, cwd))) return true;
+			if (dir === undefined || (dir !== cwd && foreignGitDir(dir, cwd, gitRepos))) return true;
 		}
 	}
 	return false;
+}
+
+/**
+ * True when git run in `dir` would use another repository than the one at
+ * `cwd` (crossesRepoBoundary) and that repository is not granted for the
+ * session (gitRepos, realpaths of repo roots from gitRepoRootOf).
+ */
+function foreignGitDir(dir: string, cwd: string, gitRepos?: readonly string[]): boolean {
+	return crossesRepoBoundary(dir, cwd) && !inGrantedRepo(dir, gitRepos);
+}
+
+/** True when `dir` belongs to a git repo the user granted for the session (its repo root is in gitRepos). */
+function inGrantedRepo(dir: string, gitRepos?: readonly string[]): boolean {
+	if (gitRepos === undefined || gitRepos.length === 0) return false;
+	const root = gitRepoRootOf(dir);
+	return root !== undefined && gitRepos.includes(root);
+}
+
+/**
+ * The git repository a run in `dir` belongs to: the realpath of `dir`, or of
+ * its nearest ancestor holding `.git`. Undefined when `dir` can't be resolved,
+ * no ancestor holds `.git`, or that root is too broad to grant: "/", the home
+ * dir or one of its ancestors (the same bar as readGrantDir).
+ */
+export function gitRepoRootOf(dir: string): string | undefined {
+	let current: string;
+	try {
+		current = realpathSync(dir);
+	} catch {
+		return undefined;
+	}
+	while (!existsSync(join(current, ".git"))) {
+		const parent = dirname(current);
+		if (parent === current) return undefined;
+		current = parent;
+	}
+	const home = realpathLoose(homedir());
+	if (current === dirname(current) || isInside(home, current)) return undefined;
+	return current;
+}
+
+/**
+ * The repo roots a "Yes, and allow git in <repo>/ this session" grant needs
+ * for `command` to stop asking about its cd into another repository (the
+ * CD_GIT_REASON case), one per directory git would run in. undefined when
+ * there is no such run, or one can't be granted: its directory is unknown or
+ * gitRepoRootOf finds no root to grant. Then no grant is offered.
+ */
+export function gitGrantRoots(command: string, cwd: string, scratch?: string, gitRepos?: readonly string[]): string[] | undefined {
+	const trimmed = command.trim();
+	if (trimmed === "" || trimmed.length > MAX_COMMAND_LENGTH) return undefined;
+	const segments = tokenize(maskForAnalysis(trimmed, scratch), scratch);
+	if (segments === null) return undefined;
+	const normalized = normalizeGitSegments(segments, cwd, gitRepos);
+	if (!gitInOtherRepoAfterCd(segments, normalized, cwd, gitRepos)) return undefined;
+	const roots: string[] = [];
+	let dir: string | undefined = cwd;
+	for (const segment of normalized) {
+		const [root, ...args] = canonicalize(stripPrefixes(segment.argv, segment.globs, true)?.argv ?? []);
+		if (root === undefined) continue;
+		const name = basename(root);
+		if (DIR_CHANGERS.has(name)) {
+			dir = changedDir(name, args, dir);
+		} else if (name === "git" && (dir === undefined || (dir !== cwd && foreignGitDir(dir, cwd, gitRepos)))) {
+			if (dir === undefined) return undefined;
+			const repo = gitRepoRootOf(dir);
+			if (repo === undefined) return undefined;
+			if (!roots.includes(repo)) roots.push(repo);
+		}
+	}
+	return roots.length > 0 ? roots : undefined;
 }
 
 /**
@@ -3692,7 +4663,7 @@ const GIT_HARMLESS_FLAGS = new Set(["--no-pager", "--no-optional-locks"]);
  * directory is inside the cwd and not in a nested repo. Never for `-c`,
  * `--git-dir`, `--work-tree`, `--exec-path`, `--namespace`, `--config-env`.
  */
-function gitSubcommandStart(argv: readonly string[], globs: readonly boolean[], dir: string | undefined, cwd: string | undefined): number | undefined {
+function gitSubcommandStart(argv: readonly string[], globs: readonly boolean[], dir: string | undefined, cwd: string | undefined, gitRepos?: readonly string[]): number | undefined {
 	if (basename(argv[0] ?? "") !== "git") return undefined;
 	let i = 1;
 	let target = dir;
@@ -3707,7 +4678,7 @@ function gitSubcommandStart(argv: readonly string[], globs: readonly boolean[], 
 		} else return undefined;
 	}
 	if (i === 1 || i >= argv.length) return undefined; // nothing to normalize, or no subcommand left
-	if (target !== dir && (cwd === undefined || crossesRepoBoundary(target ?? "", cwd))) return undefined;
+	if (target !== dir && (cwd === undefined || foreignGitDir(target ?? "", cwd, gitRepos))) return undefined;
 	return i;
 }
 
@@ -3716,7 +4687,7 @@ function gitSubcommandStart(argv: readonly string[], globs: readonly boolean[], 
  * where gitSubcommandStart allows it, tracking `cd` like gitRunsInOtherRepo,
  * so prefixes and coverage treat them as the plain command.
  */
-function normalizeGitSegments(segments: Segment[], cwd: string | undefined): Segment[] {
+function normalizeGitSegments(segments: Segment[], cwd: string | undefined, gitRepos?: readonly string[]): Segment[] {
 	let dir: string | undefined = cwd;
 	return segments.map((segment) => {
 		const stripped = stripPrefixes(segment.argv, segment.globs, true);
@@ -3725,7 +4696,7 @@ function normalizeGitSegments(segments: Segment[], cwd: string | undefined): Seg
 		const globs = stripped.globs.slice(stripped.argv.length - argv.length);
 		const name = basename(argv[0] ?? "");
 		if (DIR_CHANGERS.has(name)) dir = changedDir(name, argv.slice(1), dir);
-		const start = gitSubcommandStart(argv, globs, dir, cwd);
+		const start = gitSubcommandStart(argv, globs, dir, cwd, gitRepos);
 		return start === undefined ? segment : { argv: [argv[0], ...argv.slice(start)], globs: [globs[0], ...globs.slice(start)] };
 	});
 }
@@ -3738,10 +4709,12 @@ function normalizeGitSegments(segments: Segment[], cwd: string | undefined): Seg
  * target stays in the project (targetProblem), by exact rules too. `dir`:
  * where the segment runs (default the cwd; null = unknown).
  */
-function isCoveredSegment(segment: Segment, prefixes: readonly (readonly string[])[], cwd: string | undefined, exact: readonly (readonly string[])[] = [], scratch?: string, dir?: string | null): boolean {
+function isCoveredSegment(segment: Segment, prefixes: readonly (readonly string[])[], cwd: string | undefined, exact: readonly (readonly string[])[] = [], scratch?: string, dir?: string | null, gitRepos?: readonly string[]): boolean {
 	const stripped = stripPrefixes(segment.argv, segment.globs, true);
 	if (stripped === null || isRemoval(stripped.argv)) return false;
-	const blocker = segmentBlocker(segment, cwd, scratch);
+	// a keyword that starts the unit (`do`, `for`, `then`) is never the command a rule names
+	if (SHELL_RESERVED_WORDS.has(stripped.argv[0] ?? "")) return false;
+	const blocker = segmentBlocker(segment, cwd, scratch, false, undefined, undefined, gitRepos);
 	if (blocker?.effect === "exec" || (blocker !== undefined && writeProblem(blocker, cwd, dir, scratch) !== undefined)) return false;
 	// compare canonical forms: `git add` covers `rtk git add` and vice versa
 	const argv = canonicalize(stripped.argv);
@@ -3751,7 +4724,8 @@ function isCoveredSegment(segment: Segment, prefixes: readonly (readonly string[
 	})) return true;
 	return prefixes.some((raw) => {
 		const p = canonicalize(raw);
-		return p.length <= argv.length && p.every((t, k) => argv[k] === t);
+		// a prefix headed by a runner (`exec`, `ionice`) would cover whatever it launches: it never covers
+return !isRunnerName(basename(p[0] ?? "")) && p.length <= argv.length && p.every((t, k) => argv[k] === t);
 	});
 }
 
@@ -3763,7 +4737,9 @@ function isCoveredSegment(segment: Segment, prefixes: readonly (readonly string[
  * Expands a leading `~`, `$HOME` or `${HOME}` (each followed by `/` or the end)
  * to the home dir, so `$HOME/.aws/credentials` is judged like `~/.aws/credentials`.
  * With `pwd`, a leading `$PWD` or `${PWD}` expands to it the same way (the
- * command's cwd); `${PWD:-x}` and `~user` are left as they are.
+ * command's cwd); `${PWD:-x}` is left as it is. `~<this user>` is the home
+ * dir and `~+` the cwd; any other `~name` and `~-` become an absolute path
+ * that is never inside a project, so they are judged as outside.
  */
 export function expandHome(path: string, home = homedir(), pwd?: string): string {
 	const prefix = /^(?:~|\$\{HOME\}|\$HOME)(?=\/|$)/.exec(path);
@@ -3772,7 +4748,32 @@ export function expandHome(path: string, home = homedir(), pwd?: string): string
 		const dir = /^(?:\$\{PWD\}|\$PWD)(?=\/|$)/.exec(path);
 		if (dir !== null) return pwd + path.slice(dir[0].length);
 	}
+	// `~<current user>` is the home dir and `~+` the cwd; any other `~name` or `~-` is another account's
+	// directory, so it becomes an absolute path (never inside a project) and is judged as outside
+	const tilde = /^~([^/]*)(?=\/|$)/.exec(path);
+	if (tilde !== null) {
+		const name = tilde[1] ?? "";
+		if (name === currentUser()) return home + path.slice(tilde[0].length);
+		if (name === "+" && pwd !== undefined) return pwd + path.slice(tilde[0].length);
+		return `/${path}`;
+	}
 	return path;
+}
+
+/** The current account's name, or undefined when the system has no account entry for it. */
+function currentUser(): string | undefined {
+	try {
+		return userInfo().username;
+	} catch {
+		return undefined;
+	}
+}
+
+/** True for `~name` or `~-` naming an account other than the current one (the shell looks it up, so it is never the project). */
+function otherUserTilde(word: string): boolean {
+	const tilde = /^~([^/]*)(?=\/|$)/.exec(word);
+	const name = tilde?.[1] ?? "";
+	return tilde !== null && name !== "" && name !== "+" && name !== currentUser();
 }
 
 function resolvePath(path: string, cwd: string): string {
@@ -3968,6 +4969,8 @@ export function isSecretFile(path: string, ctx?: SecretContext): boolean {
 
 /** The name and location checks of isSecretFile, on the path as given. */
 function isSecretPath(path: string, ctx?: SecretContext): boolean {
+	// a process's environment (`/proc/self/environ`, `/proc/$$/environ`, `/proc/*/environ`) holds credentials
+	if (/^\/proc\/[^/]+\/environ$/.test(path)) return true;
 	const name = basename(path);
 	if (/^\.env(\..+)?$/.test(name)) return !/\.(example|sample|template|dist)$/.test(name);
 	if (name.endsWith(".pub")) return false;

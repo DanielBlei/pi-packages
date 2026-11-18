@@ -86,6 +86,15 @@ describe("childCwdProblem", () => {
 		assert.match(childCwdProblem(sibling, repo, home) ?? "", /outside the parent session's project/);
 		assert.match(childCwdProblem(foreign, repo, home) ?? "", /outside the parent session's project/);
 	});
+
+	it("a home directory that is itself a git repository (dotfiles) is no project: only the parent's cwd is accepted", () => {
+		const dotfiles = mkdtempSync(join(process.env.TMPDIR ?? "/tmp", "child-cwd-home-"));
+		const home = join(dotfiles, "home");
+		const proj = join(home, "proj");
+		for (const dir of [join(home, ".git"), join(home, "Documents"), join(proj, "sub")]) mkdirSync(dir, { recursive: true });
+		assert.match(childCwdProblem(join(home, "Documents"), proj, home) ?? "", /outside the parent session's project/);
+		assert.equal(childCwdProblem(join(proj, "sub"), proj, home), undefined);
+	});
 });
 
 /** A child harness running in `cwd` (same agent dir and temp as the sandbox). */

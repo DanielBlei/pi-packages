@@ -17,7 +17,7 @@ interface Component {
 const strip = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, "").replace(/⟦[a-z]+⟧/g, "");
 
 /** A panel over a fake settings store, opened through a fake TUI host. */
-async function open(options: { mode?: string; values?: Record<string, string>; apply?: (id: string, value: string) => PanelResult } = {}) {
+async function open(options: { sections?: PanelSection[]; mode?: string; values?: Record<string, string>; apply?: (id: string, value: string) => PanelResult } = {}) {
 	const values: Record<string, string> = options.values ?? { alpha: "on", beta: "idle", gamma: "2 min" };
 	const applied: Array<[string, string]> = [];
 	let component: Component | undefined;
@@ -36,7 +36,7 @@ async function open(options: { mode?: string; values?: Record<string, string>; a
 		},
 	} as unknown as ExtensionContext;
 
-	const sections: PanelSection[] = [
+	const sections: PanelSection[] = options.sections ?? [
 		{
 			id: "one",
 			label: "One",
@@ -170,4 +170,47 @@ test("a host without a TUI gets nothing: the command keeps its own plain dialogs
 		apply: () => ({ message: "ok" }),
 	});
 	assert.equal(opened, 0);
+});
+
+const item = (id: string): PanelItem => ({ id, label: `Row ${id}`, values: ["on", "off"] });
+const grouped: PanelSection[] = [
+	{
+		id: "g",
+		label: "G",
+		items: [item("a"), item("b"), item("c")],
+		groups: [
+			{ label: "First group", items: [item("a"), item("b")] },
+			{ label: "Second group", items: [item("c")] },
+		],
+	},
+];
+
+test("a grouped section shows headings with a blank line between the groups", async () => {
+	const { component, done } = await open({ sections: grouped, values: { a: "on", b: "on", c: "on" } });
+	const rows = component.render(150).map(strip);
+	const first = rows.findIndex((line) => line.includes("First group"));
+	const second = rows.findIndex((line) => line.includes("Second group"));
+	assert.ok(first >= 0 && second > first);
+	assert.equal(rows[second - 1]?.trim(), "", "a blank line before the second heading");
+	assert.match(rows[first + 1] ?? "", /^> Row a +on/, `the cursor starts on the first row, not on a heading: ${JSON.stringify(rows[first + 1])}`);
+	assert.ok(rows.every((line) => line.length <= 150));
+	component.handleInput(KEYS.escape);
+	await done;
+});
+
+test("the cursor steps over headings and the blank row, and wraps", async () => {
+	const { component, applied, done } = await open({ sections: grouped, values: { a: "on", b: "on", c: "on" } });
+	const selected = (): string => (component.render(150).map(strip).find((line) => line.startsWith("> ")) ?? "").trim();
+	component.handleInput(KEYS.down);
+	assert.match(selected(), /^> Row b/);
+	component.handleInput(KEYS.down);
+	assert.match(selected(), /^> Row c/, "skips the blank row and the second heading");
+	component.handleInput(KEYS.down);
+	assert.match(selected(), /^> Row a/, "wraps to the first row");
+	component.handleInput(KEYS.up);
+	assert.match(selected(), /^> Row c/, "wraps back, over the headings");
+	component.handleInput(KEYS.enter);
+	assert.deepEqual(applied, [["c", "off"]]);
+	component.handleInput(KEYS.escape);
+	await done;
 });

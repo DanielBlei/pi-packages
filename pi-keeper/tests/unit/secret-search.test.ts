@@ -130,3 +130,151 @@ test("a tracked-file answer expires after 30 seconds (untracked later, the searc
 		rmSync(base, { recursive: true, force: true });
 	}
 });
+
+test("a file list piped into a reader is a search over the listed tree: an untracked secret asks", { skip: hasGit ? false : "git is not installed" }, () => {
+	const base = realpathSync(mkdtempSync(join(tmpdir(), "pdf-pipes-")));
+	try {
+		const project = join(base, "project");
+		mkdirSync(join(project, "src"), { recursive: true });
+		writeFileSync(join(project, "src", "a.ts"), "export {};");
+		writeFileSync(join(project, "README.md"), "hi");
+		git(project, ["init", "--quiet"]);
+		git(project, ["add", "."]);
+		git(project, ["commit", "--quiet", "-m", "init"]);
+		// the user's own key, untracked, beside the tracked files
+		writeFileSync(join(project, "id_rsa"), "PRIVATE");
+		const ctx: PathContext = { cwd: project };
+		const paths = (command: string): string[] => secretSearchHits(command, ctx).map((hit) => hit.path);
+
+		// red: the reader gets every name the list prints, the key among them
+		assert.deepEqual(paths("ls | xargs cat"), ["id_rsa"]);
+		assert.deepEqual(paths("find . -type f | xargs cat"), ["id_rsa"]);
+		assert.deepEqual(paths("git ls-files -o | xargs cat"), ["id_rsa"]);
+		assert.deepEqual(paths("find . -name 'id_*' | xargs head"), ["id_rsa"], "a name glob that matches the secret");
+
+		// guards: the same directory, a list that names no secret, or a command that is not a reader
+		assert.deepEqual(paths("find . -name '*.ts' | xargs grep foo"), []);
+		assert.deepEqual(paths("git ls-files | xargs cat"), [], "tracked files are content by design");
+		assert.deepEqual(paths("ls | xargs wc -l"), []);
+	} finally {
+		rmSync(base, { recursive: true, force: true });
+	}
+});
+
+test("find -name G before a reader asks only when a secret the glob names is in the tree", { skip: hasGit ? false : "git is not installed" }, () => {
+	const base = realpathSync(mkdtempSync(join(tmpdir(), "pdf-findname-")));
+	try {
+		const project = join(base, "project");
+		mkdirSync(join(project, "src"), { recursive: true });
+		writeFileSync(join(project, "src", "a.ts"), "export {};");
+		git(project, ["init", "--quiet"]);
+		git(project, ["add", "."]);
+		git(project, ["commit", "--quiet", "-m", "init"]);
+		writeFileSync(join(project, "id_rsa"), "PRIVATE");
+		writeFileSync(join(project, "srcX.pem"), "PRIVATE");
+		const ctx: PathContext = { cwd: project };
+		const paths = (command: string): string[] => secretSearchHits(command, ctx).map((hit) => hit.path);
+
+		// every name: the key and the pem both
+		const all = paths("find . -name '*' | xargs cat");
+		assert.ok(all.includes("id_rsa") && all.includes("srcX.pem"), `got ${all}`);
+		// a glob that names only the pem
+		assert.deepEqual(paths("find . -name 'src*' | xargs cat"), ["srcX.pem"]);
+		// a glob that names no secret in the tree stays allowed
+		assert.deepEqual(paths("find . -name '*.ts' | xargs grep foo"), []);
+	} finally {
+		rmSync(base, { recursive: true, force: true });
+	}
+});
+
+/** A git project with an untracked key beside tracked files. */
+function keyProject(base: string): string {
+	const project = join(base, "project");
+	mkdirSync(join(project, "src"), { recursive: true });
+	writeFileSync(join(project, "src", "a.ts"), "export {};");
+	writeFileSync(join(project, "README.md"), "hi");
+	git(project, ["init", "--quiet"]);
+	git(project, ["add", "."]);
+	git(project, ["commit", "--quiet", "-m", "init"]);
+	writeFileSync(join(project, "id_rsa"), "PRIVATE");
+	return project;
+}
+
+test("a file list reaches its reader through redirections, quotes, filters, groups and wrappers; a non-reading consumer does not", { skip: hasGit ? false : "git is not installed" }, () => {
+	const base = realpathSync(mkdtempSync(join(tmpdir(), "pdf-producers-")));
+	try {
+		const ctx: PathContext = { cwd: keyProject(base) };
+		const asks = [
+			"ls -a 2>&1 | xargs cat",
+			"find . -type f 2>&1 | xargs cat",
+			"ls -a &>/dev/null | xargs cat",
+			"ls -a | sort | xargs cat",
+			"ls -a | grep -v x | xargs cat",
+			"find . -type f | grep -v git | xargs cat",
+			"ls -a | tail -n +3 | xargs cat",
+			"ls -a | head -5 | xargs cat",
+			"ls -a | sed 's/x/y/' | xargs cat",
+			"(ls -a; echo x) | xargs cat",
+			"{ ls -a; } | xargs cat",
+			"ls -a | nice xargs cat",
+			"command ls -a | xargs cat",
+			"ls -a | xargs sort",
+			"ls -a | xargs jq .",
+			"ls -a | xargs cmp x",
+			"ls -a | xargs cut -c1-5",
+			"git ls-files -io | xargs cat",
+			"find . -type f -exec cat {} +",
+			"find . -type f -exec cat {} \;",
+			"find . ! -name '*.py' | xargs cat",
+			"find . -name '*.py' -o -name '*nv' | xargs cat",
+			"find . -name '*.py' -prune -o -print | xargs cat",
+		];
+		for (const command of asks) assert.notDeepEqual(secretSearchHits(command, ctx), [], `asks: ${command}`);
+		// guards: a grep whose quoted pattern holds `ls|find` has no file list; non-reading consumers; no xargs
+		for (const command of ["grep -E \"ls|find\" x | xargs cat", "ls | xargs wc -l", "ls | xargs echo", "ls -a | sort", "find . -name '*.ts' | xargs grep foo", "git ls-files | xargs cat"]) {
+			assert.deepEqual(secretSearchHits(command, ctx), [], `guard: ${command}`);
+		}
+	} finally {
+		rmSync(base, { recursive: true, force: true });
+	}
+});
+
+test("a file list of a directory outside the project is an unchecked hit at once, not a walk", () => {
+	const base = realpathSync(mkdtempSync(join(tmpdir(), "pdf-outside-")));
+	try {
+		const project = join(base, "project");
+		const outside = join(base, "outside");
+		mkdirSync(project);
+		mkdirSync(join(outside, "sub"), { recursive: true });
+		for (let i = 0; i < 300; i++) writeFileSync(join(outside, "sub", `f${i}.txt`), "x");
+		writeFileSync(join(outside, "sub", ".env"), "KEY=1");
+		const ctx: PathContext = { cwd: project };
+		const started = performance.now();
+		const hits = secretSearchHits(`find ${outside} -maxdepth 1 | xargs cat`, ctx);
+		const ms = performance.now() - started;
+		assert.ok(hits.some((hit) => hit.why === "unchecked"), `hits: ${JSON.stringify(hits)}`);
+		assert.ok(ms < 100, `took ${ms.toFixed(1)} ms`);
+	} finally {
+		rmSync(base, { recursive: true, force: true });
+	}
+});
+
+test("a file list reaches its reader through a long filter chain, a launcher with a value, parallel, and a long option", { skip: hasGit ? false : "git is not installed" }, () => {
+	const base = realpathSync(mkdtempSync(join(tmpdir(), "pdf-round4-")));
+	try {
+		const project = keyProject(base);
+		writeFileSync(join(project, ".env"), "K=1");
+		const ctx: PathContext = { cwd: project };
+		const asks = [
+			`ls -a | ${"cat | ".repeat(17)}xargs cat`,
+			"ls -a | xargs --max-lines cat",
+			"ls -a | timeout 5 xargs cat",
+			"ls -a | setsid xargs cat",
+			"ls -a | ionice xargs cat",
+			"ls | parallel cat",
+		];
+		for (const command of asks) assert.notDeepEqual(secretSearchHits(command, ctx), [], command);
+	} finally {
+		rmSync(base, { recursive: true, force: true });
+	}
+});

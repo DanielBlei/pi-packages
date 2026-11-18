@@ -72,6 +72,15 @@ describe("the parent answers", () => {
 		assert.deepEqual(await answered({ decision: "deny" }), { decision: "deny", reason: "rules" });
 	});
 
+	it("a request the parent would drop unread is denied at once with a size reason, not left to time out", async () => {
+		const started = Date.now();
+		const result = await askParent({ toolName: "bash", input: { command: "漢".repeat(30_000) } }, options({ timeoutMs: 3_000 }));
+		assert.equal(result.decision, "deny");
+		assert.match(String(result.reason), /size/);
+		assert.ok(Date.now() - started < 1_000, "no wait for a reply that cannot come");
+		assert.deepEqual(leftovers(), []);
+	});
+
 	it("cancelled", async () => {
 		assert.deepEqual(await answered({ decision: "cancelled" }), { decision: "cancelled" });
 	});
@@ -195,7 +204,7 @@ describe("it never throws: a problem is a deny", () => {
 
 	it("a call too big for the parent to read is denied without waiting", async () => {
 		const big = { toolName: "write", input: { content: "x".repeat(70_000) } };
-		assert.deepEqual(await askParent(big, options()), { decision: "deny", reason: "error" });
+		assert.deepEqual(await askParent(big, options()), { decision: "deny", reason: "request-size" });
 		assert.deepEqual(leftovers(), []);
 	});
 

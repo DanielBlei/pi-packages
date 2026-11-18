@@ -50,9 +50,9 @@ it names files and symbols, not line numbers, so it stays true longer.
 | Background asks | `extensions/secure-file.ts` | Shared hardened I/O: `writeFileAtomic` (0600, O_EXCL|O_NOFOLLOW, rename), `ensureSecureDir` (0700, ours, symlink walk), `readJsonFile` (lstat, O_NOFOLLOW, owner, size cap), `isPidAlive` |
 | Integration | `extensions/rtk-rewrite.ts` | Optional `rtk rewrite` of approved bash |
 | Observability | `extensions/telemetry.ts` | `pi-keeper-permission` session entries (never sent to the model) |
-| Prompts | `prompts/contract.md`, `plan-mode.md`, `auto-mode.md`, `default-mode.md`, `child-plan.md`, `child-default.md`, `child-auto.md` | `contract.md` is the constant system-prompt section; the mode prompts are the first part of the mode message; none load as commands (`pi.prompts: []`) |
+| Prompts | `prompts/contract.md`, `plan-mode.md`, `auto-mode.md`, `default-mode.md`, `child-plan.md`, `child-default.md`, `child-auto.md` | `contract.md` is the constant system-prompt section; the mode prompts are the first part of the mode message; none load as commands; the one template is `prompt-templates/new-rule.md` (`/new-rule`) |
 | Prompt blocks | `extensions/prompt-blocks.ts` | Composes the constant section (with its `{{placement}}` paragraph), the mode message and a child's rules message, and decides what still needs sending (`nextDelivery`: the whole block on any change, a grant included); pure, unit-tested |
-| Rulebook | `extensions/rulebook.ts` | Behavior rules that fire on the model's finished answer: rule files (`description` + `condition` + body), discovery (user `<agent dir>/pi-keeper/rules`, project `.pi/rules` behind the trust gate), matching the last `RULE_SCAN_CAP` chars once per session, the correction text from `prompts/rule-warning.md`, and the fired records read back from the branch; free of pi types, unit-tested |
+| Rulebook | `extensions/rulebook.ts` | Behavior rules that fire on the model's finished answer: rule files (`description` + `condition` + body), discovery (user `<agent dir>/pi-keeper/rules`, project `.pi/rules` behind the trust gate), matching the last `RULE_SCAN_CAP` chars once per session, the correction text from `prompts/rule-warning.md`, the fired records read back from the branch, the example rule `ensureUserRuleDir` seeds once (`.example-seeded` marker), and the skip reasons; free of pi types, unit-tested |
 | Child thinking | `extensions/thinking.ts` | `THINKING_LEVELS` (pi's order), `childThinkingLevel`: the `/keeper` setting `subagent-thinking` (`follow` = the higher of the child's own level and the parent's, `role` = the child's own), `maxThinking`; pure, unit-tested |
 | Scripts | `scripts/extract_flow.py`, `exclude_exit_plan_mode.py`, `scripts/charts/` (`lib.ts` reads the charts, `check.ts` renders them) | Rebuild a session's permission flow (`--stats`: aggregate per model); render the docs' Mermaid charts; pi-cc-extensions renderer opt-out |
 | Tests | `tests/unit`, `tests/integration`, `tests/mocks/pi.ts` | See [Testing](#testing) |
@@ -105,7 +105,9 @@ The child also stops waiting when `parentListening` turns false (deny
 its abort signal fires (`cancelled`); in the last two it files `cancels/<id>.json`
 so the parent closes the dialog. The parent's `stop()` (session end, `/new`,
 `/resume`, `background-asks` toggled off) denies everything pending with
-`parent-session-ended` and removes the heartbeat.
+`parent-session-ended` (`asks-turned-off` when asks are switched off) and
+removes the heartbeat. A request too large to write is denied at once with
+`request-size`.
 
 ## Events, tools and commands
 

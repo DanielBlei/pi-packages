@@ -21,7 +21,7 @@
  */
 
 import { heartbeatFresh } from "./ask-heartbeat.ts";
-import { askDirFor, cleanup, MAX_BYTES, newAskId, newNonce, readReply, writeCancel, writeRequest, type AskRequest, type ChildMode, type ReplyDecision, type ReplyReason } from "./ask-mailbox.ts";
+import { askDirFor, cleanup, newAskId, newNonce, readReply, RequestTooLargeError, writeCancel, writeRequest, type AskRequest, type ChildMode, type ReplyDecision, type ReplyReason } from "./ask-mailbox.ts";
 import { backgroundAsksEnabled, type KeeperConfig } from "./config.ts";
 import { PARENT_SESSION_ENV, readParentGrants, readParentPid } from "./session-grants.ts";
 
@@ -29,7 +29,8 @@ import { PARENT_SESSION_ENV, readParentGrants, readParentPid } from "./session-g
 export const REPLY_POLL_MS = 250;
 
 /** Why an ask was denied: what the parent said, or what the child saw. */
-export type RelayReason = ReplyReason | "parent-gone" | "error";
+/** "request-size": the request is too big for the parent to read, so it is denied at once. */
+export type RelayReason = ReplyReason | "parent-gone" | "error" | "request-size";
 
 export interface RelayResult {
 	decision: ReplyDecision;
@@ -93,9 +94,13 @@ export async function askParent(call: AskRequest["call"], options: AskParentOpti
 		if (aborted()) return { decision: "cancelled" };
 		const nonce = newNonce();
 		const request: AskRequest = { v: 1, id, nonce, childPid: process.pid, childLabel: sanitizeLabel(options.label, `subagent ${process.pid}`), childMode: options.childMode, cwd: options.cwd, call };
-		// the parent drops a file this big unread: no point waiting for an answer that cannot come
-		if (JSON.stringify(request).length > MAX_BYTES) return { decision: "deny", reason: "error" };
-		writeRequest(dir, request);
+		try {
+			writeRequest(dir, request);
+		} catch (error) {
+			// the parent would drop this file unread: no point waiting for an answer that cannot come
+			if (error instanceof RequestTooLargeError) return { decision: "deny", reason: "request-size" };
+			throw error;
+		}
 		const deadline = Date.now() + options.timeoutMs;
 		const pollMs = options.pollMs ?? REPLY_POLL_MS;
 		for (;;) {

@@ -15,6 +15,7 @@ import {
 	newNonce,
 	pendingIds,
 	readCancels,
+	RequestTooLargeError,
 	readReply,
 	sweep,
 	takeRequests,
@@ -102,6 +103,14 @@ describe("ask mailbox", () => {
 		assert.equal(takeRequests(dir, taken, 9).requests.length, 0);
 		assert.equal(taken.get(req.id)?.receivedAt, 5);
 		assert.deepEqual(readdirSync(join(dir, "requests")), [`${req.id}.json.taken`]);
+	});
+
+	it("refuses to file a request over MAX_BYTES in UTF-8 bytes: 30,000 CJK characters are 90,000 bytes", () => {
+		// JSON.stringify(...).length counts 30,000 units here, under the limit; the parent's reader counts bytes
+		ensureAskDir(dir);
+		const big = request({ call: { toolName: "bash", input: { command: "漢".repeat(30_000) } } });
+		assert.throws(() => writeRequest(dir, big), (error: unknown) => error instanceof RequestTooLargeError && error.code === "request-too-large" && /too large/.test(error.message));
+		assert.deepEqual(readdirSync(join(dir, "requests")), []);
 	});
 
 	it("rejects an oversize file", () => {

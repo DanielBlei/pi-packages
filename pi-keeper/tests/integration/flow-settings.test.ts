@@ -148,27 +148,30 @@ describe("the no-UI listing and the panel", () => {
 		assert.doesNotMatch(text, /background-ask-popup <on\|off>|background-ask-timeout <on\|off>/);
 	});
 
-	it("the panel opens on the Saving approvals tab, with tabs, aligned rows and the values", async () => {
+	it("the panel opens on the Settings tab, with headings, aligned rows and the values", async () => {
 		const h = await parentOf(sandboxed());
 		h.answer(/pi-keeper settings/, "esc");
 		await h.command("keeper");
 		const shown = h.dialogs[0];
 		assert.equal(shown.kind, "custom");
 		// one tab line, in order, the active one first
-		assert.match(shown.title, /Saving approvals to this project \/ Subagents \/ Dialog/);
+		assert.match(shown.title, /Settings \/ Subagents/);
 		// rows are labels without the value; the value is the right-hand column
-		assert.deepEqual(shown.options, ['Offer "always allow in this project" for commands', 'Offer "always allow in this project" for outside read directories', 'Offer "always allow in this project" for exact commands']);
-		assert.match(shown.title, /for commands +on/);
+		assert.deepEqual(shown.options.slice(0, 4), ["Allow commands in project", "Allow read dirs in project", "Allow exact commands in project", "Command colors"]);
+		assert.match(shown.title, /Allow commands in project +on/);
+		assert.match(shown.title, /Project approvals/);
+		assert.match(shown.title, /Dialog & mode line/, "the second heading is on the same tab");
+		assert.doesNotMatch(shown.title, /Mode line after a switch: /, "the value is in the right column, not in the label");
 		h.assertNoPendingAnswers();
 	});
 
 	it("Tab and Shift+Tab switch sections, wrapping around", async () => {
 		const h = await parentOf(sandboxed());
-		// Tab twice: Subagents, then Dialog; Shift+Tab goes back to Subagents
+		// Tab to Subagents; Shift+Tab twice wraps through Settings and back
 		h.answer(/pi-keeper settings/, { keys: [KEY.tab, KEY.shiftTab, KEY.shiftTab, KEY.escape] });
 		await h.command("keeper");
 		const shown = h.dialogs[0];
-		assert.deepEqual(shown.options.slice(0, 2), ['Offer "always allow in this project" for commands', 'Offer "always allow in this project" for outside read directories'], "the first render lists the first tab");
+		assert.deepEqual(shown.options.slice(0, 2), ["Allow commands in project", "Allow read dirs in project"], "the first render lists the first tab");
 		h.assertNoPendingAnswers();
 	});
 
@@ -213,11 +216,11 @@ describe("the no-UI listing and the panel", () => {
 		h.assertNoPendingAnswers();
 	});
 
-	it("the dialog's command colors are a row of their own in the Dialog section", async () => {
+	it("the dialog's command colors are a row of their own in the Settings tab", async () => {
 		const sb = sandboxed();
 		const h = await parentOf(sb);
-		// Tab twice to Dialog, Enter once: dim -> muted
-		h.answer(/pi-keeper settings/, { keys: [KEY.tab, KEY.tab, KEY.enter, KEY.escape] });
+		// Settings tab, down 3 rows (headings are skipped) to Command colors, Enter once: dim -> muted
+		h.answer(/pi-keeper settings/, { keys: [...down(3), KEY.enter, KEY.escape] });
 		await h.command("keeper");
 		assert.equal(saved(sb).commandColors, "muted");
 		h.assertNoPendingAnswers();
@@ -252,7 +255,7 @@ describe("/keeper subagent-thinking", () => {
 
 describe("/keeper mode-flash", () => {
 	it("sets off, 1s, 2s, 3s or 5s headlessly and saves seconds", async () => {
-		const sb = sandboxed();
+		const sb = sandboxed({ modeFlashSecs: 2 });
 		const h = await parentOf(sb);
 		await h.command("keeper", "mode-flash off");
 		assert.equal(saved(sb).modeFlashSecs, 0);
@@ -273,13 +276,31 @@ describe("/keeper mode-flash", () => {
 		assert.match(lastNote(h)?.message ?? "", /mode-flash <off\|1s\|2s\|3s\|5s>/);
 	});
 
-	it("the panel row sits after command colors in the Dialog section and cycles off -> 1s", async () => {
+	it("the panel row sits after command colors in the Settings tab and cycles off -> 1s", async () => {
 		const sb = sandboxed({ modeFlashSecs: 5 });
 		const h = await parentOf(sb);
-		// Tab twice to Dialog, Down to the second row, Enter once: 5s -> off (wraps)
-		h.answer(/pi-keeper settings/, { keys: [KEY.tab, KEY.tab, KEY.down, KEY.enter, KEY.escape] });
+		// Settings tab, down 4 rows (headings are skipped) to the mode line, Enter once: 5s -> off (wraps)
+		h.answer(/pi-keeper settings/, { keys: [...down(4), KEY.enter, KEY.escape] });
 		await h.command("keeper");
 		assert.equal(saved(sb).modeFlashSecs, 0);
 		h.assertNoPendingAnswers();
+	});
+});
+
+describe("/keeper mode-status", () => {
+	it("modeStatus false keeps the mode out of the footer; the toggle saves and takes effect at once", async () => {
+		const hidden = await parentOf(sandboxed({ modeStatus: false }));
+		await hidden.command("mode", "plan");
+		assert.ok(hidden.statuses.every((s) => s === undefined || !/plan/.test(s)), "no mode in the footer");
+
+		const sb = sandboxed();
+		const h = await parentOf(sb);
+		assert.ok(h.statuses.some((s) => s !== undefined && /default/.test(s)), "on by default");
+		await h.command("keeper", "mode-status off");
+		assert.equal(saved(sb).modeStatus, false);
+		assert.equal(h.statuses.at(-1), undefined, "the footer entry is cleared");
+		await h.command("keeper", "mode-status on");
+		assert.equal(saved(sb).modeStatus, true);
+		assert.match(h.statuses.at(-1) ?? "", /default/);
 	});
 });

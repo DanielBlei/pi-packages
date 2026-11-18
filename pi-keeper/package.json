@@ -1,6 +1,6 @@
 {
 	"name": "pi-keeper",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Permission modes for pi (default, auto and plan) with per-project allow, ask and deny rules and a plan you approve before any edit.",
 	"license": "Apache-2.0",
 	"author": "Daniel Blei",
@@ -45,11 +45,14 @@
 		"extensions": [
 			"./extensions/index.ts"
 		],
-		"prompts": []
+		"prompts": [
+			"./prompt-templates"
+		]
 	},
 	"files": [
 		"extensions",
 		"prompts",
+		"prompt-templates",
 		"README.md",
 		"CHANGELOG.md",
 		"NOTICE"

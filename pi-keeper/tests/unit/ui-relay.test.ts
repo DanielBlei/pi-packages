@@ -79,3 +79,15 @@ test("grantReadDirs is optional: a relay without it (or with older session rules
 	findUiRelay({ root })?.grantReadDirs?.(["/a"]);
 	assert.deepEqual(granted, ["/a"]);
 });
+
+test("grantGitRepos is optional: a relay without it is still usable; a published one must be a function", () => {
+	delete root[RELAY_KEY];
+	assert.ok(registerUiRelay(relay(), { root }));
+	assert.equal(findUiRelay({ root })?.grantGitRepos, undefined);
+	delete root[RELAY_KEY];
+	assert.equal(registerUiRelay(relay({ grantGitRepos: "no" as never }), { root }), undefined);
+	const granted: string[] = [];
+	assert.ok(registerUiRelay(relay({ grantGitRepos: (roots) => granted.push(...roots) }), { root }));
+	findUiRelay({ root })?.grantGitRepos?.(["/r"]);
+	assert.deepEqual(granted, ["/r"]);
+});

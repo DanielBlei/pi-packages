@@ -121,6 +121,14 @@ test("escape sequences and bidi overrides can't reach the terminal", async () =>
 	assert.equal(sanitizeForTerminal("a\tb\nc"), "a\tb\nc");
 });
 
+test("invisible format characters are shown as a marker, not hidden", () => {
+	// U+200B ZWSP, U+200C ZWNJ, U+200D ZWJ, U+2028/U+2029 separators, U+2060 WJ, U+FEFF BOM
+	assert.equal(sanitizeForTerminal("git\u200b push  --force\u2060\ufeff"), "git� push  --force��");
+	for (const ch of ["\u200b", "\u200c", "\u200d", "\u2028", "\u2029", "\u2060", "\ufeff"]) {
+		assert.equal(sanitizeForTerminal(`a${ch}b`), "a�b", `U+${ch.charCodeAt(0).toString(16)} is shown`);
+	}
+});
+
 test("large files and contents are not read or diffed", async () => {
 	const big = "x".repeat(MAX_PREVIEW_BYTES + 1);
 	const path = file("big.txt", big);

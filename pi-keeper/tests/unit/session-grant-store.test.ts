@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { SessionGrants } from "../../extensions/session-grant-store.ts";
+import { grantsFile, PARENT_SESSION_ENV, publishGrants, readParentGrants } from "../../extensions/session-grants.ts";
 
 describe("SessionGrants", () => {
 	it("adds patterns once, by their text, and keeps prefixes and exact apart", () => {
@@ -35,7 +39,7 @@ describe("SessionGrants", () => {
 		g.removeVerbatim("a");
 		g.removeReadDir("/data");
 		g.removeFetchHost("pypi.org");
-		assert.deepEqual(g.snapshot(), { prefixes: [], exact: [], verbatim: [], outsideReadsAllowed: false, outsideReadDirs: [], fetchHosts: [] });
+		assert.deepEqual(g.snapshot(), { prefixes: [], exact: [], verbatim: [], outsideReadsAllowed: false, outsideReadDirs: [], fetchHosts: [], gitRepos: [] });
 	});
 
 	it("removes one pattern by text", () => {
@@ -57,7 +61,22 @@ describe("SessionGrants", () => {
 		g.addFetchHost("h.io");
 		g.reset();
 		assert.equal(g.prefixes, live);
-		assert.deepEqual(g.snapshot(), { prefixes: [], exact: [], verbatim: [], outsideReadsAllowed: false, outsideReadDirs: [], fetchHosts: [] });
+		assert.deepEqual(g.snapshot(), { prefixes: [], exact: [], verbatim: [], outsideReadsAllowed: false, outsideReadDirs: [], fetchHosts: [], gitRepos: [] });
+	});
+
+	it("dedupes git repos, removes them, and resets them with the rest", () => {
+		const g = new SessionGrants();
+		const live = g.gitRepos;
+		g.addGitRepo("/x/harbor");
+		g.addGitRepo("/x/harbor");
+		g.addGitRepo("/x/third");
+		assert.deepEqual(g.gitRepos, ["/x/harbor", "/x/third"]);
+		assert.deepEqual(g.snapshot().gitRepos, ["/x/harbor", "/x/third"]);
+		g.removeGitRepo("/x/harbor");
+		assert.deepEqual(g.gitRepos, ["/x/third"]);
+		g.reset();
+		assert.equal(g.gitRepos, live);
+		assert.deepEqual(g.gitRepos, []);
 	});
 
 	it("snapshot() is detached from the store in both directions", () => {
@@ -99,5 +118,25 @@ describe("SessionGrants", () => {
 		g.allowOutsideReads();
 		g.reset();
 		assert.equal(g.outsideReadsAllowed, false);
+	});
+});
+
+describe("the published grants carry git repos to children", () => {
+	it("a snapshot with git repos reads back; an old snapshot without the field still reads, with none", () => {
+		const dir = mkdtempSync(join(tmpdir(), "grants-"));
+		const env = { [PARENT_SESSION_ENV]: "session-1" };
+		try {
+			publishGrants(dir, "session-1", { prefixes: [], exact: [], edits: false, outsideReads: false, gitRepos: ["/x/harbor"] });
+			assert.deepEqual(readParentGrants(dir, env)?.gitRepos, ["/x/harbor"]);
+			const file = grantsFile(dir, "session-1");
+			const old = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+			delete old.gitRepos;
+			writeFileSync(file, JSON.stringify(old), { mode: 0o600 });
+			const read = readParentGrants(dir, env);
+			assert.notEqual(read, undefined);
+			assert.deepEqual(read?.gitRepos, []);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

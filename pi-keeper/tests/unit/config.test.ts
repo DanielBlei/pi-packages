@@ -56,7 +56,7 @@ test("unusable files fall back to the defaults with one warning", () => {
 test("loadConfig reads <agent dir>/pi-keeper.json; absent means defaults and no warning", () => {
 	const dir = mkdtempSync(join(tmpdir(), "pdf-config-"));
 	try {
-		assert.deepEqual(loadConfig(dir), { readOnlyTools: defaults, subagentsFollowAuto: false, projectExactCommands: false, backgroundAutoFallback: false, projectCommandApprovals: true, projectReadApprovals: false, ccExtensionsPrompt: true, modeInstructions: "message", modeFlashSecs: 2, backgroundAsks: true, backgroundAskTimeoutMs: 300000, backgroundAskPopup: "always", subagentThinking: "follow", commandColors: undefined, warnings: [] });
+		assert.deepEqual(loadConfig(dir), { readOnlyTools: defaults, subagentsFollowAuto: false, projectExactCommands: true, backgroundAutoFallback: false, projectCommandApprovals: true, projectReadApprovals: false, ccExtensionsPrompt: true, modeInstructions: "message", modeFlashSecs: 0, modeStatus: true, modeWorkingRow: false, backgroundAsks: true, backgroundAskTimeoutMs: 300000, backgroundAskPopup: "always", subagentThinking: "follow", commandColors: undefined, warnings: [] });
 		writeFileSync(join(dir, CONFIG_FILE), '{"readOnlyTools": ["x_tool"]}');
 		assert.deepEqual([...loadConfig(dir).readOnlyTools], ["x_tool"]);
 		writeFileSync(join(dir, CONFIG_FILE), "{broken");
@@ -66,19 +66,20 @@ test("loadConfig reads <agent dir>/pi-keeper.json; absent means defaults and no 
 	}
 });
 
-test("subagentsFollowAuto, projectExactCommands and backgroundAutoFallback: absent or a boolean reads as-is, anything else warns and stays off", () => {
+test("subagentsFollowAuto, projectExactCommands and backgroundAutoFallback: absent or a boolean reads as-is, anything else warns and uses the default", () => {
 	assert.equal(parseConfig("{}").subagentsFollowAuto, false);
 	assert.equal(parseConfig('{"subagentsFollowAuto": true}').subagentsFollowAuto, true);
 	assert.equal(parseConfig('{"subagentsFollowAuto": false}').subagentsFollowAuto, false);
-	assert.equal(parseConfig("{}").projectExactCommands, false);
+	assert.equal(parseConfig("{}").projectExactCommands, true);
 	assert.equal(parseConfig('{"projectExactCommands": true}').projectExactCommands, true);
+	assert.equal(parseConfig('{"projectExactCommands": false}').projectExactCommands, false);
 	assert.equal(parseConfig("{}").backgroundAutoFallback, false);
 	assert.equal(parseConfig('{"backgroundAutoFallback": true}').backgroundAutoFallback, true);
 	const bad = parseConfig('{"subagentsFollowAuto": "yes", "projectExactCommands": 7, "backgroundAutoFallback": "on"}');
 	assert.equal(bad.subagentsFollowAuto, false);
-	assert.equal(bad.projectExactCommands, false);
+	assert.equal(bad.projectExactCommands, true);
 	assert.equal(bad.backgroundAutoFallback, false);
-	assert.deepEqual(bad.warnings, ["subagentsFollowAuto must be true or false; using false", "projectExactCommands must be true or false; using false", "backgroundAutoFallback must be true or false; using false"]);
+	assert.deepEqual(bad.warnings, ["subagentsFollowAuto must be true or false; using false", "projectExactCommands must be true or false; using true", "backgroundAutoFallback must be true or false; using false"]);
 	// one bad key doesn't hide the other
 	const mixed = parseConfig('{"readOnlyTools": ["x_tool"], "subagentsFollowAuto": 7}');
 	assert.deepEqual([...mixed.readOnlyTools], ["x_tool"]);
@@ -252,12 +253,26 @@ test("saveConfig writes the popup policy, the ask timeout and the subagent think
 	}
 });
 
-test("modeFlashSecs: default 2; 0 turns it off; 0.1 to 10 is kept; anything else is clamped or ignored with a warning", () => {
-	assert.equal(parseConfig("{}").modeFlashSecs, 2);
+test("modeFlashSecs: default 0 (off); 0 turns it off; 0.1 to 10 is kept; anything else is clamped or ignored with a warning", () => {
+	assert.equal(parseConfig("{}").modeFlashSecs, 0);
 	assert.equal(parseConfig('{"modeFlashSecs": 0}').modeFlashSecs, 0);
 	assert.equal(parseConfig('{"modeFlashSecs": 0.1}').modeFlashSecs, 0.1);
 	assert.equal(parseConfig('{"modeFlashSecs": 10}').modeFlashSecs, 10);
 	assert.deepEqual([parseConfig('{"modeFlashSecs": 0.05}').modeFlashSecs, parseConfig('{"modeFlashSecs": 0.05}').warnings.length], [0.1, 1]);
 	assert.deepEqual([parseConfig('{"modeFlashSecs": 60}').modeFlashSecs, parseConfig('{"modeFlashSecs": 60}').warnings.length], [10, 1]);
-	assert.deepEqual([parseConfig('{"modeFlashSecs": "3"}').modeFlashSecs, parseConfig('{"modeFlashSecs": "3"}').warnings.length], [2, 1]);
+	assert.deepEqual([parseConfig('{"modeFlashSecs": "3"}').modeFlashSecs, parseConfig('{"modeFlashSecs": "3"}').warnings.length], [0, 1]);
+});
+
+test("modeStatus: default true; false hides the footer mode; anything else warns and keeps true", () => {
+	assert.equal(parseConfig("{}").modeStatus, true);
+	assert.equal(parseConfig('{"modeStatus": false}').modeStatus, false);
+	const bad = parseConfig('{"modeStatus": "no"}');
+	assert.deepEqual([bad.modeStatus, bad.warnings.length], [true, 1]);
+});
+
+test("modeWorkingRow: default false; true shows the mode in the working row; anything else warns and keeps false", () => {
+	assert.equal(parseConfig("{}").modeWorkingRow, false);
+	assert.equal(parseConfig('{"modeWorkingRow": true}').modeWorkingRow, true);
+	const bad = parseConfig('{"modeWorkingRow": 1}');
+	assert.deepEqual([bad.modeWorkingRow, bad.warnings.length], [false, 1]);
 });

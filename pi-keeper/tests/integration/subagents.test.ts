@@ -267,6 +267,31 @@ describe("parent: subagent is allowed only while the bridge works", () => {
 		await h.shutdown();
 		assert.equal((await h.tool("subagent", { task: "x" })).blocked, true);
 	});
+
+	it("without pi-subagents's bridge, pi-keeper starts, the modes and ordinary tools work, and only subagent is refused", async () => {
+		// pi-keeper cannot register with pi-subagents (the registry it finds is not one it can use): the case the guide's "could not register" means
+		root[REGISTRY_KEY] = { version: 2, bySession: new Map() };
+		const h = await startPi({ sandbox: sandboxed() });
+		await h.session();
+		assert.deepEqual(h.notifications.filter((n) => n.type === "error"), [], "the session starts without an error");
+		for (const mode of ["auto", "plan", "default"] as const) {
+			await h.command("mode", mode);
+			// each mode's edit verdict shows the switch took: plan denies, auto runs, default asks
+			const edit = { path: "src/a.ts", oldText: "a", newText: "b" };
+			if (mode === "plan") assert.match((await h.tool("edit", edit)).reason ?? "", /Plan mode is active/, "plan: edit denied");
+			if (mode === "auto") assert.equal((await h.tool("edit", edit)).blocked, false, "auto: edit runs");
+			if (mode === "default") {
+				h.answer(/Permission required/, "No");
+				assert.equal((await h.tool("edit", edit)).blocked, true, "default: edit asks");
+				assert.equal(h.dialogs.length, 1, "default: one dialog");
+			}
+			assert.equal((await h.tool("read", { path: "a.txt" })).blocked, false, `${mode}: read`);
+			assert.equal((await h.tool("bash", { command: "git status" })).blocked, false, `${mode}: read-only bash`);
+			const denied = await h.tool("subagent", { agent: "worker", task: "x" });
+			assert.equal(denied.blocked, true, `${mode}: subagent`);
+			assert.match(denied.reason ?? "", /couldn't attach to subagent children; refusing to launch unchecked subagents/, mode);
+		}
+	});
 });
 
 describe("child under plan mode", () => {
@@ -512,6 +537,18 @@ describe("parent: workflow children (subagent_launch)", () => {
 		assert.match(h.dialogs[0].title, /commands: a list this check cannot read/);
 	});
 
+	it("the dialog offers no don't-ask-again or always-allow option, and N launches ask N times", async () => {
+		const h = await startPi({ sandbox: sandboxed() });
+		await h.session();
+		for (let i = 1; i <= 3; i++) h.answer(/Permission required \(default mode\)/, "Yes");
+		for (let i = 1; i <= 3; i++) {
+			assert.equal((await h.tool("subagent_launch", launch({ key: `task-${i}`, commands: [{ command: "npm test" }] }))).blocked, false, `launch ${i}`);
+		}
+		assert.equal(h.dialogs.length, 3, "one dialog per launch");
+		for (const dialog of h.dialogs) assert.ok(!dialog.options.some((o) => /ask again|always allow|this session|in this project/.test(o)), JSON.stringify(dialog.options));
+		h.assertNoPendingAnswers();
+	});
+
 	it("the output file is judged as a write: denied in plan mode outside the artifact dirs, asked in default", async () => {
 		const sb = sandboxed();
 		const h = await startPi({ sandbox: sb });
@@ -546,5 +583,146 @@ describe("parent: workflow children (subagent_launch)", () => {
 		await h.session();
 		assert.equal((await h.tool("subagent_launch", launch())).blocked, true);
 		assert.ok(h.notifications.some((n) => /readOnlyTools: ignored "subagent_launch"/.test(n.message)));
+	});
+});
+
+/**
+ * A single child (`subagent` with agent + task) runs its `gate` and `acceptance.verify`
+ * commands and writes its `output` itself, so the gate judges them like a workflow child's.
+ */
+describe("parent: single subagent launches (gate, acceptance, output)", () => {
+	const single = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({ agent: "worker", task: "x", ...extra });
+
+	it("options.gate runs a shell command: asked in default and auto, not allowed in plan", async () => {
+		for (const mode of ["default", "auto", "plan"]) {
+			const h = await startPi({ sandbox: sandboxed() });
+			await h.session();
+			await h.command("mode", mode);
+			h.answer(/Permission required/, "No");
+			const outcome = await h.tool("subagent", single({ options: { gate: "rm -rf ~/x" } }));
+			assert.equal(outcome.blocked, true, mode);
+			assert.match(outcome.reason ?? h.dialogs[0]?.title ?? "", /rm -rf/, mode);
+		}
+	});
+
+	it("a single child's gate: the dialog offers no remember option either, and N launches ask N times", async () => {
+		const h = await startPi({ sandbox: sandboxed() });
+		await h.session();
+		for (let i = 0; i < 2; i++) h.answer(/Permission required \(default mode\)/, "Yes");
+		for (let i = 0; i < 2; i++) assert.equal((await h.tool("subagent", single({ options: { gate: "npm test" } }))).blocked, false, `launch ${i + 1}`);
+		assert.equal(h.dialogs.length, 2, "one dialog per launch");
+		for (const dialog of h.dialogs) assert.ok(!dialog.options.some((o) => /ask again|always allow|this session|in this project/.test(o)), JSON.stringify(dialog.options));
+		h.assertNoPendingAnswers();
+	});
+
+	it("a flat top-level gate is judged the same way", async () => {
+		const h = await startPi({ sandbox: sandboxed() });
+		await h.session();
+		h.answer(/Permission required \(default mode\)/, "No");
+		assert.equal((await h.tool("subagent", single({ gate: "rm -rf ~/x" }))).blocked, true);
+		assert.match(h.dialogs[0]?.title ?? "", /The child leaves this behind: bash: rm -rf ~\/x\./);
+	});
+
+	it("an absolute output path outside the project is not allowed silently in auto", async () => {
+		const h = await startPi({ sandbox: sandboxed() });
+		await h.session();
+		await h.command("mode", "auto");
+		h.answer(/Permission required/, "No");
+		assert.equal((await h.tool("subagent", single({ output: "/home/someone/.bashrc" }))).blocked, true);
+		assert.equal(h.dialogs.length, 1);
+	});
+
+	it("acceptance as a JSON string with an env entry asks in every mode", async () => {
+		for (const mode of ["default", "auto", "plan"]) {
+			const h = await startPi({ sandbox: sandboxed() });
+			await h.session();
+			await h.command("mode", mode);
+			h.answer(/Permission required/, "No");
+			// a read-only command, so the env hazard (not the command itself) is what asks
+			const acceptance = '{"verify":[{"command":"git status","env":{"API_TOKEN":"x"}}]}';
+			assert.equal((await h.tool("subagent", single({ acceptance }))).blocked, true, mode);
+			assert.match(h.dialogs[0]?.title ?? "", /sets API_TOKEN in its environment/, mode);
+		}
+	});
+
+	it("acceptance that is a JSON list, not an object, asks (pi-subagents throws on it)", async () => {
+		const h = await startPi({ sandbox: sandboxed() });
+		await h.session();
+		h.answer(/Permission required/, "No");
+		assert.equal((await h.tool("subagent", single({ acceptance: "[1]" }))).blocked, true);
+		assert.match(h.dialogs[0]?.title ?? "", /acceptance: a value this check cannot read/);
+	});
+
+	it("schedule.create judges its gate: not allowed in any mode", async () => {
+		for (const mode of ["default", "auto", "plan"]) {
+			const h = await startPi({ sandbox: sandboxed() });
+			await h.session();
+			await h.command("mode", mode);
+			h.answer(/Permission required/, "No");
+			const outcome = await h.tool("subagent", { action: "schedule.create", every: "1h", options: { gate: "rm -rf ~/x" } });
+			assert.equal(outcome.blocked, true, mode);
+		}
+	});
+
+	it("schedule.create of a workflow asks in every mode: its children run later with no tool call to judge them", async () => {
+		for (const mode of ["default", "auto", "plan"]) {
+			const h = await startPi({ sandbox: sandboxed() });
+			await h.session();
+			await h.command("mode", mode);
+			h.answer(/Permission required/, "No");
+			assert.equal((await h.tool("subagent", { action: "schedule.create", every: "1h", workflow: true })).blocked, true, mode);
+			assert.match(h.dialogs[0]?.title ?? "", /workflow script that runs later/, mode);
+		}
+	});
+
+	it("guards: schedule.create with a plain scout task, and schedule.list, are unchanged (no dialog in plan)", async () => {
+		const h = await startPi({ sandbox: sandboxed() });
+		await h.session();
+		await h.command("mode", "plan");
+		assert.equal((await h.tool("subagent", { action: "schedule.create", agent: "scout", task: "look", every: "1h" })).blocked, false);
+		assert.equal((await h.tool("subagent", { action: "schedule.list" })).blocked, false);
+		assert.deepEqual(h.dialogs, []);
+	});
+
+	it("acceptance that is not valid JSON asks", async () => {
+		const h = await startPi({ sandbox: sandboxed() });
+		await h.session();
+		h.answer(/Permission required/, "No");
+		assert.equal((await h.tool("subagent", single({ acceptance: "{not json" }))).blocked, true);
+		assert.match(h.dialogs[0]?.title ?? "", /acceptance: JSON this check cannot read/);
+	});
+
+	it("an output path that leaves the run's directory asks in every mode", async () => {
+		for (const mode of ["default", "auto", "plan"]) {
+			const h = await startPi({ sandbox: sandboxed() });
+			await h.session();
+			await h.command("mode", mode);
+			h.answer(/Permission required/, "No");
+			assert.equal((await h.tool("subagent", single({ output: "../../x.md" }))).blocked, true, mode);
+			assert.match(h.dialogs[0]?.title ?? "", /write: output path \.\.\/\.\.\/x\.md leaves the run's directory/, mode);
+		}
+	});
+
+	it("guards: a plain scout, a scout with a relative output, and acceptance 'checked' are allowed in plan with no dialog", async () => {
+		const h = await startPi({ sandbox: sandboxed() });
+		await h.session();
+		await h.command("mode", "plan");
+		assert.equal((await h.tool("subagent", { agent: "scout", task: "look" })).blocked, false);
+		assert.equal((await h.tool("subagent", { agent: "scout", task: "look", output: "context.md" })).blocked, false);
+		assert.equal((await h.tool("subagent", single({ acceptance: "checked" }))).blocked, false);
+		assert.deepEqual(h.dialogs, []);
+	});
+
+	it("guards: a workflow or multi-child call, or a management action, is not judged on these fields here", async () => {
+		const h = await startPi({ sandbox: sandboxed() });
+		await h.session();
+		await h.command("mode", "auto");
+		const calls: Array<Record<string, unknown>> = [
+			{ tasks: [{ agent: "scout", task: "look" }], options: { gate: "rm -rf ~/x" } },
+			{ workflow: "./flow.js", options: { gate: "rm -rf ~/x" } },
+			{ action: "status", id: "run1", options: { gate: "rm -rf ~/x" } },
+		];
+		for (const input of calls) assert.equal((await h.tool("subagent", input)).blocked, false, JSON.stringify(input));
+		assert.deepEqual(h.dialogs, []);
 	});
 });

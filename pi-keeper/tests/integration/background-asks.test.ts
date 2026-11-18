@@ -524,6 +524,46 @@ describe("/keeper changes apply to asks already waiting", () => {
 		assert.equal(outcomeOf(sandbox, parent, request), "allow");
 	});
 
+	it("a popup change keeps the ask on screen and its server running", async () => {
+		const sandbox = sandboxed();
+		const parent = await parentOf(sandbox, { backgroundAskPopup: "badge" });
+		parent.answer(BG, "hang");
+		const request = file(sandbox, parent);
+		parent.pollAsks();
+		await parent.command("keeper", "background-ask-popup always");
+		parent.pollAsks();
+		await until(() => parent.openDialogs === 1, "the dialog");
+		assert.equal(replyTo(sandbox, parent, request), undefined, "not denied by a restart");
+		assert.equal(existsSync(join(mailbox(sandbox, parent), "alive")), true, "the server and its heartbeat were not restarted away");
+	});
+
+	it("setting background asks to the value it already has keeps the waiting ask", async () => {
+		const sandbox = sandboxed();
+		const parent = await parentOf(sandbox, { backgroundAskPopup: "badge" });
+		const request = file(sandbox, parent);
+		parent.pollAsks();
+		assert.match(parent.statusOf("pi-keeper-asks") ?? "", /1 background approval waiting/);
+		await parent.command("keeper", "background-asks on");
+		await settle();
+		assert.equal(replyTo(sandbox, parent, request), undefined, "not denied by a restart");
+		assert.match(parent.statusOf("pi-keeper-asks") ?? "", /1 background approval waiting/);
+	});
+
+	it("turning background asks off denies what waits with asks-turned-off and closes its dialog", async () => {
+		const sandbox = sandboxed();
+		const parent = await parentOf(sandbox);
+		parent.answer(BG, "hang");
+		const open = file(sandbox, parent);
+		const queued = file(sandbox, parent);
+		parent.pollAsks();
+		await until(() => parent.openDialogs === 1, "the dialog");
+		await parent.command("keeper", "background-asks off");
+		assert.equal(outcomeOf(sandbox, parent, open), "deny/asks-turned-off");
+		assert.equal(outcomeOf(sandbox, parent, queued), "deny/asks-turned-off");
+		assert.equal(outcomes(parent).filter((o) => o === "asks-off").length, 2, "logged as asks-off, not parent-gone");
+		await until(() => parent.openDialogs === 0, "the dialog to close");
+	});
+
 	it("changing the timeout denies nothing and keeps the ask waiting", async () => {
 		const sandbox = sandboxed();
 		const parent = await parentOf(sandbox, { backgroundAskPopup: "badge" });
@@ -680,6 +720,60 @@ describe("dialogs never overlap", () => {
 		assert.equal(outcomeOf(sandbox, parent, request), "deny/user");
 		assert.equal(parent.dialogs.length, 2);
 		assert.equal(parent.maxOpenDialogs, 1);
+		parent.assertNoPendingAnswers();
+	});
+
+	it("a background ask for a command that a dialog opened first just allowed for the session opens no second dialog", async () => {
+		const sandbox = sandboxed();
+		const parent = await parentOf(sandbox);
+		parent.dialogHoldMs = 30;
+		// one scripted answer for whichever of the two dialogs opens first; the other must not open at all
+		parent.answer(/Permission required \((?:subagent, )?default mode\)/, SESSION_NPM);
+		const request = file(sandbox, parent);
+		// the own call and the server's pass race for the dialog slot; both end with one dialog and an allowed background ask
+		const own = parent.tool("bash", { command: "npm test" });
+		parent.pollAsks();
+		assert.equal((await own).blocked, false);
+		await until(() => replyTo(sandbox, parent, request) !== undefined, "the reply");
+		assert.equal(outcomeOf(sandbox, parent, request), "allow");
+		assert.equal(parent.dialogs.length, 1, "one dialog only: the other call is covered by the grant");
+		assert.equal(parent.maxOpenDialogs, 1);
+		assert.ok(outcomes(parent).includes("covered"), "logged as covered, not as the user's answer");
+		parent.assertNoPendingAnswers();
+	});
+
+	it("W7: a background ask that waits behind a dialog which then grants the session opens no second dialog", async () => {
+		const sandbox = sandboxed();
+		const parent = await parentOf(sandbox);
+		parent.dialogHoldMs = 30;
+		parent.answer(/Permission required \(default mode\)/, SESSION_NPM);
+		const request = file(sandbox, parent);
+		// the own call takes the dialog slot first; the two microtasks let the server's pass reach the dialog lock
+		// while it is held, so the background ask waits there and reaches the background-side recheck
+		const own = parent.tool("bash", { command: "npm test" });
+		await Promise.resolve();
+		await Promise.resolve();
+		parent.pollAsks();
+		assert.equal((await own).blocked, false);
+		await until(() => replyTo(sandbox, parent, request) !== undefined, "the reply");
+		assert.equal(outcomeOf(sandbox, parent, request), "allow");
+		assert.equal(parent.dialogs.length, 1, "one dialog only: the background ask is covered by the grant");
+		assert.equal(parent.maxOpenDialogs, 1);
+		assert.ok(outcomes(parent).includes("covered"), "logged as covered, not as the user's answer");
+		parent.assertNoPendingAnswers();
+	});
+
+	it("a background dialog opened first, granted for the session: the parent's own call for the same command runs with no second dialog", async () => {
+		const sandbox = sandboxed();
+		const parent = await parentOf(sandbox);
+		parent.answer(BG, SESSION_NPM);
+		const request = file(sandbox, parent);
+		parent.pollAsks();
+		await until(() => replyTo(sandbox, parent, request) !== undefined, "the reply");
+		assert.equal(outcomeOf(sandbox, parent, request), "allow");
+		const own = await parent.tool("bash", { command: "npm test" });
+		assert.equal(own.blocked, false);
+		assert.equal(parent.dialogs.length, 1, "the grant covers the parent's own call");
 		parent.assertNoPendingAnswers();
 	});
 
@@ -967,7 +1061,20 @@ describe("a background child asks its parent's user", () => {
 		await serve(parent, () => parent.openDialogs === 0, "the dialog to close");
 	});
 
-	it("the child's session name is what the parent's dialog calls it", async () => {
+	it("a child with no session name is titled with its pid: subagent <pid>", async () => {
+			const sandbox = sandboxed();
+			const parent = await parentOf(sandbox);
+			// backgroundChild gives no session name, so the child's label falls back to its pid (this process)
+			const child = await backgroundChild(sandbox, parent);
+			parent.answer(new RegExp(`Background subagent subagent ${process.pid}: Permission required`), ALLOW_ONCE);
+			const call = child.tool("bash", { command: "npm test" });
+			await serve(parent, () => parent.dialogs.length === 1, "the dialog");
+			assert.equal((await call).blocked, false);
+			assert.match(parent.dialogs[0].title, new RegExp(`Background subagent subagent ${process.pid}: Permission required`));
+			parent.assertNoPendingAnswers();
+		});
+
+		it("the child's session name is what the parent's dialog calls it", async () => {
 		const sandbox = sandboxed();
 		const parent = await parentOf(sandbox);
 		delete root[RELAY_KEY];

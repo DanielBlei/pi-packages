@@ -96,6 +96,7 @@ import {
 } from "./rules.ts";
 import {
 	approvalBreakdown,
+	commandEffects,
 	createScratchDir,
 	deriveCommandPrefixes,
 	exactRuleTokens,
@@ -105,6 +106,8 @@ import {
 	readGrantDir,
 	fetchGrantHosts,
 	hasRemoval,
+	gitGrantRoots,
+	gitRepoRootOf,
 	isSubagentOutputPath,
 	patternLadder,
 	scopeSuffix,
@@ -123,6 +126,8 @@ import {
 	readDirRuleFor,
 	fetchRuleFor,
 	parseFetchHost,
+	parseVerbatim,
+	verbatimRuleFor,
 	fileSignature,
 	findMatchingRule,
 	loadProjectRules,
@@ -135,6 +140,7 @@ import {
 	RULES_FILE,
 	rulesPath,
 	saveRules,
+	isInsideDir,
 	sha256,
 	trustedHash,
 	type LoadedRules,
@@ -149,6 +155,7 @@ import {
 	matchRules,
 	ruleKey,
 	userRuleDir,
+	ensureUserRuleDir,
 	RULE_FIRED_ENTRY,
 	RULE_MESSAGE,
 	RULES_PER_RUN_CAP,
@@ -167,12 +174,12 @@ import { isDialogLocked, withDialogLock } from "./dialog-lock.ts";
 import { permissionDialog, selectModeDialog, setPreviewTextColor } from "./dialog.ts";
 import { ccExtensionsStatus, ccSettingsPath, excludeExitPlanMode, type CcExtensionsStatus } from "./cc-extensions-compat.ts";
 import { commandHighlighter } from "./shell-highlight-bridge.ts";
-import { backgroundAsksEnabled, CONFIG_FILE, DEFAULT_MODE_FLASH_SECS, effectiveCommandColors, formatDuration, loadConfig, MAX_BACKGROUND_ASK_TIMEOUT_MS, MIN_BACKGROUND_ASK_TIMEOUT_MS, parseDuration, POPUP_MODES, PREVIEW_TEXT_COLORS, saveConfig, type BackgroundAskPopup, type KeeperConfig, type PreviewTextColor } from "./config.ts";
-import { settingsPanel, type PanelItem, type PanelResult } from "./settings-panel.ts";
+import { backgroundAsksEnabled, CONFIG_FILE, effectiveCommandColors, formatDuration, loadConfig, MAX_BACKGROUND_ASK_TIMEOUT_MS, MIN_BACKGROUND_ASK_TIMEOUT_MS, parseDuration, POPUP_MODES, PREVIEW_TEXT_COLORS, saveConfig, type BackgroundAskPopup, type KeeperConfig, type PreviewTextColor } from "./config.ts";
+import { settingsPanel, type PanelItem, type PanelResult, type PanelSection } from "./settings-panel.ts";
 import { asPlanDetails, PLAN_KEEP, PlanView, selectPlanAction, type PlanChoice, type PlanDetails } from "./plan-approval.ts";
 import { childCwdProblem } from "./child-cwd.ts";
 import { rulesLine } from "./rules-line.ts";
-import { PARENT_SESSION_ENV, publishGrants, readParentGrants, sweepStaleGrants, withdrawGrants } from "./session-grants.ts";
+import { PARENT_SESSION_ENV, publishGrants, readParentGrants, sweepStaleGrants, withdrawGrants, type SessionGitRules } from "./session-grants.ts";
 import { SessionGrants } from "./session-grant-store.ts";
 import { findUiRelay, registerUiRelay, type UiRelay, type UiRelaySessionRules } from "./ui-relay.ts";
 import {
@@ -196,6 +203,7 @@ import {
 	logRemoteMode,
 	logRulesReview,
 	logSession,
+	redactCommand,
 	targetOf,
 } from "./telemetry.ts";
 import {
@@ -214,6 +222,7 @@ import {
 	projectReadGrantLabel,
 	fetchGrantLabel,
 	projectFetchGrantLabel,
+	gitGrantLabel,
 	SWITCH_TO_AUTO,
 } from "./options.ts";
 import { DESCRIBE_COMMAND_LIMIT, previewFor, sanitizeForTerminal, type Preview } from "./preview.ts";
@@ -462,7 +471,7 @@ function describe(call: ToolCall): string {
 
 function parseMode(value: unknown): ModeName | undefined {
 	if (value === "accept-edits") return "auto"; // renamed; migrate old sessions
-	return typeof value === "string" && value in MODES ? (value as ModeName) : undefined;
+	return typeof value === "string" && Object.hasOwn(MODES, value) ? (value as ModeName) : undefined;
 }
 
 /** Options of the child entry files (child-plan.ts, child-default.ts); pi itself calls the extension with just `pi`. */
@@ -528,6 +537,8 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 	let rulebookReviewKey: string | undefined;
 	let rulebookIgnoredKey: string | undefined;
 	let rulebookWarnedKey: string | undefined;
+	/** Rulebook files the user loaded this session, by path → content hash: their trust when the store cannot be written. */
+	const rulebookApproved = new Map<string, string>();
 	/** Fires in this run that asked for a continuation (bounded by RULES_PER_RUN_CAP). */
 	let runFires = 0;
 	/** Rules files (file + hash) the user loaded or ignored this session, and whose warnings were shown. */
@@ -628,7 +639,9 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		const dirs = [...grants.outsideReadDirs, ...(shared?.outsideReadDirs ?? []), ...project.readDirs.flatMap((dir) => readGrantDir(dir, "/") ?? [])];
 		// fetch grants: this session's, the parent's (a child), and the project's trusted Fetch(<host>) rules
 		const hosts = [...grants.fetchHosts, ...(shared?.fetchHosts ?? []), ...project.fetchHosts];
-		return { cwd: subject.cwd, agentDir: getAgentDir(), planFile: subject.planFile, scratchDir: subject.scratchDir, outsideReadDirs: dirs, skillDirs: skillDirsOf(currentSystemPrompt(ctx)), fetchHosts: hosts };
+		// git repos granted in this session, and the parent's (a child): git in them is judged like git in the cwd's repo
+		const gitRepos = [...grants.gitRepos, ...(shared?.gitRepos ?? [])];
+		return { cwd: subject.cwd, agentDir: getAgentDir(), planFile: subject.planFile, scratchDir: subject.scratchDir, outsideReadDirs: dirs, skillDirs: skillDirsOf(currentSystemPrompt(ctx)), fetchHosts: hosts, gitRepos };
 	}
 
 	/** The session scratch dir (0700 under the OS temp dir), created lazily; undefined if it can't be. */
@@ -716,7 +729,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			ctx.ui.notify(sanitizeForTerminal(`pi-keeper: ignored in ${loaded.file}:\n${problems.join("\n")}`), "warning");
 		}
 		// command, read and fetch rules all take effect only once the file is trusted
-		const allow = [...loaded.rules.allow, ...loaded.rules.readDirs, ...loaded.rules.fetchHosts];
+		const allow = [...loaded.rules.allow, ...loaded.rules.readDirs, ...loaded.rules.fetchHosts, ...loaded.rules.allowVerbatim];
 		if (allow.length === 0 || allowActive(loaded) || ignoredKey === key || !ctx.hasUI) return;
 		const shown = allow.slice(0, 20).map((r) => `  ${r.text}`);
 		if (allow.length > 20) shown.push(`  …and ${allow.length - 20} more`);
@@ -731,8 +744,9 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			approvedKey = key;
 			try {
 				recordTrust(getAgentDir(), loaded.file, loaded.hash ?? "");
-			} catch {
+			} catch (error) {
 				// approved for this session only
+				if (ctx.hasUI) ctx.ui.notify(sanitizeForTerminal((error as Error).message), "warning");
 			}
 			ctx.ui.notify(`Loaded ${allow.length} allow rule${allow.length === 1 ? "" : "s"} from ${RULES_FILE}`, "info");
 		} else {
@@ -752,6 +766,8 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		countWork("rulebookSync");
 		const agentDir = getAgentDir();
 		const trust = (file: string): string | undefined => {
+			const approved = rulebookApproved.get(file);
+			if (approved !== undefined) return approved;
 			try {
 				return trustedHash(agentDir, file);
 			} catch {
@@ -781,13 +797,17 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			ctx.signal === undefined ? undefined : { signal: ctx.signal },
 		), ctx.signal));
 		if (choice === LOAD_RULES) {
+			let failure: string | undefined;
 			for (const entry of book.untrusted) {
+				rulebookApproved.set(entry.file, entry.hash);
 				try {
 					recordTrust(getAgentDir(), entry.file, entry.hash);
-				} catch {
+				} catch (error) {
 					// approved for this session only
+					failure ??= (error as Error).message;
 				}
 			}
+			if (failure !== undefined) ctx.ui.notify(sanitizeForTerminal(failure), "warning");
 			rulebookReviewKey = key;
 			ctx.ui.notify(`Loaded ${book.untrusted.length === 1 ? "1 rulebook rule" : `${book.untrusted.length} rulebook rules`} from this project`, "info");
 		} else {
@@ -800,7 +820,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 	 * the parent's process (foreground), else the snapshot the parent publishes
 	 * for background children (session-grants.ts); undefined otherwise.
 	 */
-	function sharedRules(): UiRelaySessionRules | undefined {
+	function sharedRules(): SessionGitRules | undefined {
 		if (childMode === undefined) return undefined;
 		try {
 			const relay = findUiRelay();
@@ -811,8 +831,8 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 	}
 
 	/** This session's own grants (a parent's; what it relays and publishes to its children). */
-	function ownGrants(cwd: string | undefined): UiRelaySessionRules {
-		return { prefixes: grants.prefixes, exact: grants.exact, edits: sessionEdits, outsideReads: grants.outsideReadsAllowed, outsideReadDirs: grants.outsideReadDirs, fetchHosts: grants.fetchHosts, ...(cwd !== undefined ? { cwd } : {}), ...(parentThinking !== undefined ? { thinking: parentThinking } : {}) };
+	function ownGrants(cwd: string | undefined): SessionGitRules {
+		return { prefixes: grants.prefixes, exact: grants.exact, edits: sessionEdits, outsideReads: grants.outsideReadsAllowed, outsideReadDirs: grants.outsideReadDirs, fetchHosts: grants.fetchHosts, gitRepos: grants.gitRepos, ...(cwd !== undefined ? { cwd } : {}), ...(parentThinking !== undefined ? { thinking: parentThinking } : {}) };
 	}
 
 	/** This session's thinking level, from the harness (the session's own level wins over the event copy). */
@@ -871,8 +891,9 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			...pathContext(ctx, subject, project),
 			remembered: shared === undefined ? grants.prefixes : [...grants.prefixes, ...shared.prefixes],
 			rememberedExact: shared === undefined ? grants.exact : [...grants.exact, ...shared.exact],
-			// an exact-command grant and a workflow command's grants are the parent user's own: a child never sees them
-			rememberedVerbatim: remote ? [] : grants.verbatim,
+			// an exact-command grant and a workflow command's grants are the parent user's own: a child never sees them;
+			// the project's trusted BashExact entries apply everywhere (strictest wins in rules.ts)
+			rememberedVerbatim: [...(remote ? [] : grants.verbatim), ...(project.allow.verbatim ?? [])],
 			readOnlyTools: config.readOnlyTools,
 			outsideReadsAllowed: grants.outsideReadsAllowed || (shared?.outsideReads ?? false),
 			sessionEdits: sessionEdits || (shared?.edits ?? false),
@@ -1009,6 +1030,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			sessionRules: () => ownGrants(ctx.cwd),
 			grantReadDirs: (dirs) => addReadDirs(dirs),
 			grantFetchHosts: (hosts) => addFetchHosts(hosts),
+			grantGitRepos: (roots) => addGitRepos(roots),
 			rememberSession: (patterns) => rememberForSession(patterns),
 			setSessionFlag: (flag) => {
 				if (flag === "edits") sessionEdits = true;
@@ -1098,14 +1120,22 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		if (ctx === undefined) return "deny";
 		const prefix = `Background subagent ${sanitizeForTerminal(request.childLabel)}:`;
 		const ui: AskUI = {
-			dialog: (title, preview, options, escLabel) => permissionDialog(ctx, prefixTitle(`${prefix} `, title), preview, options, escLabel, signal, (data) => runModeShortcut(data, ctx)),
+			dialog: (title, preview, options, escLabel, recheck) => permissionDialog(ctx, prefixTitle(`${prefix} `, title), preview, options, escLabel, signal, (data) => runModeShortcut(data, ctx), recheck),
 			input: (title) => withDialogLock(() => ctx.ui.input(`${prefix} ${title}`, undefined, { signal }), signal),
 			notify: (message, type) => ctx.ui.notify(message, type),
 		};
 		const subject = remoteSubject(request, bgChildMode(request), { ui, signal, receivedAt });
 		const decision = remoteDecision(request, ctx, subject);
 		if (decision.action !== "ask") return decision.action;
-		const verdict = await ask({ toolName: request.call.toolName, input: request.call.input }, decision, ctx, request.id, subject);
+		const call: ToolCall = { toolName: request.call.toolName, input: request.call.input };
+		// Inside the dialog lock, a grant a dialog opened first just made may cover this call: judge again, and skip the dialog then (as the parent's own asks do)
+		const recheck = (): boolean => {
+			const again = remoteDecision(request, ctx, subject);
+			if (again.action !== "allow") return false;
+			logDecision(pi, "redecide", request.id, call, subject.mode, again);
+			return true;
+		};
+		const verdict = await ask(call, decision, ctx, request.id, subject, recheck);
 		return verdict === undefined ? "allow" : "deny";
 	}
 
@@ -1117,14 +1147,15 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			return;
 		}
 		const outcome: ChoiceOutcome =
-			kind === "auto-allow" ? "remote-auto-allow" : kind === "auto-deny" ? "remote-auto-deny" : kind === "parent-gone" ? "parent-gone" : kind === "cancelled" || kind === "dropped" ? "remote-cancelled" : "remote-denied";
+			kind === "auto-allow" ? "remote-auto-allow" : kind === "auto-deny" ? "remote-auto-deny" : kind === "parent-gone" ? "parent-gone" : kind === "asks-off" ? "asks-off" : kind === "cancelled" || kind === "dropped" ? "remote-cancelled" : "remote-denied";
 		const call: ToolCall = { toolName: request.call.toolName, input: request.call.input };
 		logChoice(pi, { toolCallId: request.id, tool: call.toolName, mode, target: targetOf(call), matcher: verdict?.matcher ?? null, options: { primary: [], secondary: [] }, choice: null, outcome, waitMs, via: "background" });
 	}
 
 	/** Parent only: (re)start the server for this session's mailbox; any earlier one is stopped and its pending requests denied. */
 	function startAsks(ctx: ExtensionContext): void {
-		stopAsks();
+		// turning asks off says why to the waiting children; any other restart is the session's end
+		stopAsks(backgroundAsksEnabled(config) ? undefined : "asks-turned-off");
 		if (childMode !== undefined) return;
 		// nobody to answer (pi -p, json mode): write no heartbeat, so children see no listening parent and fall back at launch
 		if (!ctx.hasUI) return;
@@ -1161,9 +1192,12 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		});
 	}
 
-	/** Deny what is pending ("parent-session-ended"), close its dialogs, stop polling. */
-	function stopAsks(): void {
-		askServer?.stop();
+	/**
+	 * Deny what is pending, close its dialogs, stop polling: "parent-session-ended" when the session ends, or
+	 * "asks-turned-off" when background asks are turned off (startAsks passes it on that restart).
+	 */
+	function stopAsks(reason?: "asks-turned-off"): void {
+		askServer?.stop(reason);
 		askServer = undefined;
 		askCtx = undefined;
 	}
@@ -1178,6 +1212,19 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			if (typeof dir !== "string" || !isAbsolute(dir)) continue;
 			const real = readGrantDir(dir, "/");
 			if (real !== undefined) grants.addReadDir(real);
+		}
+		syncGrants();
+	}
+
+	/**
+	 * Add granted git repo roots (deduplicated). Each one is resolved again to its repo root (gitRepoRootOf): "/", the
+	 * home dir and its ancestors, and paths without a .git are dropped, and the realpath is stored.
+	 */
+	function addGitRepos(roots: readonly string[]): void {
+		for (const root of roots) {
+			if (typeof root !== "string" || !isAbsolute(root)) continue;
+			const real = gitRepoRootOf(root);
+			if (real !== undefined) grants.addGitRepo(real);
 		}
 		syncGrants();
 	}
@@ -1292,7 +1339,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 	}
 
 	function refreshStatus(ctx: ExtensionContext): void {
-		ctx.ui.setStatus(STATUS_KEY, formatModeStatus(ctx.ui.theme, currentMode, sessionEdits && currentMode === "default"));
+		ctx.ui.setStatus(STATUS_KEY, config.modeStatus ? formatModeStatus(ctx.ui.theme, currentMode, sessionEdits && currentMode === "default") : undefined);
 	}
 
 	let flashTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1311,13 +1358,13 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 	/**
 	 * The working row reads `<icon> <badge> · Working` in plan and auto mode (default mode keeps
 	 * pi's own text), so the mode is in front of you while a run is active. It stays set between
-	 * runs: pi shows it only while streaming. `modeFlashSecs: 0` turns it off with the flash.
+	 * runs: pi shows it only while streaming. Off by default (`modeWorkingRow`).
 	 */
 	let workingMessageSet = false;
 	function syncWorkingMessage(ctx: ExtensionContext, force = false): void {
 		if (!ctx.hasUI) return;
 		try {
-			if (childMode !== undefined || currentMode === "default" || config.modeFlashSecs <= 0) {
+			if (childMode !== undefined || currentMode === "default" || !config.modeWorkingRow) {
 				// nothing to show: undo only what this function set (or what a dialog overwrote)
 				if (workingMessageSet || force) ctx.ui.setWorkingMessage();
 				workingMessageSet = false;
@@ -1436,7 +1483,9 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		const mode = parseMode(data?.mode);
 		if (mode !== undefined) {
 			currentMode = mode;
-			planFilePath = typeof data?.planFilePath === "string" ? data.planFilePath : undefined;
+			// only a plan file inside the plans dir: anything else would be writable in every mode
+			const restored = typeof data?.planFilePath === "string" ? data.planFilePath : undefined;
+			planFilePath = restored !== undefined && isInsideDir(restored, plansDir()) ? restored : undefined;
 			persistedState = JSON.stringify({ mode: data?.mode, planFilePath });
 		}
 		// A fork-context child copies the parent's state entries: ignore them (never auto, no plan file)
@@ -1523,6 +1572,8 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		if (result.reason === "timeout") return "the parent's user did not answer in time";
 		if (result.reason === "error") return "the parent could not be reached";
 		if (result.reason === "no-ui") return "the parent session has no interactive user";
+		if (result.reason === "asks-turned-off") return "background asks were turned off in the parent session";
+		if (result.reason === "request-size") return "the request is too large to send to the parent";
 		return "the parent session has ended";
 	}
 
@@ -1613,16 +1664,20 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		// must also be representable in the project file (single segment, safe
 		// tokens, nothing a rule may never cover). Offered to children too: like
 		// the prefix project option, it saves to the child's own project.
-		const projectExactCommandsTokens =
-			config.projectExactCommands && notReadOnly && prefixes === undefined && subject.mode === "default" && !hasRemoval(commandOf(call.input))
-				? projectExactCommandsTokensOf(commandOf(call.input), ctx, subject)
-				: undefined;
+		// Gated on exactCommand, like REMEMBER_EXACT. Without a token rule (quoted text, a loop), the exact text itself is saved.
+		// Not for a program-running flag or a write outside the project: the session option only.
+		const projectExactAllowed = config.projectExactCommands && exactCommand && !runsProgramOrWritesOutside(commandOf(call.input), ctx, subject);
+		const projectExactCommandsTokens = projectExactAllowed ? projectExactCommandsTokensOf(commandOf(call.input), ctx, subject) : undefined;
+		const projectExactVerbatim = projectExactAllowed && projectExactCommandsTokens === undefined ? projectVerbatimOf(commandOf(call.input)) : undefined;
+		const projectExactOffered = projectExactCommandsTokens !== undefined || projectExactVerbatim !== undefined;
 		// an outside read: offer to allow the directories (not for "/" or the home dir; those take the all-reads option)
 		const grantDirs = decision.rule?.match === "outsideCwdRead" ? readGrantDirsOf(call, pathContext(ctx, subject)) : undefined;
 		// a curl/wget GET to a host not yet allowed: offer the host (only when that is all the ask is about)
 		const fetchMatch = decision.rule?.match === undefined || decision.rule.match === "unapprovedBash";
 		const grantHosts = call.toolName === "bash" && fetchMatch ? fetchGrantHosts(commandOf(call.input), subject.cwd, subject.scratchDir, pathContext(ctx, subject).fetchHosts) : [];
 		const hostGrant = grantHosts.length > 0 ? grantHosts : undefined;
+		// a cd into another git repository (CD_GIT_REASON): offer its repo roots; only where a plain bash ask or the default fallback reaches
+		const gitRoots = call.toolName === "bash" && (decision.rule === undefined || decision.rule.match === "unapprovedBash") ? gitGrantRoots(commandOf(call.input), subject.cwd, subject.scratchDir, pathContext(ctx, subject).gitRepos) : undefined;
 		const { primary, secondary } = dialogOptions({
 			mode: subject.mode,
 			toolName: call.toolName,
@@ -1630,11 +1685,12 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			sessionLabel,
 			projectLabel,
 			exactCommand,
-			projectExactCommands: projectExactCommandsTokens !== undefined,
+			projectExactCommands: projectExactOffered,
 			readGrantLabel: grantDirs === undefined ? undefined : readGrantLabel(grantDirs),
 			projectReadGrantLabel: grantDirs === undefined || !config.projectReadApprovals ? undefined : projectReadGrantLabel(grantDirs),
 			fetchGrantLabel: hostGrant === undefined ? undefined : fetchGrantLabel(hostGrant),
 			projectFetchGrantLabel: hostGrant === undefined || !config.projectCommandApprovals ? undefined : projectFetchGrantLabel(hostGrant),
+			gitGrantLabel: gitRoots === undefined ? undefined : gitGrantLabel(gitRoots),
 			hasLadder: ladder !== undefined,
 			child: subject.child,
 			// a background child's reply carries no text back, so there is nowhere for feedback to go
@@ -1642,7 +1698,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			sharedEdits: subject.remote !== undefined,
 		});
 
-		const why = notReadOnly ? formatBreakdown(approvalBreakdown(commandOf(call.input), subject.cwd, coverSources(ctx, subject), subject.scratchDir, pathContext(ctx, subject).fetchHosts)) : [];
+		const why = notReadOnly ? formatBreakdown(approvalBreakdown(commandOf(call.input), subject.cwd, coverSources(ctx, subject), subject.scratchDir, pathContext(ctx, subject).fetchHosts, pathContext(ctx, subject).gitRepos)) : [];
 		const hints = [...why, askHint(decision.rule?.match, commandOf(call.input), pathContext(ctx, subject), decision.detail)].filter((line) => line !== undefined);
 		// The command/path is model-controlled: segments are sanitized for the terminal (title.ts)
 		const { label, main, lang } = describeParts(call);
@@ -1665,8 +1721,11 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			}),
 		]);
 		// With a preview the dialog is re-opened for the "More…" list, so the diff or command stays visible
+		// a recheck that answers the dialog is logged as "covered", not as the user's answer
+		let covered = false;
+		const watched = recheck === undefined ? undefined : (): boolean => (covered = recheck());
 		const show = (options: string[], back: boolean): Promise<string | undefined> =>
-			ui.dialog(back ? backTitle() : title, preview, options, back ? "back" : "reject", recheck);
+			ui.dialog(back ? backTitle() : title, preview, options, back ? "back" : "reject", watched);
 		// The relayed dialog rings and sets the parent's working row itself; a background request
 		// rings from the ask server, when it decides to open
 		if (!subject.child && subject.remote === undefined) attention(ctx, "pi: permission needed");
@@ -1688,14 +1747,15 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				// a request that ended some other way (cancelled, session over) is logged by the ask server
 				if (subject.signal?.aborted === true) return;
 				const denied = outcome === "reject" || outcome === "reject-feedback";
-				logChoice(pi, { toolCallId, tool: call.toolName, mode, target, matcher, options: { primary, secondary }, choice: choice ?? null, outcome: denied ? "remote-denied" : "remote-allowed", waitMs: Date.now() - subject.remote.receivedAt, via: "background", ...extra });
+				const remoteOutcome: ChoiceOutcome = outcome === "covered" ? "covered" : denied ? "remote-denied" : "remote-allowed";
+				logChoice(pi, { toolCallId, tool: call.toolName, mode, target, matcher, options: { primary, secondary }, choice: choice ?? null, outcome: remoteOutcome, waitMs: Date.now() - subject.remote.receivedAt, via: "background", ...extra });
 				return;
 			}
 			logChoice(pi, { toolCallId, tool: call.toolName, mode, target, matcher, options: { primary, secondary }, choice: choice ?? null, outcome, waitMs, ...(childMode !== undefined ? { via: "child-relay" as const } : {}), ...extra });
 		};
 
 		if (choice === ALLOW_ONCE) {
-			report("allow-once");
+			report(covered ? "covered" : "allow-once");
 			return undefined;
 		}
 		if ((choice === ALLOW_EDITS || choice === ALLOW_EDITS_SHARED) && primary.includes(choice)) {
@@ -1768,6 +1828,21 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			saveFetchHostsToProject(subject, ui, hostGrant);
 			return undefined;
 		}
+		if (gitRoots !== undefined && choice === gitGrantLabel(gitRoots)) {
+			report("remember-session", { remembered: `git in ${gitRoots.map((r) => sanitizeForTerminal(`${r}/`)).join(", ")}`, scope: "session" });
+			addGitRepos(gitRoots);
+			if (relay?.grantGitRepos !== undefined) {
+				try {
+					relay.grantGitRepos(gitRoots);
+				} catch {
+					// the local grant stands
+				}
+			}
+			ui.notify(`Git allowed in ${gitRoots.map((r) => sanitizeForTerminal(`${r}/`)).join(", ")} for this session. Dangerous git commands still ask.`, "info");
+			// judged again: the rest of the command may still need an answer
+			const again = decide(call, ctx, subject);
+			return again.action === "allow" ? undefined : ask(call, again, ctx, toolCallId, subject, recheck);
+		}
 		if (choice === REJECT_WITH_FEEDBACK) {
 			const feedback = (await ui.input("What should pi do instead? (empty: just say no)"))?.trim();
 			// With feedback the agent continues with it; without, a plain reject
@@ -1785,16 +1860,19 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		}
 		if (choice === exactLabel && exactCommand) {
 			const command = commandOf(call.input);
-			report("remember-session", { remembered: `exact: ${command.length > 80 ? `${command.slice(0, 80)}\u2026` : command}`, scope: "session" });
+			// redacted before it is cut: a cut inside a quoted secret would leave a half that no rule can see
+			const shown = redactCommand(command);
+			report("remember-session", { remembered: `exact: ${shown.length > 80 ? `${shown.slice(0, 80)}\u2026` : shown}`, scope: "session" });
 			if (exactTokens === undefined) rememberVerbatim(command);
 			else rememberForSession([{ tokens: exactTokens, exact: true }]);
 			ui.notify("Allowed for this session: this exact command, character for character. Plan mode still asks; /permissions lists and removes it.", "warning");
 			return undefined;
 		}
-		if (choice === PROJECT_EXACT && projectExactCommandsTokens !== undefined) {
-			const command = commandOf(call.input);
-			report("remember-project", { remembered: `exact: ${command.length > 80 ? `${command.slice(0, 80)}\u2026` : command}`, scope: "project" });
-			saveToProject(subject, ui, [{ tokens: projectExactCommandsTokens, exact: true }]);
+		if (choice === PROJECT_EXACT && projectExactOffered) {
+			const shown = redactCommand(commandOf(call.input));
+			report("remember-project", { remembered: `exact: ${shown.length > 80 ? `${shown.slice(0, 80)}\u2026` : shown}`, scope: "project" });
+			if (projectExactCommandsTokens !== undefined) saveToProject(subject, ui, [{ tokens: projectExactCommandsTokens, exact: true }]);
+			else if (projectExactVerbatim !== undefined) saveVerbatimToProject(subject, ui, projectExactVerbatim);
 			return undefined;
 		}
 		if (choice !== undefined && choice === sessionLabel && prefixes !== undefined) {
@@ -1870,10 +1948,13 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 
 	/** Why a bash call ran without a dialog, from the rule that allowed it: `allowed by project rule: git commit *`. Read-only calls get none. */
 	function allowNote(call: ToolCall, decision: Decision, ctx: ExtensionContext): string | undefined {
-		if (call.toolName === "bash" && decision.rule?.match === "rememberedVerbatim") return "allowed for this session: exact command";
+		if (call.toolName === "bash" && decision.rule?.match === "rememberedVerbatim") {
+			// the session list and the project's BashExact entries share this matcher: say which one
+			return grants.verbatim.includes(verbatimKey(commandOf(call.input))) ? "allowed for this session: exact command" : "allowed by this project's exact-command rule";
+		}
 		if (call.toolName !== "bash" || (decision.rule?.match !== "rememberedBash" && decision.rule?.match !== "projectAllowBash")) return undefined;
 		const sources = coverSources(ctx);
-		const used = coveringPatterns(commandOf(call.input), sources, ctx.cwd, scratchDir, pathContext(ctx).fetchHosts);
+		const used = coveringPatterns(commandOf(call.input), sources, ctx.cwd, scratchDir, pathContext(ctx).fetchHosts, pathContext(ctx).gitRepos);
 		const groups = sources.map((source) => ({ source, list: used.filter((u) => u.label === source.label) })).filter((g) => g.list.length > 0);
 		if (groups.length === 0) return undefined;
 		return sanitizeForTerminal(groups.map((g) => `${g.source.badge}: ${g.list.map((u) => patternString(u.tokens, u.exact)).join(", ")}`).join(" \u00b7 "));
@@ -1891,6 +1972,49 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		if (tokens === undefined || tokens.length === 0) return undefined;
 		const parsed = parseRule(exactRuleFor(tokens), "allow");
 		return "error" in parsed ? undefined : tokens;
+	}
+
+	/**
+	 * A program-running flag (`sed '1e id'`, `git -c`, `find -exec`), or a write
+	 * whose targets don't pass the project check (outside, protected, secret or
+	 * unknown): no project exact rule for it. A write inside the project keeps
+	 * the option (deriveCommandPrefixes is undefined exactly for the failing writes).
+	 */
+	function runsProgramOrWritesOutside(command: string, ctx: ExtensionContext, subject: AskSubject): boolean {
+		const pc = pathContext(ctx, subject);
+		const effects = commandEffects(command, pc.cwd, pc.scratchDir, pc.fetchHosts, pc.gitRepos);
+		if (effects?.includes("exec") === true) return true;
+		return effects?.includes("write") === true && deriveCommandPrefixes(command, pc) === undefined;
+	}
+
+	/** The exact command text for a project `BashExact(...)` rule, when the file can hold it (no control characters); undefined otherwise. */
+	function projectVerbatimOf(command: string): string | undefined {
+		const key = verbatimKey(command);
+		const parsed = parseVerbatim(verbatimRuleFor(key));
+		return parsed === undefined || "error" in parsed ? undefined : key;
+	}
+
+	/**
+	 * Write `BashExact(<command text>)` to the project file and tell the user.
+	 * Like saveToProject: if the file holds unreviewed rules, or the write
+	 * fails, the command applies for the session instead.
+	 */
+	function saveVerbatimToProject(where: { cwd: string }, ui: AskUI, command: string): void {
+		const { loaded } = syncProject(where);
+		try {
+			const saved = saveRules(where.cwd, getAgentDir(), "allow", [verbatimRuleFor(command)], allowActive(loaded) ? loaded.hash : undefined);
+			projectState = undefined;
+			if (saved.trusted) {
+				ui.notify(`Saved to ${RULES_FILE} as this exact text, character for character (default mode only; /permissions lists it)`, "info");
+			} else {
+				// the file held rules nobody reviewed: don't bless them with our write
+				rememberVerbatim(command);
+				ui.notify(`Saved to ${RULES_FILE}, but it holds unreviewed rules, so this exact command applies only for this session`, "warning");
+			}
+		} catch (error) {
+			rememberVerbatim(command);
+			ui.notify(sanitizeForTerminal(`Could not save to ${RULES_FILE}: ${error instanceof Error ? error.message : String(error)}\nAllowed for this session instead.`), "error");
+		}
 	}
 
 	/**
@@ -2402,10 +2526,10 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			const { loaded } = syncProject(ctx);
 			const lines = [`Current mode: ${MODES[currentMode].badge}`];
 			if (loaded.exists) {
-				const { allow, ask, deny, readDirs, fetchHosts } = loaded.rules;
-				const state = allow.length + readDirs.length + fetchHosts.length === 0 ? "" : allowActive(loaded) ? " (loaded)" : ignoredKey === keyOf(loaded) ? " (ignored this session)" : " (awaiting review)";
-				lines.push(`Project rules (${loaded.file}): allow ${allow.length + readDirs.length + fetchHosts.length}${state}, ask ${ask.length}, deny ${deny.length}`);
-				for (const [list, rules] of [["allow", allow], ["ask", ask], ["deny", deny]] as const) {
+				const { allow, ask, deny, readDirs, fetchHosts, allowVerbatim } = loaded.rules;
+				const state = allow.length + readDirs.length + fetchHosts.length + allowVerbatim.length === 0 ? "" : allowActive(loaded) ? " (loaded)" : ignoredKey === keyOf(loaded) ? " (ignored this session)" : " (awaiting review)";
+				lines.push(`Project rules (${loaded.file}): allow ${allow.length + readDirs.length + fetchHosts.length + allowVerbatim.length}${state}, ask ${ask.length}, deny ${deny.length}`);
+				for (const [list, rules] of [["allow", [...allow, ...allowVerbatim]], ["ask", ask], ["deny", deny]] as const) {
 					for (const rule of rules) lines.push(`  ${list}: ${rule.text}`);
 				}
 			}
@@ -2501,6 +2625,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			return items.length > 0 ? items : null;
 		},
 		handler: async (args, ctx) => {
+			ensureUserRuleDir(getAgentDir()); // first use: create the folder and an example rule
 			const book = syncRulebook(ctx);
 			const wanted = args.trim().toLowerCase();
 			const fires = (name: string): string => (firedRules.has(name) ? "1 fire" : "not fired");
@@ -2522,7 +2647,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				return;
 			}
 			if (book.rules.length === 0 && book.problems.length === 0 && book.untrusted.length === 0) {
-				ctx.ui.notify(sanitizeForTerminal(`No rulebook rules. Add a .md file to ${userRuleDir(getAgentDir())} (or .pi/rules in a project):\n\n---\ndescription: One line on what must not happen.\ncondition: (?i)\\bshould work\\b\n---\nDo not say "should work". Run it and quote the result.`), "info");
+				ctx.ui.notify(sanitizeForTerminal(`No rulebook rules. Put one .md file per rule in ${userRuleDir(getAgentDir())}/ (all projects) or <project>/.pi/rules/ (one project):\n\n---\ndescription: One line on what must not happen.\ncondition: (?i)\\bshould work\\b\n---\nDo not say "should work". Run it and quote the result.\n\n"condition" is a JavaScript regex matched against the end of the model's answer; the text below the dashes is the correction the model receives.`), "info");
 				return;
 			}
 			// a TUI gets the coloured view (rules-view.ts); anything else the plain listing
@@ -2596,6 +2721,15 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				},
 			});
 		}
+		for (const repo of [...grants.gitRepos]) {
+			entries.push({
+				label: `[session] git in ${sanitizeForTerminal(repo)}/ allowed`,
+				remove: () => {
+					grants.removeGitRepo(repo);
+					syncGrants();
+				},
+			});
+		}
 		if (grants.outsideReadsAllowed) {
 			entries.push({
 				label: "[session] reads outside the working directory allowed",
@@ -2610,6 +2744,16 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		for (const rule of loaded.rules.fetchHosts) {
 			entries.push({
 				label: `[project allow] ${sanitizeForTerminal(rule.text)} (curl/wget GETs)${state}`,
+				remove: () => {
+					const result = removeRule(ctx.cwd, getAgentDir(), "allow", rule.text, allowActive(loaded) ? loaded.hash : undefined);
+					projectState = undefined;
+					if (!result.removed) ctx.ui.notify(`${rule.text} is no longer in ${RULES_FILE}`, "warning");
+				},
+			});
+		}
+		for (const rule of loaded.rules.allowVerbatim) {
+			entries.push({
+				label: `[project allow] ${sanitizeForTerminal(rule.text)} (exact text)${state}`,
 				remove: () => {
 					const result = removeRule(ctx.cwd, getAgentDir(), "allow", rule.text, allowActive(loaded) ? loaded.hash : undefined);
 					projectState = undefined;
@@ -2745,8 +2889,6 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				readonly kind: "choice";
 				readonly choices: readonly string[];
 				value(): string;
-				/** The panel row's label when it carries more than name() (command colors: the value in effect and its note). */
-				panelLabel?(): string;
 				/** True while the value is the built-in default, so choosing that same value still saves it. */
 				unsaved?(): boolean;
 				set(value: string, ctx: ExtensionContext): string | undefined;
@@ -2781,7 +2923,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 	}
 	function modeFlashNote(): string {
 		const secs = config.modeFlashSecs;
-		return secs <= 0 ? "off" : `${secs} s${secs === DEFAULT_MODE_FLASH_SECS ? " (default)" : ""}`;
+		return secs <= 0 ? "off" : `${secs} s`;
 	}
 
 	/** Whether pi-shell-highlight's highlighter is registered now (read at each use, so a later load counts). */
@@ -2862,7 +3004,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				kind: "toggle",
 				key: "project-exact-commands",
 				value: () => config.projectExactCommands,
-				name: () => 'Offer "always allow in this project" for exact commands',
+				name: () => "Allow exact commands in project",
 				label: () => `Offer "always allow in this project" for exact commands: ${config.projectExactCommands ? "on" : "off"}`,
 				summary: "On: for a command no prefix can safely cover (an interpreter call such as `python3 x.py`), the dialog also offers \"always allow\" for that exact command, in the current project only, saved to .pi/settings.local.json. Off: such a command can be allowed for this session at most.",
 				set(value, ctx) {
@@ -2876,7 +3018,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				kind: "toggle",
 				key: "project-command-approvals",
 				value: () => config.projectCommandApprovals,
-				name: () => 'Offer "always allow in this project" for commands',
+				name: () => "Allow commands in project",
 				label: () => `Offer "always allow in this project" for commands: ${config.projectCommandApprovals ? "on" : "off"}`,
 				summary: "On: the command dialog also offers \"always allow\" for the command's prefix (for example `npm test *`) and for fetch hosts, in the current project only. It is saved to this project's .pi/settings.local.json; other projects still ask. Off: command approvals last for one call or this session.",
 				set(value) {
@@ -2890,7 +3032,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				kind: "toggle",
 				key: "project-read-approvals",
 				value: () => config.projectReadApprovals,
-				name: () => 'Offer "always allow in this project" for outside read directories',
+				name: () => "Allow read dirs in project",
 				label: () => `Offer "always allow in this project" for outside read directories: ${config.projectReadApprovals ? "on" : "off"}`,
 				summary: "Reads inside the current project never ask. On: when the agent reads a directory outside the project, the dialog also offers \"always allow reading from that directory while working in this project\", saved to this project's .pi/settings.local.json; other projects still ask, and secret files still ask. Off: an outside directory can be allowed once or for this session.",
 				set(value) {
@@ -2939,7 +3081,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				kind: "toggle",
 				key: "background-auto-fallback",
 				value: () => config.backgroundAutoFallback,
-				name: () => "Run auto when a background subagent can't ask",
+				name: () => "Auto when background can't ask",
 				label: () => `Run auto when a background subagent can't ask: ${config.backgroundAutoFallback ? "on" : "off"}`,
 				summary: "Only for a background subagent that can't ask you. On: it runs in auto; dangerous commands, secrets and protected paths are still denied. Off: it runs in default, so its asks are denied.",
 				set(value, ctx) {
@@ -2990,9 +3132,8 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				key: "command-colors",
 				choices: PREVIEW_TEXT_COLORS,
 				value: () => effectiveCommandColors(config.commandColors, highlighterLoaded()),
-				panelLabel: () => `Command colors in the dialog: ${commandColorsNote()}`,
 				unsaved: () => config.commandColors === undefined,
-				name: () => "Command colors in the dialog",
+				name: () => "Command colors",
 				label: () => `Command colors in the dialog: ${commandColorsNote()}`,
 				summary: "How the dialog colors long commands. shell-highlight colors command names and heredoc languages; it is the default when pi-shell-highlight is installed (pi install npm:pi-shell-highlight). builtin-syntax: pi's own highlighter. dim, muted, text: plain colors.",
 				set(value) {
@@ -3004,14 +3145,43 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				},
 			},
 			{
+				kind: "toggle",
+				key: "mode-status",
+				value: () => config.modeStatus,
+				name: () => "Mode in the footer",
+				label: () => `Mode in the footer: ${config.modeStatus ? "on" : "off"}`,
+				summary: "Shows the current mode (default, auto, plan) in the footer status line. Off hides it; the mode still applies, and the mode line after a switch and Alt+M work as before.",
+				set(value, ctx) {
+					const problem = saveConfig(getAgentDir(), { modeStatus: value });
+					if (problem !== undefined) return problem;
+					config = { ...config, modeStatus: value };
+					if (ctx.hasUI && childMode === undefined) refreshStatus(ctx); // the footer follows at once
+					return undefined;
+				},
+			},
+			{
+				kind: "toggle",
+				key: "mode-working-row",
+				value: () => config.modeWorkingRow,
+				name: () => "Mode in the working row",
+				label: () => `Mode in the working row: ${config.modeWorkingRow ? "on" : "off"}`,
+				summary: "While the agent works in plan or auto mode, the working row reads \"\u23f5\u23f5 auto \u00b7 Working\" so the mode is in front of you. Off by default: the footer already shows the mode. Default mode keeps pi's own text.",
+				set(value, ctx) {
+					const problem = saveConfig(getAgentDir(), { modeWorkingRow: value });
+					if (problem !== undefined) return problem;
+					config = { ...config, modeWorkingRow: value };
+					syncWorkingMessage(ctx); // the working row follows at once
+					return undefined;
+				},
+			},
+			{
 				kind: "choice",
 				key: "mode-flash",
 				choices: MODE_FLASH_CHOICES,
 				value: () => modeFlashChoice(config.modeFlashSecs),
-				panelLabel: () => `Mode line after a switch: ${modeFlashNote()}`,
 				name: () => "Mode line after a switch",
 				label: () => `Mode line after a switch: ${modeFlashNote()}`,
-				summary: "Shows the mode, in its color: above the prompt for this long after a switch while idle (1s, 2s default, 3s or 5s), and in the working row in plan and auto mode while a run is active. off hides both. For another length between 0.1 and 10 seconds, set modeFlashSecs in the file.",
+				summary: "Shows the mode, in its color: above the prompt for this long after a switch while idle (1s, 2s, 3s or 5s). For another length between 0.1 and 10 seconds, set modeFlashSecs in the file.",
 				set(value, ctx) {
 					const secs = value === "off" ? 0 : Number.parseFloat(value);
 					const problem = saveConfig(getAgentDir(), { modeFlashSecs: secs });
@@ -3029,37 +3199,48 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 	 * exactly one section, in the order listed here; the headless listing and the
 	 * completions stay flat (and keep the array's order).
 	 */
-	function flowSections(): { id: string; label: string; keys: readonly string[] }[] {
+	function flowSections(): { id: string; label: string; groups: { label: string; keys: readonly string[] }[] }[] {
 		return [
-			{ id: "permissions", label: "Saving approvals to this project", keys: ["project-command-approvals", "project-read-approvals", "project-exact-commands"] },
+			{
+				id: "settings",
+				label: "Settings",
+				groups: [
+					{ label: "Project approvals", keys: ["project-command-approvals", "project-read-approvals", "project-exact-commands"] },
+					{ label: "Dialog & mode line", keys: ["command-colors", "mode-flash", "mode-status", "mode-working-row"] },
+				],
+			},
 			{
 				id: "subagents",
 				label: "Subagents",
-				keys: ["subagents-follow-auto", "background-asks", "background-auto-fallback", "subagent-thinking", "background-ask-popup", "background-ask-timeout"],
+				groups: [{ label: "", keys: ["subagents-follow-auto", "background-asks", "background-auto-fallback", "subagent-thinking", "background-ask-popup", "background-ask-timeout"] }],
 			},
-			{ id: "dialog", label: "Dialog", keys: ["command-colors", "mode-flash"] },
 		];
 	}
 
 	/** The panel's sections, with each row's current value and help text. */
-	function flowPanelSections(): { id: string; label: string; items: PanelItem[] }[] {
+	function flowPanelSections(): PanelSection[] {
 		const settings = flowSettings();
-		return flowSections().map((section) => ({
-			id: section.id,
-			label: section.label,
-			items: section.keys.flatMap((key): PanelItem[] => {
+		const rows = (keys: readonly string[]): PanelItem[] =>
+			keys.flatMap((key): PanelItem[] => {
 				const setting = settings.find((s) => s.key === key);
 				if (setting === undefined) return [];
 				const values = setting.kind === "toggle" ? ["on", "off"] : setting.kind === "choice" ? [...setting.choices] : undefined;
 				return [
 					{
 						id: setting.key,
-						label: setting.kind === "choice" && setting.panelLabel !== undefined ? setting.panelLabel() : setting.name(),
-						description: setting.summary,
+						label: setting.name(),
+						// the colors row carries a note about the value in effect; the value column has room for the name only
+						description: setting.key === "command-colors" ? `${setting.summary} Now: ${commandColorsNote()}.` : setting.summary,
 						...(values === undefined ? { placeholder: `e.g. ${(setting as { presets: readonly string[] }).presets.slice(0, 3).join(", ")}` } : { values }),
 					},
 				];
-			}),
+			});
+		return flowSections().map((section) => ({
+			id: section.id,
+			label: section.label,
+			items: section.groups.flatMap((group) => rows(group.keys)),
+			// a single unnamed group needs no heading
+			...(section.groups.length > 1 || section.groups.some((g) => g.label !== "") ? { groups: section.groups.map((g) => ({ label: g.label, items: rows(g.keys) })) } : {}),
 		}));
 	}
 
@@ -3378,7 +3559,12 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		rulebookReviewKey = undefined;
 		rulebookIgnoredKey = undefined;
 		rulebookWarnedKey = undefined;
+		rulebookApproved.clear();
+		ignoredKey = undefined;
+		approvedKey = undefined;
+		warnedKey = undefined;
 		if (childMode === undefined) {
+			ensureUserRuleDir(getAgentDir()); // an updated install gets the rules folder and the example too
 			// session grants end with the session. The guard is defensive: a child's grants come
 			// from the parent through the relay, and a child holds none of its own to clear
 			grants.reset();

@@ -36,7 +36,10 @@ const VERSION = 1;
 /** A snapshot larger than this is not a snapshot we wrote. */
 const MAX_BYTES = 256 * 1024;
 
-interface Snapshot extends UiRelaySessionRules {
+/** The session-scope rules a child reads (the relay's, which carry the optional gitRepos). */
+export type SessionGitRules = UiRelaySessionRules;
+
+interface Snapshot extends SessionGitRules {
 	version: number;
 	sessionId: string;
 	/** The parent pi process; a snapshot whose process is gone is stale. */
@@ -52,7 +55,7 @@ export function grantsFile(agentDir: string, sessionId: string): string {
 }
 
 /** Parent: write (or replace) this session's snapshot. Atomic, 0600. */
-export function publishGrants(agentDir: string, sessionId: string, rules: UiRelaySessionRules): void {
+export function publishGrants(agentDir: string, sessionId: string, rules: SessionGitRules): void {
 	try {
 		mkdirSync(grantsDir(agentDir), { recursive: true, mode: 0o700 });
 		const file = grantsFile(agentDir, sessionId);
@@ -66,6 +69,7 @@ export function publishGrants(agentDir: string, sessionId: string, rules: UiRela
 			outsideReads: rules.outsideReads,
 			outsideReadDirs: rules.outsideReadDirs ?? [],
 			fetchHosts: rules.fetchHosts ?? [],
+			gitRepos: rules.gitRepos ?? [],
 			...(rules.cwd !== undefined ? { cwd: rules.cwd } : {}),
 			...(rules.thinking !== undefined ? { thinking: rules.thinking } : {}),
 		};
@@ -116,6 +120,7 @@ function parse(file: string): Snapshot | undefined {
 		if (typeof value.edits !== "boolean" || typeof value.outsideReads !== "boolean") return undefined;
 		if (!strings(value.outsideReadDirs)) return undefined;
 		if (value.fetchHosts !== undefined && !strings(value.fetchHosts)) return undefined;
+		if (value.gitRepos !== undefined && !strings(value.gitRepos)) return undefined;
 		if (value.cwd !== undefined && (typeof value.cwd !== "string" || !value.cwd.startsWith("/"))) return undefined;
 		if (value.thinking !== undefined && typeof value.thinking !== "string") return undefined;
 		return value as Snapshot;
@@ -128,7 +133,7 @@ function parse(file: string): Snapshot | undefined {
  * Child: the parent session's grants, or undefined (no parent session in the
  * env, no file, a foreign or malformed file, or a parent process that is gone).
  */
-export function readParentGrants(agentDir: string, env: NodeJS.ProcessEnv = process.env): UiRelaySessionRules | undefined {
+export function readParentGrants(agentDir: string, env: NodeJS.ProcessEnv = process.env): SessionGitRules | undefined {
 	const sessionId = env[PARENT_SESSION_ENV];
 	if (typeof sessionId !== "string" || sessionId === "") return undefined;
 	const snapshot = parse(grantsFile(agentDir, sessionId));
@@ -140,6 +145,7 @@ export function readParentGrants(agentDir: string, env: NodeJS.ProcessEnv = proc
 		outsideReads: snapshot.outsideReads,
 		outsideReadDirs: snapshot.outsideReadDirs,
 		fetchHosts: snapshot.fetchHosts ?? [],
+		gitRepos: snapshot.gitRepos ?? [],
 		...(snapshot.cwd !== undefined ? { cwd: snapshot.cwd } : {}),
 		...(snapshot.thinking !== undefined ? { thinking: snapshot.thinking } : {}),
 	};

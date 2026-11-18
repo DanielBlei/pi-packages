@@ -5,7 +5,7 @@
  * Run: npm test
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
@@ -361,6 +361,25 @@ describe("the ask server", () => {
 		assert.deepEqual([replyOf(a)?.decision, replyOf(a)?.reason], ["deny", "timeout"]);
 		poll();
 		assert.deepEqual([replyOf(a)?.decision, replyOf(a)?.reason], ["deny", "timeout"], "still there on the next poll");
+	});
+
+	it("stop removes the replies and claimed requests it left for children that are gone", () => {
+		const answered = file();
+		verdicts.set(answered.id, allow);
+		poll();
+		assert.equal(replyOf(answered)?.decision, "allow");
+		alive = false; // the child died after its request was answered; nothing will read the reply
+		server.stop();
+		assert.deepEqual(readdirSync(join(dir, "replies")), []);
+		assert.deepEqual(readdirSync(join(dir, "requests")), []);
+	});
+
+	it("stop keeps the reply of a child still running, which reads it and removes its own files", () => {
+		const answered = file();
+		verdicts.set(answered.id, allow);
+		poll();
+		server.stop();
+		assert.equal(replyOf(answered)?.decision, "allow");
 	});
 
 	it("stop denies everything pending with parent-session-ended, closes the dialog, clears the badge and stops the timer", async () => {

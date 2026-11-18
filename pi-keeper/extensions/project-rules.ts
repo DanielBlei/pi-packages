@@ -16,9 +16,9 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
-import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import { homedir } from "node:os";
-import { canonicalize, commandUnits, isRememberableExact, isRememberablePrefix } from "./utils.ts";
+import { canonicalize, commandUnits, hasRemoval, isPrivilegedCommand, isRememberableExact, isRememberablePrefix } from "./utils.ts";
 import { countWork } from "./perf.ts";
 
 export const NAMESPACE = "pi-keeper";
@@ -51,6 +51,14 @@ export interface ParsedFetchHost {
 	host: string;
 }
 
+/** `BashExact(<command text>)` in the allow list: that whole command, character for character, runs without asking. */
+export interface ParsedVerbatim {
+	/** The entry as written, trimmed. */
+	text: string;
+	/** The command text (trimmed), compared as verbatimKey (rules.ts). */
+	command: string;
+}
+
 export interface ParsedRules {
 	allow: ParsedRule[];
 	ask: ParsedRule[];
@@ -59,6 +67,8 @@ export interface ParsedRules {
 	readDirs: ParsedReadDir[];
 	/** Allow-list `Fetch(<host>)` entries. */
 	fetchHosts: ParsedFetchHost[];
+	/** Allow-list `BashExact(<command text>)` entries. */
+	allowVerbatim: ParsedVerbatim[];
 	/** Malformed entries and structure problems, one line each. */
 	warnings: string[];
 }
@@ -66,7 +76,8 @@ export interface ParsedRules {
 /** Rules in effect for decisions (see rules.ts). */
 export interface ProjectPermissions {
 	/** Trusted allow rules only: prefixes plus exact commands. */
-	allow: { prefixes: string[][]; exact: string[][] };
+	/** `verbatim`: trusted BashExact command texts (absent in hand-built permissions: read as none). */
+	allow: { prefixes: string[][]; exact: string[][]; verbatim?: string[] };
 	ask: ParsedRule[];
 	deny: ParsedRule[];
 	/** Trusted `Read(<dir>/**)` directories (outside reads that run without asking; secrets still ask). */
@@ -77,7 +88,7 @@ export interface ProjectPermissions {
 	broken?: string;
 }
 
-export const NO_PROJECT_RULES: ProjectPermissions = { allow: { prefixes: [], exact: [] }, ask: [], deny: [], readDirs: [], fetchHosts: [] };
+export const NO_PROJECT_RULES: ProjectPermissions = { allow: { prefixes: [], exact: [], verbatim: [] }, ask: [], deny: [], readDirs: [], fetchHosts: [] };
 
 /**
  * Parse a `Read(<dir>/**)` entry: undefined when it isn't one, an error when
@@ -131,6 +142,27 @@ export function fetchRuleFor(host: string): string {
 	return `Fetch(${host})`;
 }
 
+/**
+ * Parse a `BashExact(<command text>)` entry: undefined when it isn't one, an
+ * error when the body is empty or holds a control character other than tab
+ * and newline. The body runs to the last `)`, so it may contain parentheses.
+ */
+export function parseVerbatim(entry: string): ParsedVerbatim | { error: string } | undefined {
+	const m = /^BashExact\(([\s\S]*)\)$/.exec(entry.trim());
+	if (m === null) return undefined;
+	const command = m[1].trim();
+	if (command === "") return { error: "names no command" };
+	if (/[\x00-\x08\x0b-\x1f\x7f-\x9f]/.test(command)) return { error: "contains control characters" };
+	// the same limits as an exact token rule: nothing that removes or escalates, anywhere in the text
+	if (hasRemoval(command) || isPrivilegedCommand(command)) return { error: "can't be allowed (removal or privilege command)" };
+	return { text: entry.trim(), command };
+}
+
+/** The allow entry for one exact command text (the text is trimmed, as verbatimKey does). */
+export function verbatimRuleFor(command: string): string {
+	return `BashExact(${command.trim()})`;
+}
+
 // ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
@@ -139,7 +171,8 @@ export function fetchRuleFor(host: string): string {
 export function parseRule(entry: string, list: RuleList): ParsedRule | { error: string } {
 	const m = /^Bash\(([\s\S]*)\)$/.exec(entry.trim());
 	if (m === null) return { error: "not of the form Bash(<command>) or Bash(<command> *)" };
-	let body = m[1].trim();
+	// Claude Code's `Bash(rm:*)` is the same prefix rule as `Bash(rm *)`
+	let body = m[1].trim().replace(/:\*$/, " *");
 	let exact = true;
 	if (body.endsWith(" *")) {
 		exact = false;
@@ -169,7 +202,7 @@ export function parsePattern(text: string, list: RuleList): ParsedRule | { error
 
 /** Parse the file's JSON. Malformed entries are skipped and reported. */
 export function parseRules(json: unknown): ParsedRules {
-	const out: ParsedRules = { allow: [], ask: [], deny: [], readDirs: [], fetchHosts: [], warnings: [] };
+	const out: ParsedRules = { allow: [], ask: [], deny: [], readDirs: [], fetchHosts: [], allowVerbatim: [], warnings: [] };
 	const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 	if (!isObject(json)) return out;
 	const ns = json[NAMESPACE];
@@ -202,6 +235,13 @@ export function parseRules(json: unknown): ParsedRules {
 				else out.fetchHosts.push(fetchHost);
 				continue;
 			}
+			const verbatim = typeof entry === "string" ? parseVerbatim(entry) : undefined;
+			if (verbatim !== undefined) {
+				if (list !== "allow") out.warnings.push(`${list}: ignored \`${label}\` (BashExact(...) entries belong in allow)`);
+				else if ("error" in verbatim) out.warnings.push(`${list}: ignored \`${label}\` (${verbatim.error})`);
+				else out.allowVerbatim.push(verbatim);
+				continue;
+			}
 			const parsed = typeof entry === "string" ? parseRule(entry, list) : { error: "not a string" };
 			if ("error" in parsed) out.warnings.push(`${list}: ignored \`${label}\` (${parsed.error})`);
 			else out[list].push(parsed);
@@ -222,8 +262,10 @@ export function parseRules(json: unknown): ParsedRules {
  */
 function unitMatches(rule: ParsedRule, unit: readonly string[]): boolean {
 	const [root, ...wanted] = rule.tokens;
-	if (rule.exact) return unit.length === rule.tokens.length && unit.every((t, k) => t === rule.tokens[k]);
-	if (unit[0] !== root) return false;
+	// a bare name in the rule also matches the command named by path (`/usr/bin/make`, `./make`)
+	const named = (t: string): boolean => t === root || (!root.includes("/") && basename(t) === root);
+	if (rule.exact) return unit.length === rule.tokens.length && unit.every((t, k) => (k === 0 ? named(t) : t === rule.tokens[k]));
+	if (!named(unit[0])) return false;
 	let u = 1;
 	for (const token of wanted) {
 		while (u < unit.length && unit[u] !== token && (unit[u].startsWith("-") || unit[u - 1].startsWith("-"))) u++;
@@ -244,7 +286,7 @@ export function findMatchingRule(rules: readonly ParsedRule[], command: string):
 export function compilePermissions(rules: ParsedRules, allowActive: boolean, broken?: string): ProjectPermissions {
 	const allow = allowActive ? rules.allow : [];
 	return {
-		allow: { prefixes: allow.filter((r) => !r.exact).map((r) => r.tokens), exact: allow.filter((r) => r.exact).map((r) => r.tokens) },
+		allow: { prefixes: allow.filter((r) => !r.exact).map((r) => r.tokens), exact: allow.filter((r) => r.exact).map((r) => r.tokens), verbatim: allowActive ? rules.allowVerbatim.map((r) => r.command) : [] },
 		ask: rules.ask,
 		deny: rules.deny,
 		readDirs: allowActive ? rules.readDirs.map((r) => r.dir) : [],
@@ -271,6 +313,11 @@ export function findProjectRoot(cwd: string): string {
 
 export function rulesPath(cwd: string): string {
 	return join(findProjectRoot(cwd), RULES_FILE);
+}
+
+/** True when `path` lies strictly inside `dir` (both resolved; a path prefix alone is not enough). */
+export function isInsideDir(path: string, dir: string): boolean {
+	return resolve(path).startsWith(`${resolve(dir)}${sep}`);
 }
 
 export function sha256(text: string): string {
@@ -303,8 +350,30 @@ function readTrustStore(agentDir: string): Record<string, string> {
 	}
 }
 
-/** Record `hash` as reviewed for `file`. */
+/** Throws when the trust store exists but is not a JSON object: recording over it would drop every other approval. */
+function assertTrustStoreUsable(agentDir: string): void {
+	const path = trustStorePath(agentDir);
+	let text: string;
+	try {
+		text = readFileSync(path, "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw new Error(`${path} cannot be read; fix or delete it`);
+	}
+	// an empty file holds no approval to lose
+	if (text.trim() === "") return;
+	let data: unknown;
+	try {
+		data = JSON.parse(text);
+	} catch {
+		data = undefined;
+	}
+	if (typeof data !== "object" || data === null || Array.isArray(data)) throw new Error(`${path} is not valid JSON; fix or delete it`);
+}
+
+/** Record `hash` as reviewed for `file`. Throws (and writes nothing) when the trust store is malformed. */
 export function recordTrust(agentDir: string, file: string, hash: string): void {
+	assertTrustStoreUsable(agentDir);
 	const store = readTrustStore(agentDir);
 	store[resolve(file)] = hash;
 	atomicWrite(trustStorePath(agentDir), `${JSON.stringify(store, null, 2)}\n`);
@@ -351,7 +420,7 @@ export interface LoadedRules {
 	broken?: string;
 }
 
-const NO_RULES: ParsedRules = { allow: [], ask: [], deny: [], readDirs: [], fetchHosts: [], warnings: [] };
+const NO_RULES: ParsedRules = { allow: [], ask: [], deny: [], readDirs: [], fetchHosts: [], allowVerbatim: [], warnings: [] };
 
 /** Read, parse and trust-check the project's rules file. Never throws. */
 export function loadProjectRules(cwd: string, agentDir: string): LoadedRules {
@@ -436,7 +505,7 @@ export function saveRules(cwd: string, agentDir: string, list: RuleList, entries
 	const root = findProjectRoot(cwd);
 	const file = join(root, RULES_FILE);
 	for (const entry of entries) {
-		const special = list === "allow" ? (parseReadDir(entry) ?? parseFetchHost(entry)) : undefined;
+		const special = list === "allow" ? (parseReadDir(entry) ?? parseFetchHost(entry) ?? parseVerbatim(entry)) : undefined;
 		const parsed = special ?? parseRule(entry, list);
 		if ("error" in parsed) throw new Error(`${entry}: ${parsed.error}`);
 	}

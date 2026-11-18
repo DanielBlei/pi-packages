@@ -13,9 +13,10 @@
  */
 
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, truncateToWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
+import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 import { withDialogLock } from "./dialog-lock.ts";
 import type { RulebookRule } from "./rulebook.ts";
+import { sanitizeForTerminal } from "./preview.ts";
 
 /** The part of pi's theme this view uses; a fake object is enough to test it. */
 export interface RulesTheme {
@@ -53,6 +54,24 @@ const SEP = " · ";
 const fireText = (fired: boolean): string => (fired ? "1 fire" : "not fired");
 const baseName = (file: string): string => file.split("/").pop() ?? file;
 
+/**
+ * Wrap one logical line to `width`. pi-tui throws when a rendered line is wider
+ * than the terminal, and a rule's description, regex, file path or problem text
+ * is user-written and can be any length; nothing here may emit a long line.
+ * Continuation lines get `indent`. A single token longer than the width (a regex
+ * has no spaces) is broken by the wrapper; the final clamp is a safety net.
+ */
+export function wrapLine(text: string, width: number, indent = ""): string[] {
+	const room = Math.max(1, width - visibleWidth(indent));
+	const parts = wrapTextWithAnsi(text, Math.max(1, width));
+	const lines: string[] = [];
+	for (const [index, part] of parts.entries()) {
+		if (index === 0) lines.push(part);
+		else lines.push(...wrapTextWithAnsi(part, room).map((piece) => `${indent}${piece}`));
+	}
+	return (lines.length === 0 ? [""] : lines).map((line) => (visibleWidth(line) > width ? truncateToWidth(line, width) : line));
+}
+
 /** The coloured list, one line per row. `selected` is skipped when it points at a non-rule row. */
 export function renderRulesList(theme: RulesTheme, rows: readonly RulesRow[], selected: number, width: number): string[] {
 	const sep = theme.fg("dim", SEP);
@@ -60,34 +79,34 @@ export function renderRulesList(theme: RulesTheme, rows: readonly RulesRow[], se
 	for (const [index, row] of rows.entries()) {
 		const cursor = index === selected ? theme.fg("accent", "> ") : "  ";
 		if (row.kind === "untrusted") {
-			out.push(truncateToWidth(`${cursor}${theme.fg("warning", baseName(row.file))}${sep}${theme.fg("warning", "needs review")}${sep}${theme.fg("text", "a project rule file; asked on the next prompt")}`, width));
+			out.push(...wrapLine(`${cursor}${theme.fg("warning", baseName(sanitizeForTerminal(row.file)))}${sep}${theme.fg("warning", "needs review")}${sep}${theme.fg("text", "a project rule file; asked on the next prompt")}`, width, "    "));
 			continue;
 		}
 		if (row.kind === "problem") {
-			out.push(truncateToWidth(`${cursor}${theme.fg("error", baseName(row.file))}${sep}${theme.fg("error", "skipped")}${sep}${theme.fg("text", row.problem)}`, width));
+			out.push(...wrapLine(`${cursor}${theme.fg("error", baseName(sanitizeForTerminal(row.file)))}${sep}${theme.fg("error", "skipped")}${sep}${theme.fg("text", sanitizeForTerminal(row.problem))}`, width, "    "));
 			continue;
 		}
-		const name = theme.bold(theme.fg(index === selected ? "accent" : "mdLink", row.rule.name));
+		const name = theme.bold(theme.fg(index === selected ? "accent" : "mdLink", sanitizeForTerminal(row.rule.name)));
 		const source = row.rule.kind === "user" ? theme.fg("success", "user") : theme.fg("warning", "project");
 		const fires = row.fired ? theme.fg("success", fireText(true)) : theme.fg("muted", fireText(false));
-		out.push(truncateToWidth(`${cursor}${name}${sep}${source}${sep}${fires}${sep}${theme.fg("text", row.rule.description)}`, width));
+		out.push(...wrapLine(`${cursor}${name}${sep}${source}${sep}${fires}${sep}${theme.fg("text", sanitizeForTerminal(row.rule.description))}`, width, "    "));
 	}
 	return out;
 }
 
 /** One rule in full: where it lives, what makes it fire, and what it says. */
 export function renderRuleDetail(theme: RulesTheme, rule: RulebookRule, fired: boolean, width: number): string[] {
-	const lines = [
-		`${theme.bold(theme.fg("accent", rule.name))}${theme.fg("dim", SEP)}${rule.kind === "user" ? theme.fg("success", "user") : theme.fg("warning", "project")}${theme.fg("dim", SEP)}${fired ? theme.fg("success", fireText(true)) : theme.fg("muted", fireText(false))}`,
-		theme.fg("text", rule.description),
+	const lines: string[] = [
+		...wrapLine(`${theme.bold(theme.fg("accent", sanitizeForTerminal(rule.name)))}${theme.fg("dim", SEP)}${rule.kind === "user" ? theme.fg("success", "user") : theme.fg("warning", "project")}${theme.fg("dim", SEP)}${fired ? theme.fg("success", fireText(true)) : theme.fg("muted", fireText(false))}`, width),
+		...wrapLine(theme.fg("text", sanitizeForTerminal(rule.description)), width),
 		"",
-		theme.fg("dim", "condition "),
-		theme.fg("mdCode", rule.condition),
-		theme.fg("dim", "file      "),
-		theme.fg("dim", rule.file),
+		...wrapLine(theme.fg("dim", "condition"), width),
+		...wrapLine(theme.fg("mdCode", sanitizeForTerminal(rule.condition)), width, "  "),
+		...wrapLine(theme.fg("dim", "file"), width),
+		...wrapLine(theme.fg("dim", sanitizeForTerminal(rule.file)), width, "  "),
 		"",
 	];
-	for (const line of rule.body.split("\n")) lines.push(...(line === "" ? [""] : wrapTextWithAnsi(theme.fg("text", line), width)));
+	for (const line of sanitizeForTerminal(rule.body).split("\n")) lines.push(...(line === "" ? [""] : wrapLine(theme.fg("text", line), width)));
 	return lines;
 }
 
@@ -95,12 +114,12 @@ export function renderRuleDetail(theme: RulesTheme, rule: RulebookRule, fired: b
 function listScreen(theme: RulesTheme, rows: readonly RulesRow[], selected: number, width: number): string[] {
 	const header = `${theme.bold(theme.fg("text", "Rulebook rules"))}${theme.fg("dim", " · behaviour rules that fire on the model's answer; permission rules are /permissions")}`;
 	const body = rows.length === 0
-		? [theme.fg("text", "No rulebook rules yet."), theme.fg("dim", "Add a .md file to ~/.pi/agent/pi-keeper/rules (user) or .pi/rules (project).")]
+		? [theme.fg("text", "No rulebook rules yet."), theme.fg("dim", "Put one .md file per rule in ~/.pi/agent/pi-keeper/rules/ (all projects) or <project>/.pi/rules/ (one project).")]
 		: renderRulesList(theme, rows, selected, width);
 	const footer = rows.length === 0
 		? theme.fg("dim", "  Esc close")
 		: theme.fg("dim", "  ↑↓ select · Enter shows the rule · Esc close");
-	return [truncateToWidth(header, width), "", ...body, "", footer];
+	return [...wrapLine(header, width), "", ...body.flatMap((line) => wrapLine(line, width, "  ")), "", ...wrapLine(footer, width)];
 }
 
 /** The plain-text form for a session without a TUI: same facts, no colours. */
@@ -137,7 +156,7 @@ export async function rulesPanel(ctx: ExtensionContext, input: RulesViewInput): 
 			render(width: number): string[] {
 				if (detail !== undefined) {
 					const fired = input.fired.has(detail.name);
-					return [...renderRuleDetail(theme, detail, fired, width), "", theme.fg("dim", "  Esc back · Esc again closes")];
+					return [...renderRuleDetail(theme, detail, fired, width), "", ...wrapLine(theme.fg("dim", "  Esc back · Esc again closes"), width)];
 				}
 				return listScreen(theme, rows, selected, width);
 			},

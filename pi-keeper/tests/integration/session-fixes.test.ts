@@ -223,6 +223,27 @@ describe("a subagent child's own output artifact", () => {
 		const secret = await child.tool("write", { path: join(artifact, "..", "id_rsa"), content: "x" });
 		assert.equal(secret.blocked, true);
 	});
+
+	it("a report named .env in the child's output dir is not a report: it asks in default and auto, and is denied in plan", async () => {
+		const secretReport = join(artifact, "..", ".env");
+		mkdirSync(join(artifact, ".."), { recursive: true });
+		// the parent session is where an ask opens a dialog (a relay-less mock child never prompts)
+		for (const mode of ["default", "auto"] as const) {
+			const parent = await startPi({ sandbox: sb });
+			await parent.session();
+			await parent.command("mode", mode);
+			parent.answer(PERMISSION, "No");
+			const outcome = await parent.tool("write", { path: secretReport, content: "KEY=x\n" });
+			assert.equal(outcome.blocked, true, mode);
+			assert.equal(parent.dialogs.length, 1, `${mode}: one ask`);
+			parent.assertNoPendingAnswers();
+		}
+		const plan = await startPi({ sandbox: sb, entry: "child-plan" });
+		await plan.session();
+		const denied = await plan.tool("write", { path: secretReport, content: "KEY=x\n" });
+		assert.equal(denied.blocked, true, "plan: denied");
+		assert.equal(plan.dialogs.length, 0, "plan: denied without a dialog");
+	});
 });
 
 describe("a mode note belongs to the session that switched", () => {

@@ -71,11 +71,13 @@ async function rawPreviewFor(call: ToolCall, cwd: string): Promise<Preview | und
  * Make model-controlled text safe to print inside the dialog: C0/C1
  * control characters (ESC, CR, backspace, ...) become visible symbols, so
  * escape sequences can't move the cursor, erase lines or draw fake
- * options; bidi overrides (Trojan Source) become U+FFFD. Newlines and
- * tabs are kept.
+ * options; bidi overrides (Trojan Source) and invisible format characters
+ * (zero-width space and joiners, line/paragraph separators, word joiner,
+ * BOM) become U+FFFD, so they show as a marker instead of hiding text.
+ * Newlines and tabs are kept.
  */
 export function sanitizeForTerminal(text: string): string {
-	return text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f؜‎‏‪-‮⁦-⁩]/g, (ch) => {
+	return text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f؜‎‏‪-‮⁦-⁩\u200b-\u200d\u2028\u2029\u2060\ufeff]/g, (ch) => {
 		const code = ch.charCodeAt(0);
 		if (code < 0x20) return String.fromCharCode(0x2400 + code); // ␛, ␍, ...
 		if (code === 0x7f) return "␡"; // ␡

@@ -58,6 +58,10 @@ resume.
   `~/.aws`, ...). So do a recursive or hidden-file search over a tree that
   holds one (`grep -r KEY .`, `rg --hidden KEY`), even when a rule covers
   the command, and an upload of one (`curl -d @.env URL`), even in auto.
+  So do `grep -f.env`, `git show HEAD:.env`, a file list piped to a reader
+  (`ls | xargs cat`, `find … -exec cat {} +`), a glob under `~` or outside the
+  project, and a dump of the environment (`printenv`, `env`, `/proc/*/environ`).
+  Exclude filters (`--exclude=.env`, `rg -g '!.env'`) do not ask.
   `echo` and `printf` of a credential-named variable (`$GITHUB_TOKEN`,
   `${AWS_SECRET_ACCESS_KEY}`, `$DB_PASSWORD`) ask too, in every mode; other
   variables such as `$HOME` or `$GIT_AUTHOR_NAME` run, and a single-quoted
@@ -101,7 +105,11 @@ command, so *Yes, and always allow `cd` in this project* saves a `Bash(cd *)`
 rule that covers it from then on. What runs after the `cd` is still judged:
 a command running in a directory outside the working directory reads there
 whatever it names, so `cd ../other && cat notes.md` keeps asking (unless that
-directory is granted). `cd ..` alone is covered the same way.
+directory is granted). `cd ..` alone is covered the same way. A `~` in a path
+follows the shell: `~` and `~<your name>` are home, `~+` is the working
+directory, and `~user/…` or `~-` are outside the project. After a `cd` into
+another git repository, the dialog offers *Yes, and allow git in `<repo>/` this
+session* instead (see [the dialogs](#the-dialogs)).
 
 ### Fetching from the web
 
@@ -111,13 +119,10 @@ allow fetching from `<host>` in this project*, saved as `Fetch(<host>)` to
 `.pi/settings.local.json`. Once a host is allowed, a GET to it whose response
 is printed, not saved, counts as a read and runs without a dialog in every
 mode, subagents included. No host is allowed by default, GitHub included.
-Answering *always allow fetching from `github.com`* once saves the rule. You
-can also edit `.pi/settings.local.json` by hand and list the hosts you use
-under `allow`, for example `"Fetch(github.com)"`, `"Fetch(api.github.com)"`,
-`"Fetch(raw.githubusercontent.com)"` (also `codeload.github.com`,
-`objects.githubusercontent.com`, `gist.github.com`,
-`gist.githubusercontent.com`). `WebFetch(domain:<host>)`, the spelling Claude Code's
-settings use, is accepted as the same rule, in `allow` lists only (anywhere else
+You can also list hosts by hand under `allow` in `.pi/settings.local.json`, for
+example `"Fetch(github.com)"`, `"Fetch(api.github.com)"`,
+`"Fetch(raw.githubusercontent.com)"`. `WebFetch(domain:<host>)`, the spelling
+Claude Code's settings use, is the same rule, in `allow` lists only (elsewhere
 it is ignored with a warning). pi asks you to review a hand-edited file the
 next time it loads, and the rules apply once you accept. Subagents share the
 session grant with their parent both ways and read the project rule like any
@@ -151,16 +156,22 @@ or one saved to a file. Only hosts you allow qualify, never "any host".
      offered for a command that removes things (`rm`, `git rm`, `docker rmi`,
      …, alone or in a chain): those stay a per-call decision.
    - **Yes, and always allow this exact command in this project:** the
-     same commands as the option above, when the `project-exact-commands` setting is
-     on ([/keeper](#keeper)). Saves the exact rule
+     same commands as the option above, when the `project-exact-commands`
+     setting is on (the default; [/keeper](#keeper)). Saves the exact rule
      (`Bash(python3 x.py)`) to `.pi/settings.local.json`; default mode
      only, trusted on the next start, listed and removable via
-     `/permissions`. Not offered when the rule can't be written (a quoted
-     argument such as `awk '{print $1}'`), or for removals — those keep the
-     session option only.
+     `/permissions`. When no token rule can hold the command (`awk '{print $1}'`,
+     a `for` loop), it saves `BashExact(<the command>)` instead. Not offered for
+     removals, a flag that runs a program (`sed '1e id'`, `git -c`,
+     `find -exec`) or a write outside the project: those keep the session
+     option only.
    - **Yes, allow all edits this session** (edit dialogs): footer shows
      `● default · edits`; protected paths, outside paths and secrets still
      ask. Resets on `/new`, `/resume` and exit.
+   - **Yes, and allow git in `<repo>/` this session:** offered after a `cd`
+     into another git repository, where git would read that repository's
+     config and hooks. Session only, shared with subagents, listed and
+     removable in `/permissions`. Dangerous git commands still ask.
    - **No:** the agent stops and waits for you.
    - **More…:** *No, and tell pi what to do instead* (it continues with
      your message, e.g. "use pnpm"), *Allow a different command pattern…*
@@ -175,11 +186,15 @@ How rules match:
   `git push`. The prefix depth is per tool (`gh pr create`, `docker compose
   up`, `npm run build`).
 - **rtk is transparent:** `git add` and `rtk git add` are the same rule.
+- **Shell keywords are never a prefix:** `for`, `do`, `if`, `while` and the
+  other reserved words are never remembered, so a loop gets the exact-command
+  options instead. `time` and `!` before a command are stripped, like `nice`.
 - **Writes stay in the project:** a rule for a command that writes files
   (`sed -i`, `cp`, `mkdir`, `tee`, `tar -czf`, `curl -o`, `zip`, `rsync`,
   ...) covers it only while every target is inside the project (or the
   scratch dir), and not in `.git/`, `.pi/` or a secret file. The label says
-  *(inside the project only)*.
+  *(inside the project only)*. A redirection (`>`, `>>`) to a literal path is a
+  write target too (`echo x > ~/notes.txt`).
 
 ### The dialogs
 
@@ -197,9 +212,9 @@ Representative cases (the exact option lists are pinned by
   More…. Commands no prefix can cover (interpreters, anything with a
   program-running flag or an outside write target) offer *this exact command
   this session* instead (Yes · exact · No · More…), plus *always allow this
-  exact command in this project* when the `project-exact-commands` setting is on;
-  dangerous commands show
-  just Yes · No · More…. Plan mode offers the session option only.
+  exact command in this project* when the `project-exact-commands` setting is on
+  (the default). Dangerous commands show just Yes · No · No, and tell pi what to
+  do instead. Plan mode offers the session option only.
 - **Edits:** Yes · Yes, allow all edits this session · No · More…. Edits to
   protected paths, outside paths and secrets offer only Yes · No · No, and
   tell pi.
@@ -250,7 +265,12 @@ desktop notification with a fixed label, never the command). Set
   An entry without a trailing ` *` is an exact rule (`Bash(npm test)`): it
   covers only that command, token for token — and, unlike a prefix, it may
   name an interpreter or script runner (`Bash(python3 x.py)`, `Bash(npm run
-  build)`); removals and privilege commands are still rejected. `ask` forces
+  build)`); removals and privilege commands are still rejected.
+  `BashExact(<command text>)` is an exact rule for one whole command, matched
+  character for character; the exact-command option writes it when no token
+  rule can hold the command (default mode, `allow` only). `/permissions` lists
+  it as *(exact text)*. `Bash(git add:*)` reads as `Bash(git add *)` in every
+  list. `ask` forces
   a dialog in every mode, auto included. `deny` blocks in every
   mode and tells the model which rule. If the file cannot be read or is not valid JSON, every shell command asks until you fix it. `ask` and `deny` always load; `allow`
   rules that pi-keeper didn't write (a cloned repo, a hand or model
@@ -286,7 +306,11 @@ result, or say plainly that you did not run them.
 Where rules live:
 
 - `<agent dir>/pi-keeper/rules/*.md` — yours, loaded as written
-  (usually `~/.pi/agent/pi-keeper/rules/`).
+  (usually `~/.pi/agent/pi-keeper/rules/`). Session start and `/rules` create
+  the folder and, once, if it has no rule file, `example-rule.md` to copy from.
+  It never fires, and a `.example-seeded` marker stops it coming back after you
+  delete it. `/new-rule <what must not happen>` (add "project" for a project
+  rule) has the model write a rule file and test its regex.
 - `<project>/.pi/rules/*.md` — the project's. It can change how the model
   behaves, so it loads only after a one-time review with a trust hash, like a
   project `allow` rule; a changed file is reviewed again. A user rule with the
@@ -311,8 +335,10 @@ Commands and failure modes (`/rules` in the theme's colors, one rule on Enter):
   file, body), Esc goes back, Esc again closes. Without a TUI (print, RPC) it
   notifies the same facts as text; `/rules <name>` prints one rule in any mode.
   Permission rules are `/permissions`.
-- A `condition` that does not compile is skipped with one warning at session
-  start; the other rules and the session carry on.
+- A file that cannot become a rule is skipped with one warning at session
+  start; the other rules carry on. Skipped: no frontmatter (the file must start
+  with `---`), no `description:` or `condition:`, a `condition` that does not
+  compile or matches ordinary text, and an empty body. `/rules` shows the reason.
 - Nothing fires while a turn is aborted, and an empty answer matches nothing.
 - What it costs: zero tokens on a run where no rule matches. On a fire, one
   hidden message and one extra request (only when the turn made no tool call).
@@ -364,10 +390,12 @@ unavailable while planning.
 3. It writes the plan to one file per session,
    `~/.pi/agent/plans/<project>-<date>-<time>-<rand>.md` (`- [ ]` steps),
    and calls `exit_plan_mode`; the terminal rings. The plan opens with a
-   **`## Plain-language explanation`** — the goal, what exists now, the
-   changes, the main risk and what needs your approval, in short sentences
-   in the style of ASD-STE100 Simplified Technical English (one instruction each) — and
-   the technical sections follow.
+   **`## Plain-language explanation`** comes first: the goal, what exists
+   now, the changes, the main risk and the checks, in short sentences in the
+   style of ASD-STE100 Simplified Technical English. Then come `## Context and
+   boundary`, `## Current state and reuse`, `## Ordered implementation steps`
+   (one `- [ ]` per concern, naming the files), `## Verification` and `## Out of
+   scope`.
    The plan appears in the
    transcript as formatted Markdown, with a selector docked under it. It is
    part of the conversation, so scrollback and search work, and a resumed
@@ -409,10 +437,13 @@ unavailable while planning.
 Re-entering plan mode in the same session reuses the plan file (the model is
 told to read it first and refine or overwrite it). Leaving by hand with
 `/mode` or a shortcut tells the model where the plan file is. The plan
-prompt (`prompts/plan-mode.md`) enforces understand → design → review →
-final plan, points the model at the read-only `scout` subagent, and asks for
-the sections Context, approach, critical files, steps, commands,
-verification, out of scope.
+prompt (`prompts/plan-mode.md`) has four steps: understand (read the code,
+reuse what exists; read-only `scout` subagents for wide exploration; the
+`questionnaire` tool only when the answer changes the design), design (one
+approach), write the plan file once the task is clear, then call
+`exit_plan_mode` and end the turn. A question gets a text answer and no plan.
+The plan sections are listed above; the `commands` list on `exit_plan_mode` is
+optional.
 
 ## Auto mode
 
@@ -445,11 +476,13 @@ session rules, limited to the run, with the same limits as a project rule
 (never dangerous or program-running commands). Prompt commands (`/commit`)
 and skill commands (`/skill:commit`) both work: the `Bash(...)` entries of
 the file's `allowed-tools` frontmatter become grants; other entries are
-ignored, and the `Bash(git add:*)` spelling Claude Code uses reads the same. The
-package registers no prompt templates (`pi.prompts` is `[]`; the files in
-`prompts/` are pi-keeper's own mode text); a skill such as the
-`commit` one carries its grants in its own frontmatter. `/permissions`
-lists the grants and removes single ones.
+ignored, and the `Bash(git add:*)` spelling Claude Code uses reads the same. A
+skill such as the `commit` one carries its grants in its own frontmatter.
+`/permissions` lists the grants and removes single ones.
+
+The package ships one prompt template, `/new-rule <what must not happen>
+[project]` (`prompt-templates/new-rule.md`); see [the rulebook](#the-rulebook-rules-that-fire-only-when-the-model-slips).
+The files in `prompts/` are pi-keeper's own mode text, not commands.
 
 ## Subagents (pi-subagents)
 
@@ -495,6 +528,14 @@ because the rules would judge them as something they are not:
   would otherwise pass as a delete inside the project.
 - a `commands` or `output` value this package cannot read. Unreadable is never
   treated as "nothing to check".
+
+A single-child `subagent` call is judged the same way: its `gate`,
+`acceptance` (the `verify` commands, also as a JSON string) and `output`. A
+relative `output` lands in the run's artifacts directory and is not judged; an
+absolute one is judged as a write; one with `..` asks; with `artifacts: false`
+it is judged relative to the cwd. A value this check cannot read asks. A
+`schedule.create` that stores a workflow asks, because its runs start later with
+no tool call to judge.
 
 Limits:
 
@@ -602,8 +643,7 @@ cannot be dropped. `subagent({ action: "validate", options: { script } })` check
 the source without launching anything. For independent work prefer several
 plain `subagent({ agent, task, async: true })` calls — no script at all.
 
-The parent lane hint says the same in the mode message while the `subagent` tool
-is active, and any skill that fans out this way should use this form.
+The mode message carries the same hint while the `subagent` tool is active.
 
 ### Background subagents
 
@@ -641,8 +681,7 @@ grants, and either settles it silently or shows the usual dialog.
   - *The parent is gone*: you ran `/new`, `/resume`, quit pi or pressed
     Ctrl-C. Pending asks are denied and their dialogs closed. Your session
     also publishes a heartbeat while it listens, so a child that finds none
-    (an older version, background asks off, no UI, a crashed parent) denies at once
-    instead of waiting out the timeout.
+    (background asks off, no UI, a crashed parent) denies at once.
   - *No UI*: a parent running without a UI (`pi -p`, RPC) writes no heartbeat,
     so its background children find nobody listening and fall back when they
     start (default mode, or auto with `background-auto-fallback`). Only a parent that
@@ -650,6 +689,10 @@ grants, and either settles it silently or shows the usual dialog.
     the call is denied.
   - A request the parent has held for the child's timeout plus a minute (at least 15 minutes) is dropped, and at most 100
     asks are held at once; more are denied.
+  - *Asks turned off*: you turned background asks off in `/keeper` while the
+    request was pending. Denied at once.
+  - *Request too large*: it does not fit the mailbox's size limit. Denied at
+    once, not after the timeout.
 - **Mode follows the parent.** With asks reaching you, a background child of
   an auto parent (with *Subagents follow auto mode* on) runs in auto, like a foreground
   child, and a default parent's child runs in default. `background-auto-fallback`
@@ -670,16 +713,14 @@ grants, and either settles it silently or shows the usual dialog.
   `PI_KEEPER_BACKGROUND_ASKS=0`, set for the parent or the child, is a
   kill switch that overrides it.
 
-Limits: a reply takes up to about half a second to
-arrive (polling); a parent blocked for more than 15 seconds without
-returning to its event loop looks gone to its children; and a child's lane
-text is fixed when it starts, so it keeps describing the setup it started
-with.
+Limits: a reply takes up to about half a second (polling); a parent blocked
+for more than 15 seconds looks gone to its children; a child's lane text is
+fixed when it starts.
 
 ### `/keeper`
 
 `/keeper` is this package's settings command. In a TUI it opens one
-panel, in sections (`Saving approvals to this project / Subagents / Dialog`) that `Tab` and
+panel, in sections (`Settings / Subagents`) that `Tab` and
 `Shift+Tab` switch between, with every setting as a row: the label on the left,
 the current value in an aligned column on the right, and the selected row's
 help text below. `Enter` or `Space` flips a toggle or cycles a choice; on the
@@ -695,10 +736,11 @@ start (a change made in `/keeper` also applies to the running session). A
 settings file that is not valid JSON is never overwritten: a `/keeper` change
 shows an error and saves nothing until you fix or remove the file.
 
-The sections are: **Saving approvals to this project** (`project-command-approvals`, `project-read-approvals`,
-`project-exact-commands`), **Subagents** (`subagents-follow-auto`, `background-asks`,
-`background-auto-fallback`, `subagent-thinking`, `background-ask-popup`,
-`background-ask-timeout`) and **Dialog** (`command-colors`, `mode-flash`). `readOnlyTools`
+The tabs are: **Settings**, with two headings — *Project approvals*
+(`project-command-approvals`, `project-read-approvals`, `project-exact-commands`) and
+*Dialog & mode line* (`command-colors`, `mode-flash`, `mode-status`, `mode-working-row`) — and
+**Subagents** (`subagents-follow-auto`, `background-asks`, `background-auto-fallback`,
+`subagent-thinking`, `background-ask-popup`, `background-ask-timeout`). `readOnlyTools`
 and `modeInstructions` take lists and long strings, so you edit them in the file by hand.
 
 - **Subagents follow auto mode** (`subagents-follow-auto`, default **off**): when on,
@@ -734,7 +776,8 @@ and `modeInstructions` take lists and long strings, so you edit them in the file
 - **Background subagents can ask you** (`background-asks`, default **on**):
   a background child's gated calls open a dialog in your session instead of
   being denied. Off, such calls are denied and `background-auto-fallback` decides the
-  child's mode. Applies to the next launched child.
+  child's mode. Turning it off also denies the asks already pending. Applies to the
+  next launched child.
 - **When background asks pop up** (`background-ask-popup`: `always`, `idle` or
   `badge`, default **always**): when a background child's ask opens its dialog
   in your session. `always` opens as soon as no other dialog is open; `idle`
@@ -796,12 +839,17 @@ and `modeInstructions` take lists and long strings, so you edit them in the file
   kept). Install it with `pi install npm:pi-shell-highlight`. A diff
   preview keeps its added/removed colors either way. Applies to the next dialog.
 
-- **Mode line after a switch** (`mode-flash`, file key `modeFlashSecs`, default **2**): after a
+- **Mode line after a switch** (`mode-flash`, file key `modeFlashSecs`, default **off**): after a
   switch while idle, the mode (`⏸ plan`, `⏵⏵ auto`, `● default`) shows in its color above the
-  prompt for this long. While a run is active, the working row reads `⏵⏵ auto · Working` in plan
-  and auto mode. The panel offers `off`, `1s`, `2s`, `3s` and `5s`; in the file `0` is off and any
-  value from 0.1 to 10 works; `off` hides both. Nothing shows on session restore or in a subagent
-  child. pi-cc-extensions rewrites the working row, so with it loaded only the flash shows.
+  prompt for this long. The panel offers `off`, `1s`, `2s`, `3s` and `5s`; in the file `0` is off and any
+  value from 0.1 to 10 works. Nothing shows on session restore or in a subagent child.
+
+- **Mode in the working row** (`mode-working-row`, file key `modeWorkingRow`, default **off**): while a
+  run is active in plan or auto mode, the working row reads `⏵⏵ auto · Working`. Default mode keeps
+  pi's own text. pi-cc-extensions rewrites the working row, so with it loaded this has no effect.
+
+- **Mode in the footer** (`mode-status`, file key `modeStatus`, default **on**): the mode in the
+  footer status line. Turn it off to hide it; the mode still applies.
 
 Session grants (remembered commands, read directories, "all edits") stay in
 memory for the session and are never written to the project; foreground
@@ -856,16 +904,19 @@ allow/ask/deny entries, read directories, session grants).
 | Project rules | `.pi/settings.local.json` (trust hashes in `<agent dir>/pi-keeper/trusted-rules.json`) | until you remove them |
 | Rulebook rules | `<agent dir>/pi-keeper/rules/*.md` (yours) and `<project>/.pi/rules/*.md` (reviewed once, hashes in the same trust store) | until you edit or delete them; read again every turn |
 | Rulebook rules fired this session | `pi-keeper-rule-fired` entries in the session | per branch; a resume keeps them fired |
-| Pending background asks, and the "listening" heartbeat | `<agent dir>/pi-keeper/asks/<hash of the session id>/` (mode `0700`) | until answered; denied and removed when the session ends or after the timeout plus a minute (at least 15 minutes) |
+| Pending background asks, and the "listening" heartbeat | `<agent dir>/pi-keeper/asks/<hash of the session id>/` (mode `0700`) | until answered; denied and removed when the session ends (files of gone children too) or after the timeout plus a minute (at least 15 minutes) |
 | Workflow-command grants | memory | one run |
 | Plans | `~/.pi/agent/plans/` | kept |
 | Scratch dir | `<tmp>/pi-keeper-XXXXXX`, mode `0700` | per session, never deleted (clean `<tmp>/pi-keeper-*` yourself) |
-| Settings (`readOnlyTools`, `subagentsFollowAuto`, `projectExactCommands`, `backgroundAutoFallback`, `backgroundAsks`, `projectCommandApprovals`, `projectReadApprovals`, `backgroundAskTimeoutMs`, `backgroundAskPopup`, `modeInstructions`, `modeFlashSecs`, `commandColors`, `ccExtensionsPrompt`) | `~/.pi/agent/pi-keeper.json` (`/keeper` writes all of them but `readOnlyTools`, `modeInstructions` and `ccExtensionsPrompt`: you edit the first two by hand, and the pi-cc-extensions dialog writes the last one) | until you edit it; re-read at session start (the two background-ask settings from `/keeper` also apply live) |
+| Settings (`readOnlyTools`, `subagentsFollowAuto`, `projectExactCommands`, `backgroundAutoFallback`, `backgroundAsks`, `projectCommandApprovals`, `projectReadApprovals`, `backgroundAskTimeoutMs`, `backgroundAskPopup`, `modeInstructions`, `modeFlashSecs`, `commandColors`, `subagentThinking`, `modeStatus`, `modeWorkingRow`, `ccExtensionsPrompt`) | `~/.pi/agent/pi-keeper.json` (`/keeper` writes all of them but `readOnlyTools`, `modeInstructions` and `ccExtensionsPrompt`: you edit the first two by hand, and the pi-cc-extensions dialog writes the last one) | until you edit it; re-read at session start (the two background-ask settings from `/keeper` also apply live) |
 | Exact commands approved for the session | memory | until a new session starts (`/new`, `/resume`, fork) or exit |
 
 The session log's command text (`pi-keeper-permission` entries) redacts secrets:
-`Authorization:` and `Bearer` values, credential-like `--token`/`--password`
-options and credential-like `NAME=value` assignments are written as `***`.
+`Authorization:` and `Bearer` values, `-u user:pass` and URL passwords,
+credential-like headers (`X-Api-Key`, `Cookie`), `-p` passwords (`mysql -psecret`,
+`sshpass -p`), `redis-cli -a`, credential-like `--token`/`--password` options and
+`NAME=value` assignments are written as `***`. Secret-named keys in the input of
+other tools are redacted the same way.
 
 `/new` starts in `default`. Every mode declares the same tools (the mode only
 decides what is allowed, asked or denied), so a switch changes no tool list and

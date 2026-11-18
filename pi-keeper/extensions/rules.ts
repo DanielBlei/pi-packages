@@ -8,6 +8,7 @@
  * rule matches, the mode's fallback applies.
  */
 
+import { isAbsolute, join } from "node:path";
 import {
 	bashWritesInsideArtifactDirs,
 	isCoveredByPrefixes,
@@ -172,16 +173,16 @@ function matches(matcher: Matcher, call: ToolCall, ctx: EvalContext): boolean {
 	switch (matcher) {
 		// Read-only analysis is bash syntax: powershell never matches it (fail closed)
 		case "readOnlyBash":
-			return call.toolName === "bash" && isReadOnlyCommand(commandOf(call.input), ctx.cwd, ctx.scratchDir, ctx.fetchHosts);
+			return call.toolName === "bash" && isReadOnlyCommand(commandOf(call.input), ctx.cwd, ctx.scratchDir, ctx.fetchHosts, ctx.gitRepos);
 		// Not read-only and not covered by "Yes, and always allow" prefixes. Excluding
 		// remembered commands here keeps a rememberedBash allow from being
 		// outranked by this ask (strictest wins).
 		case "unapprovedBash": {
 			const command = commandOf(call.input);
-			return call.toolName === "bash" && !isReadOnlyCommand(command, ctx.cwd, ctx.scratchDir, ctx.fetchHosts) && !isCoveredByPrefixes(command, ctx.remembered, ctx.cwd, ctx.rememberedExact ?? [], ctx.scratchDir, ctx.fetchHosts);
+			return call.toolName === "bash" && !isReadOnlyCommand(command, ctx.cwd, ctx.scratchDir, ctx.fetchHosts, ctx.gitRepos) && !isCoveredByPrefixes(command, ctx.remembered, ctx.cwd, ctx.rememberedExact ?? [], ctx.scratchDir, ctx.fetchHosts, ctx.gitRepos);
 		}
 		case "rememberedBash":
-			return call.toolName === "bash" && isCoveredByPrefixes(commandOf(call.input), ctx.remembered, ctx.cwd, ctx.rememberedExact ?? [], ctx.scratchDir, ctx.fetchHosts);
+			return call.toolName === "bash" && isCoveredByPrefixes(commandOf(call.input), ctx.remembered, ctx.cwd, ctx.rememberedExact ?? [], ctx.scratchDir, ctx.fetchHosts, ctx.gitRepos);
 		// The whole command, character for character, was approved for the session (default mode only lists this matcher)
 		case "rememberedVerbatim":
 			return call.toolName === "bash" && ctx.rememberedVerbatim?.includes(verbatimKey(commandOf(call.input))) === true;
@@ -193,7 +194,7 @@ function matches(matcher: Matcher, call: ToolCall, ctx: EvalContext): boolean {
 			const prefixes = [...(allow?.prefixes ?? []), ...(grants?.prefixes ?? [])];
 			const exact = [...(allow?.exact ?? []), ...(grants?.exact ?? [])];
 			if (call.toolName !== "bash" || (prefixes.length === 0 && exact.length === 0)) return false;
-			return isCoveredByPrefixes(commandOf(call.input), [...ctx.remembered, ...prefixes], ctx.cwd, [...(ctx.rememberedExact ?? []), ...exact], ctx.scratchDir, ctx.fetchHosts);
+			return isCoveredByPrefixes(commandOf(call.input), [...ctx.remembered, ...prefixes], ctx.cwd, [...(ctx.rememberedExact ?? []), ...exact], ctx.scratchDir, ctx.fetchHosts, ctx.gitRepos);
 		}
 		// A tool that declares itself read-only and not destructive (MCP hints), or that the user listed in pi-keeper.json
 		case "readOnlyTool": {
@@ -314,10 +315,11 @@ export function evaluate(mode: ModeRules, globalRules: readonly Rule[], call: To
 }
 
 /**
- * The calls a `subagent_launch` call will make on this machine after its child
- * stops: one `bash` call per entry of `commands` (the child's `gate` and
- * `acceptance.verify` commands), and one `write` call for `output` (the file the
- * child's result is written to). Empty for every other tool.
+ * The calls a `subagent_launch` call, a single-child `subagent` call, or a
+ * `schedule.create` call (its gate and output, when given) will make
+ * on this machine after its child stops: one `bash` call per entry of `commands`
+ * (the child's `gate` and `acceptance.verify` commands), and one `write` call for
+ * `output` (the file the child's result is written to). Empty for every other tool.
  *
  * The gate judges each with the mode's own rules, so pi-keeper's bash and write
  * rules cover what the parent runs on the child's behalf. A command runs in the
@@ -325,6 +327,7 @@ export function evaluate(mode: ModeRules, globalRules: readonly Rule[], call: To
  * working directory, which is the child's unless the call says otherwise.
  */
 export function launchNestedCalls(call: ToolCall): ToolCall[] {
+	if (call.toolName === "subagent") return singleLaunchNested(call);
 	if (call.toolName !== SUBAGENT_LAUNCH_TOOL) return [];
 	const input = call.input as { commands?: unknown; output?: unknown } | undefined;
 	const nested: ToolCall[] = [];
@@ -350,28 +353,192 @@ export function launchNestedCalls(call: ToolCall): ToolCall[] {
  * - a `commands`, `cwd`, `env` or `output` value of a shape this check cannot
  *   read: unreadable is never "nothing to check".
  *
- * Empty for every tool but `subagent_launch`.
+ * A single-child `subagent` call carries the same things in its `gate`,
+ * `acceptance` and `output` fields (singleLaunch reads them), so it gets the same
+ * lines. Empty for every other tool.
  */
 export function launchNestedHazards(call: ToolCall, ctx: PathContext): string[] {
+	if (call.toolName === "subagent") return singleLaunchHazards(call, ctx);
 	if (call.toolName !== SUBAGENT_LAUNCH_TOOL) return [];
 	const input = call.input as { commands?: unknown; output?: unknown } | undefined;
 	const hazards: string[] = [];
 	const commands = input?.commands;
 	if (commands !== undefined && !Array.isArray(commands)) hazards.push("commands: a list this check cannot read");
-	for (const entry of Array.isArray(commands) ? commands : []) {
-		const item = entry as { command?: unknown; cwd?: unknown; env?: unknown } | null | undefined;
-		if (typeof item !== "object" || item === null || typeof item.command !== "string") {
-			hazards.push("bash: a command this check cannot read");
-			continue;
-		}
-		const shown = item.command.length > 120 ? `${item.command.slice(0, 120)}…` : item.command;
-		const names = typeof item.env === "object" && item.env !== null && !Array.isArray(item.env) ? Object.keys(item.env) : item.env === undefined ? [] : ["?"];
-		if (names.length > 0) hazards.push(`bash: ${shown} (sets ${names.slice(0, 3).join(", ")}${names.length > 3 ? ", …" : ""} in its environment)`);
-		if (item.cwd !== undefined && (typeof item.cwd !== "string" || isOutsideCwd(item.cwd, ctx))) {
-			hazards.push(`bash: ${shown} (runs in ${typeof item.cwd === "string" ? item.cwd : "a directory this check cannot read"}, outside this project)`);
+	for (const entry of Array.isArray(commands) ? commands : []) hazards.push(...commandHazards(entry, ctx));
+	if (input?.output !== undefined && typeof input.output !== "string") hazards.push("write: an output path this check cannot read");
+	return hazards;
+}
+
+/** The hazard lines of one `{command, cwd?, env?}` entry of a launch (`commands`, `acceptance.verify`, or a gate). */
+function commandHazards(entry: unknown, ctx: PathContext): string[] {
+	const item = entry as { command?: unknown; cwd?: unknown; env?: unknown } | null | undefined;
+	if (typeof item !== "object" || item === null || typeof item.command !== "string") return ["bash: a command this check cannot read"];
+	const hazards: string[] = [];
+	const shown = item.command.length > 120 ? `${item.command.slice(0, 120)}…` : item.command;
+	const names = typeof item.env === "object" && item.env !== null && !Array.isArray(item.env) ? Object.keys(item.env) : item.env === undefined ? [] : ["?"];
+	if (names.length > 0) hazards.push(`bash: ${shown} (sets ${names.slice(0, 3).join(", ")}${names.length > 3 ? ", …" : ""} in its environment)`);
+	if (item.cwd !== undefined && (typeof item.cwd !== "string" || isOutsideCwd(item.cwd, ctx))) {
+		hazards.push(`bash: ${shown} (runs in ${typeof item.cwd === "string" ? item.cwd : "a directory this check cannot read"}, outside this project)`);
+	}
+	return hazards;
+}
+
+/** A field as pi-subagents reads it: the string "null" is dropped (flattenSubagentToolOptions). */
+function given(value: unknown): boolean {
+	return value !== undefined && value !== "null";
+}
+
+/** What a single-child launch makes the host run and write, and what this check cannot read. */
+interface SingleLaunch {
+	/** `{command, cwd?, env?}` entries (gate, acceptance.verify), not yet checked for shape. */
+	commands: unknown[];
+	/** Paths of nested `write` calls (the child's `output`). */
+	writes: string[];
+	/** Lines for values this check cannot read. */
+	hazards: string[];
+}
+
+/** Fields that make a `subagent` call a workflow or multi-child launch: judged per child as `subagent_launch`, not here. */
+const MULTI_CHILD_FIELDS = ["workflow", "workflowScript", "script", "tasks", "chain", "parallel"];
+
+/**
+ * A single-child `subagent` launch (`agent` as a string, no workflow, script or
+ * multi-child field, no management `action`), read from the top level and from
+ * `options` (both may be set). Undefined for any other call.
+ */
+function singleLaunch(call: ToolCall): SingleLaunch | undefined {
+	if (call.toolName !== "subagent") return undefined;
+	const { top, options } = subagentFields(call.input);
+	if (given(top.action) || !given(top.agent) || typeof top.agent !== "string") return undefined;
+	for (const source of [top, options]) {
+		for (const key of MULTI_CHILD_FIELDS) {
+			if (given(source[key]) && !(key === "workflow" && source[key] === "false")) return undefined;
 		}
 	}
-	if (input?.output !== undefined && typeof input.output !== "string") hazards.push("write: an output path this check cannot read");
+	return readLaunch(top, options);
+}
+
+/** The top level and `options` of a `subagent` call; a value that is not a plain object is read as empty (pi-subagents refuses that call). */
+function subagentFields(input: unknown): { top: Record<string, unknown>; options: Record<string, unknown> } {
+	const top = (typeof input === "object" && input !== null ? input : {}) as Record<string, unknown>;
+	const options = (typeof top.options === "object" && top.options !== null && !Array.isArray(top.options) ? top.options : {}) as Record<string, unknown>;
+	return { top, options };
+}
+
+/** The action that stores a workflow script to run later, with no tool call behind its children. */
+const SCHEDULE_ACTION = "schedule.create";
+
+/**
+ * A `schedule.create` call: its gate, acceptance and output fields are judged as a
+ * single launch. The workflow it stores runs later with no tool call behind it
+ * (approveWorkflowChildLaunch returns without judging), and its children launch
+ * from the script, which this check cannot read: so the creation itself asks.
+ */
+function scheduleLaunch(call: ToolCall): SingleLaunch | undefined {
+	if (call.toolName !== "subagent") return undefined;
+	const { top, options } = subagentFields(call.input);
+	if (!given(top.action) || typeof top.action !== "string" || top.action.trim() !== SCHEDULE_ACTION) return undefined;
+	const launch = readLaunch(top, options);
+	if (given(top.options) && (typeof top.options !== "object" || top.options === null || Array.isArray(top.options))) {
+		launch.hazards.push("schedule: launch parameters this check cannot read");
+	}
+	if ([top, options].some((source) => ["workflow", "workflowScript", "script"].some((key) => given(source[key]) && source[key] !== "false"))) {
+		launch.hazards.push("schedule: a workflow script that runs later, with no tool call behind its children, so their gates are not judged");
+	}
+	return launch;
+}
+
+/** The launch a `subagent` call makes after its child stops, or a schedule it stores. */
+function launchOf(call: ToolCall): SingleLaunch | undefined {
+	return singleLaunch(call) ?? scheduleLaunch(call);
+}
+
+/** Judge the gate, acceptance and output fields, from the top level and from `options` (both may be set). */
+function readLaunch(top: Record<string, unknown>, options: Record<string, unknown>): SingleLaunch {
+	const sources = [top, options];
+	const cwd = given(top.cwd) ? top.cwd : undefined;
+	const artifactsOff = sources.some((source) => source.artifacts === false || source.artifacts === "false");
+	const launch: SingleLaunch = { commands: [], writes: [], hazards: [] };
+	for (const source of sources) {
+		launch.commands.push(...gateEntries(source.gate, cwd, launch.hazards));
+		launch.commands.push(...acceptanceEntries(source.acceptance, cwd, launch.hazards));
+		const output = singleOutput(source.output, cwd, artifactsOff);
+		if (output.write !== undefined) launch.writes.push(output.write);
+		if (output.hazard !== undefined) launch.hazards.push(output.hazard);
+	}
+	return launch;
+}
+
+/** The entry a gate runs as: a string, or an object with a string `command`; it runs in the call's cwd. */
+function gateEntries(gate: unknown, cwd: unknown, hazards: string[]): unknown[] {
+	if (!given(gate)) return [];
+	if (typeof gate === "string") return [{ command: gate, cwd }];
+	if (typeof gate === "object" && gate !== null && typeof (gate as { command?: unknown }).command === "string") return [{ cwd, ...gate }];
+	hazards.push("gate: a value this check cannot read");
+	return [];
+}
+
+/** The `verify` entries of an acceptance object or JSON string; a policy name carries none. */
+function acceptanceEntries(acceptance: unknown, cwd: unknown, hazards: string[]): unknown[] {
+	if (!given(acceptance) || typeof acceptance === "boolean") return [];
+	let spec: unknown = acceptance;
+	if (typeof acceptance === "string") {
+		if (acceptance.trim().startsWith("[")) {
+			hazards.push("acceptance: a value this check cannot read");
+			return [];
+		}
+		if (!acceptance.trim().startsWith("{")) return [];
+		try {
+			spec = JSON.parse(acceptance);
+		} catch {
+			hazards.push("acceptance: JSON this check cannot read");
+			return [];
+		}
+	}
+	if (typeof spec !== "object" || spec === null || Array.isArray(spec)) {
+		hazards.push("acceptance: a value this check cannot read");
+		return [];
+	}
+	const verify = (spec as { verify?: unknown }).verify;
+	if (verify === undefined) return [];
+	if (!Array.isArray(verify)) {
+		hazards.push("acceptance: a verify list this check cannot read");
+		return [];
+	}
+	return verify.map((entry) => (typeof entry === "object" && entry !== null && !Array.isArray(entry) ? { cwd, ...entry } : entry));
+}
+
+/**
+ * What a launch's `output` makes the host write: an absolute path, or (with
+ * `artifacts: false`) a relative path under the call's cwd. A relative path
+ * otherwise lands in the run's artifacts directory, unless it climbs out of it.
+ */
+function singleOutput(output: unknown, cwd: unknown, artifactsOff: boolean): { write?: string; hazard?: string } {
+	if (output === undefined || typeof output === "boolean" || output === "true" || output === "false" || output === "null" || output === "") return {};
+	if (typeof output !== "string") return { hazard: "write: an output path this check cannot read" };
+	if (isAbsolute(output)) return { write: output };
+	if (artifactsOff) return { write: join(typeof cwd === "string" ? cwd : ".", output) };
+	if (output.split(/[\\/]/).includes("..")) return { hazard: `write: output path ${output} leaves the run's directory` };
+	return {};
+}
+
+function singleLaunchNested(call: ToolCall): ToolCall[] {
+	const launch = launchOf(call);
+	if (launch === undefined) return [];
+	const nested: ToolCall[] = [];
+	for (const entry of launch.commands) {
+		const command = (entry as { command?: unknown } | null)?.command;
+		if (typeof command === "string" && command.trim() !== "") nested.push({ toolName: "bash", input: { command } });
+	}
+	for (const path of launch.writes) nested.push({ toolName: "write", input: { path } });
+	return nested;
+}
+
+function singleLaunchHazards(call: ToolCall, ctx: PathContext): string[] {
+	const launch = launchOf(call);
+	if (launch === undefined) return [];
+	const hazards = [...launch.hazards];
+	for (const entry of launch.commands) hazards.push(...commandHazards(entry, ctx));
 	return hazards;
 }
 
@@ -395,14 +562,14 @@ const MAX_EXPLAINED_PATTERNS = 40;
  * sources' patterns that still covers it (earlier sources are kept over later
  * ones). Empty when the command is not covered (e.g. it is read-only).
  */
-export function coveringPatterns(command: string, sources: readonly PatternSource[], cwd: string, scratch?: string, fetchHosts?: readonly string[]): Array<{ label: string; tokens: readonly string[]; exact: boolean }> {
+export function coveringPatterns(command: string, sources: readonly PatternSource[], cwd: string, scratch?: string, fetchHosts?: readonly string[], gitRepos?: readonly string[]): Array<{ label: string; tokens: readonly string[]; exact: boolean }> {
 	let items = sources.flatMap((s) => [
 		...s.prefixes.map((tokens) => ({ label: s.label, tokens, exact: false })),
 		...s.exact.map((tokens) => ({ label: s.label, tokens, exact: true })),
 	]);
 	if (items.length === 0 || items.length > MAX_EXPLAINED_PATTERNS) return [];
 	const covers = (set: typeof items): boolean =>
-		set.length === 0 ? isReadOnlyCommand(command, cwd, scratch, fetchHosts) : isCoveredByPrefixes(command, set.filter((i) => !i.exact).map((i) => i.tokens), cwd, set.filter((i) => i.exact).map((i) => i.tokens), scratch, fetchHosts);
+		set.length === 0 ? isReadOnlyCommand(command, cwd, scratch, fetchHosts, gitRepos) : isCoveredByPrefixes(command, set.filter((i) => !i.exact).map((i) => i.tokens), cwd, set.filter((i) => i.exact).map((i) => i.tokens), scratch, fetchHosts, gitRepos);
 	if (!covers(items)) return [];
 	for (let k = items.length - 1; k >= 0; k--) {
 		const without = items.filter((_, j) => j !== k);

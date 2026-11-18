@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
 	logChoice,
+	redactCommand,
 	logDecision,
 	logPattern,
 	logPlanApproval,
@@ -184,4 +185,101 @@ test("a failing appendEntry never breaks the permission flow", () => {
 			waitMs: 0,
 		});
 	});
+});
+
+test("targetOf hides the values of secret-named keys in a non-bash input, at any depth", () => {
+	const launch = targetOf({ toolName: "subagent_launch", input: { commands: [{ command: "deploy", env: { API_TOKEN: "sekret123" } }] } });
+	assert.doesNotMatch(launch, /sekret123/);
+	assert.match(launch, /"API_TOKEN":"\*\*\*"/);
+	assert.equal(targetOf({ toolName: "mcp", input: { token: "sekret123" } }), '{"token":"***"}');
+	assert.equal(targetOf({ toolName: "mcp", input: { auth: { value: "sekret123" } } }), '{"auth":{"value":"***"}}');
+	// other strings go through the command redaction
+	assert.equal(targetOf({ toolName: "mcp", input: { cmd: 'curl -H "Authorization: Bearer abc" x' } }), '{"cmd":"curl -H \\"Authorization: ***\\" x"}');
+	// and the rest is kept
+	assert.equal(targetOf({ toolName: "web_search", input: { query: "x", limit: 3 } }), '{"query":"x","limit":3}');
+});
+
+/** The redacted form of each credential shape the session log must not keep. */
+const H4_ROWS: Array<[string, string, string]> = [
+	["curl -u user:pass https://h", "curl -u user:*** https://h", "pass"],
+	["curl --user alice:s3cret https://h", "curl --user alice:*** https://h", "s3cret"],
+	['curl -u "alice:s3cret" https://h', 'curl -u "alice:***" https://h', "s3cret"],
+	["git clone https://bob:tok123@github.com/x/y.git", "git clone https://bob:***@github.com/x/y.git", "tok123"],
+	['curl -H "X-Api-Key: k1" https://h', 'curl -H "X-Api-Key: ***" https://h', "k1"],
+	['curl -H "Cookie: sid=1" https://h', 'curl -H "Cookie: ***" https://h', "sid=1"],
+	['curl -H "PRIVATE-TOKEN: t9" https://h', 'curl -H "PRIVATE-TOKEN: ***" https://h', "t9"],
+	["mysql -psecret123 -u root db", "mysql -p*** -u root db", "secret123"],
+	["mysqldump -pabc db", "mysqldump -p*** db", "abc"],
+	["mariadb -psecret db", "mariadb -p*** db", "secret"],
+	["docker login -p hunter2 registry", "docker login -p *** registry", "hunter2"],
+	["sshpass -p hunter2 ssh host", "sshpass -p *** ssh host", "hunter2"],
+];
+
+test("redactCommand hides user:pass, URL userinfo, secret headers, -p passwords and docker/sshpass -p", () => {
+	for (const [input, expected, secret] of H4_ROWS) {
+		assert.equal(redactCommand(input), expected, input);
+		assert.doesNotMatch(redactCommand(input), new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), input);
+	}
+});
+
+test("redactCommand leaves ordinary -p, -u, @ and header uses alone", () => {
+	for (const command of [
+		"mkdir -p src",
+		"cp -p a b",
+		"git log --author x",
+		"curl https://github.com/x",
+		"ssh user@host",
+		"git push -u origin main",
+		'curl -H "Accept: text/plain" https://h',
+		"ls -p",
+		"curl https://github.com/x",
+	]) {
+		assert.equal(redactCommand(command), command, command);
+	}
+});
+
+test("redactCommand is linear: 200,000 plain characters and 20,000 repeated mysql words each take under 100 ms", () => {
+	for (const text of ["a".repeat(200_000), "mysql ".repeat(20_000)]) {
+		const started = performance.now();
+		redactCommand(text);
+		const took = performance.now() - started;
+		assert.ok(took < 100, `took ${took.toFixed(1)} ms`);
+	}
+});
+
+test("a secret flag or -u in an array masks the element after it", () => {
+	assert.equal(targetOf({ toolName: "mcp", input: { args: ["--token", "S3CRET"] } }), '{"args":["--token","***"]}');
+	assert.equal(targetOf({ toolName: "mcp", input: { args: ["-u", "bob:S3CRET"] } }), '{"args":["-u","bob:***"]}');
+});
+
+test("a credential-like header key masks its value; an object naming a credential masks its value field", () => {
+	assert.doesNotMatch(targetOf({ toolName: "mcp", input: { headers: { Cookie: "s=S3CRET" } } }), /S3CRET/);
+	assert.doesNotMatch(targetOf({ toolName: "mcp", input: { items: [{ name: "Authorization", value: "S3CRET" }] } }), /S3CRET/);
+	assert.doesNotMatch(targetOf({ toolName: "mcp", input: { items: [{ key: "API_KEY", value: "S3CRET" }] } }), /S3CRET/);
+});
+
+test("a JSON object or array inside a string is redacted as the JSON it is; plain JSON text is kept as written", () => {
+	assert.doesNotMatch(targetOf({ toolName: "mcp", input: { body: '{"password":"S3CRET","user":"x"}' } }), /S3CRET/);
+	assert.doesNotMatch(targetOf({ toolName: "mcp", input: { body: '[{"headers":{"Cookie":"s=S3CRET"}}]' } }), /S3CRET/);
+	assert.equal(targetOf({ toolName: "mcp", input: { body: '{"a": 1}' } }), JSON.stringify({ body: '{"a": 1}' }));
+});
+
+/** Each credential shape the log must not keep, and its redacted form. */
+const L5_ROWS: Array<[string, string]> = [
+	["echo X-Api-Key: S3CRET", "echo X-Api-Key: ***"],
+	["curl --header 'X-Api-Key: S3CRET' https://h", "curl --header 'X-Api-Key: ***' https://h"],
+	["curl --header='X-Auth: S3CRET' https://h", "curl --header='X-Auth: ***' https://h"],
+	["curl -HX-Auth:S3CRET https://h", "curl -HX-Auth:*** https://h"],
+	["curl -u:S3CRET https://h", "curl -u*** https://h"],
+	["curl -uS3CRET:x https://h", "curl -u*** https://h"],
+	["sshpass -pS3CRET ssh host", "sshpass -p*** ssh host"],
+	["redis-cli -a S3CRET ping", "redis-cli -a *** ping"],
+	["echo password: S3CRET", "echo password: ***"],
+];
+
+test("redactCommand hides bare header lines, attached and --header forms, -u:secret, sshpass -p, redis-cli -a and name: value", () => {
+	for (const [input, expected] of L5_ROWS) {
+		assert.equal(redactCommand(input), expected, input);
+		assert.doesNotMatch(redactCommand(input), /S3CRET/, input);
+	}
 });

@@ -5,8 +5,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
+import { evaluate } from "../../extensions/rules.ts";
+import { GLOBAL_RULES, MODES, type ModeName } from "../../extensions/modes.ts";
 import {
 	approvalBreakdown,
 	canonicalize,
@@ -27,6 +29,8 @@ import {
 	isProtectedPath,
 	isReadOnlyCommand,
 	isRememberablePrefix,
+	isRememberableExact,
+	commandUnits,
 	isSamePath,
 	isSecretCommand,
 	isSecretFile,
@@ -40,6 +44,7 @@ import {
 	createScratchDir,
 	maskCommitHeredocs,
 	maskScratchHeredocs,
+	tokenize,
 	outsideDestructiveTargets,
 	secretSearchHits,
 	secretUploads,
@@ -1880,7 +1885,7 @@ test("outsideCwdBashWrites: literal outside targets only", () => {
 	assert.deepEqual(outside("cp a $HOME/x"), []);
 	assert.deepEqual(outside("cp a *.txt"), []);
 	assert.deepEqual(outside("echo x | tee /dev/null"), []);
-	assert.deepEqual(outside("echo x > /tmp/f"), []); // redirects are not parsed
+	assert.deepEqual(outside("echo x > /tmp/f"), ["/tmp/f"]); // a literal redirect target outside the project is judged too
 	assert.deepEqual(outside("sed '1e id' /etc/hosts"), []); // exec keeps auto's behaviour
 	assert.deepEqual(outside("rm /tmp/x"), []);
 	assert.deepEqual(outside("cp a $(echo b)"), []);
@@ -2351,4 +2356,272 @@ test("isDangerousCommand: global options before the subcommand do not hide it", 
 	for (const command of ["docker -H tcp://x ps", "docker run --name push alpine", "cargo +nightly build", "gh -R owner/repo pr view 1"]) {
 		assert.equal(isDangerousCommand(command, CTX), false, command);
 	}
+});
+
+test("tokenize joins a backslash-newline continuation and reads $'…' and $\"…\" like plain quotes", () => {
+	const argv = (command: string) => tokenize(command)?.map((s) => s.argv);
+	assert.deepEqual(argv("git \\\npush"), [["git", "push"]]);
+	assert.deepEqual(argv("su\\\ndo id"), [["sudo", "id"]]);
+	assert.deepEqual(argv("git \\\n\\\n--no-verify"), [["git", "--no-verify"]]);
+	assert.deepEqual(argv("cat $'.env'"), [["cat", ".env"]]);
+	assert.deepEqual(argv('cat $".env"'), [["cat", ".env"]]);
+	assert.deepEqual(argv("echo '\\\n'"), [["echo", "\\\n"]], "single quotes keep the backslash and newline");
+	assert.deepEqual(argv("echo \\\\\nls"), [["echo", "\\"], ["ls"]], "escaped backslash, then a real newline");
+});
+
+test("a scratch heredoc whose operator line continues is not masked", () => {
+	// unmasked, the body would be `> /dev/null` and `sudo id` would be dropped from the check
+	const command = "cat > /s/x <<'EOF' \\\n> /dev/null\nsudo id\nEOF";
+	assert.equal(maskScratchHeredocs(command, "/s"), command);
+});
+
+/** The decision for one bash command in one mode, with no remembered prefixes. */
+function decideIn(cwd: string, mode: ModeName, command: string): string {
+	return evaluate(MODES[mode].permissions, GLOBAL_RULES, { toolName: "bash", input: { command } }, { cwd, remembered: [] }).action;
+}
+
+/** A fake HOME with a `.bashrc`, a project and a file outside it, under the package dir (not the OS temp dir, where reads never ask). */
+function withFakeHome(body: (home: string, cwd: string) => void): void {
+	const base = mkdtempSync(join(process.cwd(), ".utils-home-"));
+	const savedHome = process.env.HOME;
+	try {
+		const home = join(base, "home");
+		const cwd = join(base, "project");
+		mkdirSync(home);
+		mkdirSync(cwd);
+		writeFileSync(join(home, ".bashrc"), "x");
+		writeFileSync(join(cwd, "README.md"), "x");
+		writeFileSync(join(base, "outside.txt"), "x");
+		process.env.HOME = home;
+		body(home, cwd);
+	} finally {
+		if (savedHome === undefined) delete process.env.HOME;
+		else process.env.HOME = savedHome;
+		rmSync(base, { recursive: true, force: true });
+	}
+}
+
+test("~<current user>, ~+ and another account's ~name are judged as the home dir, the cwd, or outside", () => {
+	withFakeHome((_home, cwd) => {
+		const me = userInfo().username;
+		for (const mode of ["default", "auto", "plan"] as ModeName[]) {
+			assert.equal(decideIn(cwd, mode, `cat ~${me}/.bashrc`), decideIn(cwd, mode, "cat ~/.bashrc"), `${mode}: ~<me> is the home dir`);
+		}
+		assert.equal(decideIn(cwd, "default", "cat ~/.bashrc"), "ask", "guard: the home dir's file is an outside read");
+		assert.equal(decideIn(cwd, "default", "cat ~/x"), "allow", "guard: a missing file under the home dir is not an outside read");
+		assert.equal(decideIn(cwd, "default", "cat ~root/x"), "ask", "another account's home is outside, whether or not the path exists here");
+		assert.equal(decideIn(cwd, "auto", "cp a ~other/f"), "ask", "a write into another account's home is an outside write");
+		assert.equal(decideIn(cwd, "default", "cat ~+/README.md"), decideIn(cwd, "default", "cat ./README.md"), "~+ is the cwd");
+		assert.equal(decideIn(cwd, "default", "cat ~+/../outside.txt"), decideIn(cwd, "default", "cat ./../outside.txt"), "~+ is the cwd, so .. leaves it");
+		assert.equal(decideIn(cwd, "default", "cat ~+/../outside.txt"), "ask");
+	});
+});
+
+test("a secret named as an attached option value asks: -f.env, --file=.env, --from-file=.env", () => {
+	for (const command of ["grep -f.env x", "grep --file=.env x", "diff --from-file=.env x", "grep -f .env x"]) {
+		assert.equal(isSecretCommand(command, { cwd: CWD }), true, command);
+		assert.equal(decideIn(CWD, "default", command), "ask", command);
+	}
+	// guards: option values that name no secret
+	for (const command of ["head -n5 f", "grep -e/api/ src", "gcc -I/usr/include x.c", "ls -la"]) {
+		assert.equal(isSecretCommand(command, { cwd: CWD }), false, command);
+	}
+});
+
+test("git show and git cat-file read the file a ref:path names: a secret path asks in every mode", () => {
+	for (const command of ["git show HEAD:.env", "git show :.env", "git cat-file -p HEAD:.env", "git cat-file -p :.env", "git show HEAD:id_rsa"]) {
+		assert.equal(isSecretCommand(command, { cwd: CWD }), true, command);
+		for (const mode of ["default", "auto", "plan"] as ModeName[]) assert.equal(decideIn(CWD, mode, command), "ask", `${mode}: ${command}`);
+	}
+	// guards: a ref:path that names no secret, and a format string with a colon
+	assert.equal(isSecretCommand("git show HEAD:src/a.ts", { cwd: CWD }), false);
+	assert.equal(isSecretCommand("git log --format=%H:%s", { cwd: CWD }), false);
+	assert.equal(decideIn(CWD, "default", "git show HEAD:src/a.ts"), "allow");
+	assert.equal(decideIn(CWD, "default", "git log --format=%H:%s"), "allow");
+});
+
+test("an exclude or ignore filter names no file read, so its value does not ask (--exclude-from still does)", () => {
+	const base = mkdtempSync(join(process.cwd(), ".utils-filter-"));
+	try {
+		const cwd = join(base, "project");
+		mkdirSync(cwd);
+		writeFileSync(join(cwd, "a.txt"), "KEY");
+		// the tree without a .env: the filter's value alone must not ask
+		assert.equal(isSecretCommand("grep --exclude=.env KEY x", { cwd }), false);
+		assert.equal(decideIn(cwd, "default", "grep --exclude=.env KEY x"), "allow", "0.1.0: allow");
+		assert.equal(isSecretCommand("rg -g '!.env' KEY .", { cwd }), false);
+		assert.equal(decideIn(cwd, "default", "rg -g '!.env' KEY ."), "allow", "0.1.0: allow");
+		// a file the option reads is still checked
+		assert.equal(isSecretCommand("grep --exclude-from=.env x", { cwd }), true);
+		assert.equal(decideIn(cwd, "default", "grep --exclude-from=.env x"), "ask");
+	assert.equal(isSecretCommand("rg --ignore-file=.env KEY .", { cwd }), true, "rg reads the file --ignore-file names");
+		// with a .env in the tree, the excluded file is not searched (0.1.0: allow)
+		writeFileSync(join(cwd, ".env"), "KEY=1");
+		assert.equal(decideIn(cwd, "default", "grep -r --exclude=.env KEY ."), "allow", "0.1.0: allow");
+		// a secret the search does reach still asks (0.1.0: ask)
+		writeFileSync(join(cwd, "id_rsa"), "PRIVATE");
+		assert.equal(decideIn(cwd, "default", "grep -r --exclude=.env KEY ."), "ask", "0.1.0: ask");
+	} finally {
+		rmSync(base, { recursive: true, force: true });
+	}
+});
+
+test("a cd or pushd into another account's home, or into ~-, is an outside read in every mode", () => {
+	for (const command of ["cd ~root && cat .bashrc", "cd ~root && ls", "(cd ~nobody && cat .profile)", "pushd ~root && cat x", "cd ~- && cat x"]) {
+		for (const mode of ["default", "auto", "plan"] as ModeName[]) assert.notEqual(decideIn(CWD, mode, command), "allow", `${mode}: ${command}`);
+	}
+	assert.equal(decideIn(CWD, "auto", "cd ~root && cat .bashrc"), "ask", "auto");
+	assert.equal(decideIn(CWD, "auto", "cd src && cat a.ts"), "allow", "guard: a cd inside the project");
+});
+
+test("a redirect to a literal path outside the project is an outside write in auto, like tee or cp", () => {
+	assert.equal(decideIn(CWD, "auto", "echo hi > ~/notes.txt"), "ask");
+	assert.equal(decideIn(CWD, "auto", "printf x >> /etc/hostname"), "ask");
+	assert.equal(decideIn(CWD, "auto", "echo hi | tee ~/notes.txt"), "ask", "the tee form");
+	// guards: inside the project, /dev/null, a fd duplication, an unresolvable target
+	for (const command of ["echo hi > out.txt", "cmd 2>/dev/null", "cmd >&2", "echo hi > $OUT"]) {
+		assert.equal(decideIn(CWD, "auto", command), "allow", command);
+	}
+	// a redirect into the scratch dir is not outside
+	const base = mkdtempSync(join(process.cwd(), ".utils-scratch-"));
+	try {
+		const scratch = join(base, "scratch");
+		mkdirSync(scratch);
+		assert.deepEqual(outsideCwdBashWrites(`echo hi > ${scratch}/x.txt`, { cwd: CWD, scratchDir: scratch }), []);
+	} finally {
+		rmSync(base, { recursive: true, force: true });
+	}
+});
+
+test("a secret named by a suffix of a clustered short-flag word asks: -nf.env, -inf.env", () => {
+	for (const command of ["grep -nf.env x", "grep -inf.env x"]) {
+		assert.equal(isSecretCommand(command, { cwd: CWD }), true, command);
+		for (const mode of ["default", "auto", "plan"] as ModeName[]) assert.equal(decideIn(CWD, mode, command), "ask", `${mode}: ${command}`);
+	}
+	for (const command of ["ls -la", "head -n5 f", "grep -e/api/ src", "gcc -I/usr/include x.c", "grep -rn KEY ."]) {
+		assert.equal(isSecretCommand(command, { cwd: CWD }), false, command);
+	}
+});
+
+test("git's value-taking global options do not hide the subcommand: a secret ref:path asks in every mode", () => {
+	for (const command of ["git -c core.pager=cat show HEAD:.env", "git -c x=y cat-file -p HEAD:.env", "git --namespace x show HEAD:.env", "git --config-env core.pager=PAGER show HEAD:.env"]) {
+		assert.equal(isSecretCommand(command, { cwd: CWD }), true, command);
+		for (const mode of ["default", "auto", "plan"] as ModeName[]) assert.equal(decideIn(CWD, mode, command), "ask", `${mode}: ${command}`);
+	}
+	assert.equal(isSecretCommand("git -c core.pager=cat show HEAD:src/a.ts", { cwd: CWD }), false, "guard: a path that is no secret");
+});
+
+test("~+ and ~<current user> write targets are expanded: outside the project asks in auto, inside does not", () => {
+	assert.equal(decideIn(CWD, "auto", "cp a ~+/../x"), "ask");
+	assert.equal(decideIn(CWD, "auto", "touch ~+/../x"), "ask");
+	assert.equal(decideIn(CWD, "auto", `cp a ~${userInfo().username}/x`), "ask");
+	assert.equal(decideIn(CWD, "auto", "cp a ~/x"), "ask");
+	assert.equal(decideIn(CWD, "auto", "cp a ~+/x"), "allow", "guard: inside the project");
+});
+
+test("the filter options that name no file read are ls -I/--hide/--ignore, grep --exclude, rg -g '!…'; the rest of the values are checked", () => {
+	for (const command of ["ls -I.env", "ls --hide=.env", "ls -I .env", "ls --ignore=.env", "grep --exclude=.env KEY x", "rg -g '!.env' KEY ."]) {
+		assert.equal(decideIn(CWD, "default", command), "allow", command);
+	}
+	for (const command of ["grep --exclude-from=.env x", "rg --ignore-file=.env KEY .", "grep --include=.env x"]) {
+		assert.equal(decideIn(CWD, "default", command), "ask", command);
+	}
+});
+
+// Hardening regressions: shell keywords, interpreter names, dialog prefixes, inner commands, env reads, awk
+
+const SHELL_WORDS = ["!", "{", "}", "[[", "]]", "case", "coproc", "do", "done", "elif", "else", "esac", "fi", "for", "function", "if", "in", "select", "then", "time", "until", "while"];
+
+test("shell reserved words are never rememberable roots (S18)", () => {
+	for (const word of SHELL_WORDS) {
+		assert.equal(isRememberablePrefix([word]), false, word);
+		assert.equal(isRememberablePrefix([word, "x"]), false, `${word} x`);
+		assert.equal(isRememberableExact([word]), false, word);
+		assert.equal(isRememberableExact([word, "x"]), false, `${word} x`);
+	}
+});
+
+test("the dialog offers no prefix for a loop, so for/do/done are never remembered (S18)", () => {
+	const command = 'for f in src/*.ts; do wc -l "$f"; done';
+	assert.equal(deriveCommandPrefixes(command, CTX), undefined);
+	assert.equal(patternLadder(command, CTX), undefined);
+	assert.equal(deriveCommandPrefixes("for f in a; do python3 /tmp/evil.py; done", CTX), undefined);
+});
+
+test("interpreters and shells that can never be remembered as a prefix (H2)", () => {
+	const names = ["tsx", "ts-node", "uvx", "pipx", "bundle", "pwsh", "powershell", "xonsh", "ipython", "groovy", "swift", "osascript", "dotnet", "java", "rake", "sqlite3", "psql", "tmux", "screen", "ash", "csh", "tcsh", "mksh", "rbash", "nu"];
+	for (const name of names) {
+		assert.equal(isRememberablePrefix([name]), false, name);
+		assert.equal(isRememberableExact([name]), true, `${name} stays rememberable as an exact rule`);
+	}
+});
+
+test("runners and wrappers expose their inner command as a unit (S3, H1)", () => {
+	assert.ok(commandUnits("exec make deploy").some((u) => u.join(" ") === "make deploy"));
+	assert.ok(commandUnits("find . -exec make deploy \;").some((u) => u.join(" ") === "make deploy"));
+	assert.ok(commandUnits("ionice git push origin main").some((u) => u.join(" ") === "git push origin main"));
+	assert.ok(commandUnits("ssh -p 2222 host git push").some((u) => u.join(" ") === "git push"));
+	assert.ok(commandUnits("script -qc 'git push' /dev/null").some((u) => u.join(" ") === "git push"));
+});
+
+test("environment dumps and secret variables are secret reads (H3)", () => {
+	for (const command of ["jq -n env", "jq -n '$ENV'", "jq 'env' f", "awk 'BEGIN{print ENVIRON[\"HOME\"]}'", "cat /proc/$$/environ", "cat /proc/123/environ", "echo $PGPASSWORD", "echo $MYSQL_PWD", "printf %s $DB_PASSWORD"]) {
+		assert.equal(isSecretCommand(command, { cwd: CWD }), true, command);
+	}
+	for (const command of ["echo $PWD", "echo $OLDPWD", "echo $HOME", "echo $PATH", "jq .name package.json", "awk '{print $1}' f"]) {
+		assert.equal(isSecretCommand(command, { cwd: CWD }), false, command);
+	}
+});
+
+test("awk: a slash after ++ or -- is a division, after a single + or - it fails closed (S13)", () => {
+	const hidden = "awk 'BEGIN{x++ / 2; print \"id\" | \"sh\"; y = 3 / 1}'";
+	assert.equal(isReadOnlyCommand(hidden, CWD), false);
+	assert.equal(isReadOnlyCommand("awk 'BEGIN{x = 1 - /id/}' f", CWD), false, "ambiguous slash");
+	assert.equal(isReadOnlyCommand("awk 'BEGIN{x = 1 + /id/}' f", CWD), false, "ambiguous slash");
+	assert.equal(isReadOnlyCommand("awk '{print $1/2}' f", CWD), true);
+	assert.equal(isReadOnlyCommand("awk '/foo/ {print}' f", CWD), true);
+	assert.equal(isReadOnlyCommand("awk 'NR%2 == 0' f", CWD), true);
+});
+
+test("a write outside the project is judged in auto when the line holds a substitution or a heredoc", () => {
+	for (const command of [
+		"cat <<EOF > /etc/x\nhello\nEOF",
+		"cat > ~/x <<EOF\nhi\nEOF",
+		"cat <<< hi > /etc/x",
+		"echo $(date) > /etc/x",
+		"echo $(date) | tee /etc/x",
+		"cp a /etc/y; echo $(date)",
+		"tee /etc/x <<< hi",
+	]) {
+		assert.equal(decideIn(CWD, "auto", command), "ask", command);
+	}
+	// guards: inside the project, the same shapes allow in auto
+	assert.equal(decideIn(CWD, "auto", "echo $(date) > out.txt"), "allow");
+	assert.equal(decideIn(CWD, "auto", "cat <<EOF > out.txt\nhi\nEOF"), "allow");
+});
+
+test("a literal input redirect is not a write: sort < /tmp/in.txt is allowed in auto (0.1.0: allow)", () => {
+	assert.equal(decideIn(CWD, "auto", "sort < /tmp/in.txt"), "allow");
+	assert.equal(decideIn(CWD, "auto", "sort < /tmp/in.txt > out.txt"), "allow");
+});
+
+test("a command a launcher runs is judged for its writes: env, ionice, busybox cp outside ask in auto like nice cp", () => {
+	for (const command of ["nice cp a /etc/x", "env cp a /etc/x", "ionice cp a /etc/x", "busybox cp a /etc/x"]) {
+		assert.equal(decideIn(CWD, "auto", command), "ask", command);
+	}
+	assert.equal(decideIn(CWD, "auto", "env cp a x"), "allow", "guard: inside the project");
+});
+
+test("a 200-line script with loops and redirects is judged in auto in under a second", () => {
+	const lines: string[] = [];
+	for (let i = 0; i < 200; i++) {
+		if (i % 3 === 0) lines.push("for i in 1 2; do echo $i >> out.txt; done < list.txt");
+		else if (i % 3 === 1) lines.push(`cat src/a.ts | grep x > out${i % 5}.txt`);
+		else lines.push("sort < list.txt > sorted.txt");
+	}
+	const script = lines.join("\n");
+	const started = performance.now();
+	decideIn(CWD, "auto", script);
+	const ms = performance.now() - started;
+	assert.ok(ms < 1000, `took ${ms.toFixed(0)} ms for ${script.length} bytes`);
 });

@@ -8,7 +8,7 @@ import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { KEY, makeSandbox, planFileOf, restoreBell, scratchOf, startPi, type Harness, type Sandbox, type SessionEntry } from "../mocks/pi.ts";
 import { MODES, RTK_INSTALLED } from "../../extensions/modes.ts";
@@ -287,6 +287,12 @@ describe("flow 4: plan, approve, execute", () => {
 		const block = h.modeBlocks().at(-1) ?? "";
 		assert.ok(block.includes(MODES.plan.prompt));
 		assert.equal(systemPrompt, "BASE\n\n<pi_keeper>\n" + contractSection() + "\n</pi_keeper>", "the prompt carries the contract only");
+	});
+
+	it("entering plan mode names one plan file under the agent dir's plans folder, <project>-<date>-<time>-<rand>.md", async () => {
+		// the sandbox project is named "project" (its folder), so the name starts with that
+		assert.equal(dirname(planFile), join(sb.agentDir, "plans"));
+		assert.match(basename(planFile), /^project-\d{4}-\d{2}-\d{2}-\d{6}-[0-9a-f]{1,4}\.md$/);
 	});
 
 	it("writes to the scratch dir are allowed, project edits are denied with the plan-mode reason", async () => {
@@ -1417,5 +1423,76 @@ describe("flow: a failure while judging a call", () => {
 		assert.match(result.reason ?? "", /pi-keeper could not judge this call/);
 		assert.doesNotMatch(result.reason ?? "", /internal-boom/);
 		assert.equal(h.dialogs.length, 0);
+	});
+});
+
+describe("flow: the log keeps no secret of a remembered exact command", () => {
+	const sb = sandboxed();
+	it("approving don't ask again for this exact command logs the command with its secret hidden", async () => {
+		const h = await startPi({ sandbox: sb });
+		await h.session();
+		h.answer(PERMISSION, /^Yes, and don't ask again for this exact command/);
+		const result = await h.tool("bash", { command: "python3 deploy.py --token abc123" });
+		assert.equal(result.blocked, false);
+		const choice = telemetry(h, "choice").pop();
+		assert.ok(choice, "a choice was logged");
+		assert.equal(choice.outcome, "remember-session");
+		assert.match(String(choice.remembered), /^exact: python3 deploy\.py --token \*\*\*$/);
+		assert.doesNotMatch(JSON.stringify(h.entries), /abc123/);
+	});
+});
+
+describe("flow: a forged or unknown mode, and a restored plan file outside the plans dir", () => {
+	const sb = sandboxed();
+	const entry = (data: Record<string, unknown>): SessionEntry => ({ type: "custom", id: "x", timestamp: new Date().toISOString(), customType: "pi-keeper", data });
+
+	it("/mode with an Object.prototype name reports an unknown mode; reads still run", async () => {
+		const h = await startPi({ sandbox: sb });
+		await h.session();
+		for (const name of ["constructor", "toString", "__proto__"]) {
+			await h.command("mode", name);
+			assert.equal(h.notifications.at(-1)?.type, "error", name);
+			assert.match(lastStatus(h), /● default/, name);
+		}
+		assert.equal((await h.tool("read", { path: join(sb.cwd, "README.md") })).blocked, false);
+		assert.equal(h.dialogs.length, 0);
+	});
+
+	it("a resumed session whose last state names an Object.prototype key starts in default", async () => {
+		const h = await startPi({ sandbox: sb, entries: [entry({ mode: "toString" })] });
+		await h.session("resume");
+		assert.match(lastStatus(h), /● default/);
+		assert.equal((await h.tool("read", { path: join(sb.cwd, "README.md") })).blocked, false);
+	});
+
+	it("a resumed plan file outside the plans dir is not writable silently in plan mode", async () => {
+		const outside = join(sb.tmp, "not-a-plan.md");
+		const h = await startPi({ sandbox: sb, entries: [entry({ mode: "plan", planFilePath: outside })] });
+		await h.session("resume");
+		assert.equal((await h.tool("write", { path: outside, content: "x" })).blocked, true);
+		assert.equal(existsSync(outside), false);
+	});
+
+	it("a resumed plan file under the plans dir is still writable without a dialog", async () => {
+		const inside = join(sb.agentDir, "plans", "restored.md");
+		const h = await startPi({ sandbox: sb, entries: [entry({ mode: "plan", planFilePath: inside })] });
+		await h.session("resume");
+		assert.equal((await h.tool("write", { path: inside, content: "# Plan\n" })).blocked, false);
+		assert.equal(h.dialogs.length, 0);
+	});
+});
+
+describe("flow: an ignored project rules review is asked again after /new", () => {
+	const sb = sandboxed();
+	before(() => writeRules(sb, { allow: ["Bash(make build *)"] }));
+
+	it("ignore, /new, then the review is shown again", async () => {
+		const h = await startPi({ sandbox: sb });
+		h.answer(/Load 1 allow rule/, "Ignore for this session");
+		await h.session();
+		h.answer(/Load 1 allow rule/, "Ignore for this session");
+		await h.session("new");
+		assert.equal(h.dialogs.filter((d) => /Load 1 allow rule/.test(d.title)).length, 2);
+		h.assertNoPendingAnswers();
 	});
 });

@@ -85,14 +85,14 @@ const CATALOGUE: Row[] = [
 		},
 	},
 	{
-		name: "4a. default bash, no prefix possible (python3): the exact command can be remembered",
+		name: "4a. default bash, no prefix possible (python3): the exact command can be remembered, and (default on) allowed in the project",
 		trigger: bash("python3 x.py"),
-		expect: { options: ["Yes", EXACT, REJECT, MORE], more: [FEEDBACK, SWITCH] },
+		expect: { options: ["Yes", EXACT, "Yes, and always allow this exact command in this project", REJECT, MORE], more: [FEEDBACK, SWITCH] },
 	},
 	{
-		name: "4b. default bash, no prefix possible (a python -c one-liner)",
+		name: "4b. default bash, no prefix possible (a python -c one-liner): the project option is offered as exact text",
 		trigger: bash("python3 -c 'print(1)'"),
-		expect: { options: ["Yes", EXACT, REJECT, MORE], more: [FEEDBACK, SWITCH] },
+		expect: { options: ["Yes", EXACT, "Yes, and always allow this exact command in this project", REJECT, MORE], more: [FEEDBACK, SWITCH] },
 	},
 	{
 		name: "4d. default bash, no prefix possible (python3), project-exact-commands setting on: the exact command can be allowed in the project",
@@ -101,10 +101,10 @@ const CATALOGUE: Row[] = [
 		expect: { options: ["Yes", EXACT, "Yes, and always allow this exact command in this project", REJECT, MORE], more: [FEEDBACK, SWITCH] },
 	},
 	{
-		name: "4e. default bash, quoted argument (bash -c …), project-exact-commands setting on: no rule body possible, session option only",
+		name: "4e. default bash, quoted argument (bash -c …), project-exact-commands setting on: no token rule body possible, the project option is saved as BashExact(...)",
 		setup: (sb) => writeFileSync(join(sb.agentDir, "pi-keeper.json"), '{"projectExactCommands": true}'),
 		trigger: bash("bash -c 'npm test'"),
-		expect: { options: ["Yes", EXACT, REJECT, MORE], more: [FEEDBACK, SWITCH] },
+		expect: { options: ["Yes", EXACT, "Yes, and always allow this exact command in this project", REJECT, MORE], more: [FEEDBACK, SWITCH] },
 	},
 	{
 		name: "4c. plan mode bash, no prefix possible (python3): no exact option, planning stays read-only",

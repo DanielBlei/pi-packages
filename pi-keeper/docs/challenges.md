@@ -14,3 +14,13 @@ solved belong to [design.md](design.md) and are not repeated here.
 - **Approve with a note:** Shift+Tab approves into per-edit approval, never auto, and does not exist without a TUI, so a "yes, but ..." note costs a round trip.
 
 - **Telemetry gaps:** a dialog wait cannot be told apart from the user being away, `promptVersion` misses lane-line, rules-line and `modes.ts` table changes, and idle cost is measured per poll, not per session.
+
+- **`subagent` input is not locked after a gate is approved:** another extension could rewrite it before pi-subagents runs it (see design: "another extension may rewrite tool input after our decision").
+
+- **A custom pi-subagents `singleRunOutputBaseDir` is not read:** a relative single-child `output` written there is not judged, so a report can land in the project unchecked.
+
+- **File lists that reach a reader are not all traced:** `while read` loops, `$(…)` (`cat $(ls)`) and a list file (`xargs cat < list.txt`) are not followed, like `cat $VAR`; ANSI-C escapes such as `$'\x2eenv'` are not decoded.
+
+- **A tilde inside quotes is treated like an unquoted one:** `cat "~root"` asks (fails closed).
+
+- **Heredoc bodies can add an extra ask:** in a command that also redirects.

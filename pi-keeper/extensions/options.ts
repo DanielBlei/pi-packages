@@ -29,6 +29,12 @@ export function projectReadGrantLabel(dirs: readonly string[]): string {
 export function fetchGrantLabel(hosts: readonly string[]): string {
 	return `Yes, and allow fetching from ${hosts.map((h) => sanitizeForTerminal(h)).join(", ")} this session`;
 }
+/** "Yes, and allow git in <repo>/ this session": a cd into another git repository, for the repo roots it runs git in (see gitGrantRoots). */
+export function gitGrantLabel(roots: readonly string[]): string {
+	const shown = roots.slice(0, 2).map((d) => sanitizeForTerminal(d.endsWith("/") ? d : `${d}/`));
+	const more = roots.length > 2 ? ` (+${roots.length - 2} more)` : "";
+	return `Yes, and allow git in ${shown.join(", ")}${more} this session`;
+}
 /** "Yes, and always allow fetching from <host> in this project": saved as Fetch(<host>). */
 export function projectFetchGrantLabel(hosts: readonly string[]): string {
 	return `Yes, and always allow fetching from ${hosts.map((h) => sanitizeForTerminal(h)).join(", ")} in this project`;
@@ -65,6 +71,8 @@ export interface DialogOptionsInput {
 	fetchGrantLabel?: string;
 	/** "Yes, and always allow fetching from <host> in this project" label; undefined unless project options are on. */
 	projectFetchGrantLabel?: string;
+	/** "Yes, and allow git in <repo>/ this session" label; undefined when no repo grant would remove the ask. */
+	gitGrantLabel?: string;
 	/** The ask comes from a subagent child: no switching to auto mode (children can't switch). */
 	child?: boolean;	/** Offer REJECT_WITH_FEEDBACK (default true). False when the answer cannot carry text back, as for a background child. */
 	feedback?: boolean;
@@ -94,6 +102,7 @@ export function dialogOptions(input: DialogOptionsInput): DialogOptions {
 	if (input.projectReadGrantLabel !== undefined) primary.push(input.projectReadGrantLabel);
 	if (input.fetchGrantLabel !== undefined) primary.push(input.fetchGrantLabel);
 	if (input.projectFetchGrantLabel !== undefined) primary.push(input.projectFetchGrantLabel);
+	if (input.gitGrantLabel !== undefined) primary.push(input.gitGrantLabel);
 	if (canAllowEdits) primary.push(input.sharedEdits === true ? ALLOW_EDITS_SHARED : ALLOW_EDITS);
 	primary.push(REJECT);
 

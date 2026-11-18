@@ -18,9 +18,10 @@
  * `subagentsFollowAuto` (default false) lets subagents of an auto-mode parent run in
  * auto mode too, as long as their permission asks can reach the user; `/keeper`
  * toggles it and saves it here.
- * `projectExactCommands` (default false) adds "Yes, and always allow this exact
+ * `projectExactCommands` (default true) adds "Yes, and always allow this exact
  * command in this project" to the approval dialog for commands no prefix
- * can cover, saved to the project's .pi/settings.local.json; `/keeper` toggles it and saves it here.
+ * can cover, saved to the project's .pi/settings.local.json (as a token rule when the
+ * command can be written as one, else as the exact text `BashExact(...)`); `/keeper` toggles it and saves it here.
  * `backgroundAutoFallback` (default false) lets children whose asks cannot reach a
  * user (background asks off, or a parent without a UI, which writes no
  * heartbeat so its children fall back at launch) run in auto mode
@@ -40,7 +41,10 @@
  * "prompt" is the old behaviour of appending them to the system prompt, for
  * small local models that follow prompt rules better. Written by
  * hand only — `/keeper` has no entry for it yet.
- * `modeFlashSecs` (default 2; 0 turns it off, otherwise 0.1 to 10) is how long the
+ * `modeStatus` (default true) shows the mode in the footer status line; false hides it.
+ * `modeWorkingRow` (default false) shows it in the working row too (`⏵⏵ auto · Working`,
+ * plan and auto mode only). Both are set by the `/keeper` panel or by hand.
+ * `modeFlashSecs` (default 0, which is off; otherwise 0.1 to 10) is how long the
  * mode (icon and badge, in the mode's color) shows above the prompt after a real
  * switch; it adds no permanent row. Set by the `/keeper` panel (off, 1, 2, 3 or 5 s) or by hand.
  * `backgroundAskPopup` (default "always") says when a permission ask from a
@@ -88,7 +92,7 @@ export const MIN_BACKGROUND_ASK_TIMEOUT_MS = 10_000;
 export const MAX_BACKGROUND_ASK_TIMEOUT_MS = 30 * 60_000;
 
 /** How long the mode line stays above the prompt after a switch: default and bounds (seconds); 0 turns it off. */
-export const DEFAULT_MODE_FLASH_SECS = 2;
+export const DEFAULT_MODE_FLASH_SECS = 0;
 export const MIN_MODE_FLASH_SECS = 0.1;
 export const MAX_MODE_FLASH_SECS = 10;
 
@@ -139,7 +143,7 @@ export interface KeeperConfig {
 	readOnlyTools: ReadonlySet<string>;
 	/** Subagents of an auto-mode parent run in auto mode too, while their asks can reach the user (the `/keeper` setting). Default false. */
 	subagentsFollowAuto: boolean;
-	/** Exact-command dialogs offer a persistent project rule (the `/keeper` setting). Default false. */
+	/** Exact-command dialogs offer a persistent project rule (the `/keeper` setting). Default true. */
 	projectExactCommands: boolean;
 	/** Relay-less (background) children run in auto mode instead of being denied (the `/keeper` setting). Default false. */
 	backgroundAutoFallback: boolean;
@@ -149,8 +153,12 @@ export interface KeeperConfig {
 	ccExtensionsPrompt: boolean;
 	/** Where the mode rules go: a message in the conversation, or (old behaviour) the system prompt. */
 	modeInstructions: "message" | "prompt";
-	/** Seconds the mode line shows above the prompt after a switch; 0 = off (also hides the mode in the working row). Default 2. */
+	/** Seconds the mode line shows above the prompt after a switch; 0 = off. Default 0 (off): it is intrusive. */
 	modeFlashSecs: number;
+	/** The mode in the footer status line. Default true; false hides it. */
+	modeStatus: boolean;
+	/** The mode in the working row (`<mode> · Working`) in plan and auto mode. Default false: the footer already shows it. */
+	modeWorkingRow: boolean;
 	/** Outside-read dialogs offer "always allow reading from <dir>/ in this project" (the `/keeper` setting). Default false: read grants stay session-only. */
 	projectReadApprovals: boolean;
 	/** Background subagents' asks reach this session's user instead of being denied (the `/keeper` setting). Default true. */
@@ -199,15 +207,15 @@ export function parseConfig(text: string): KeeperConfig {
 	const rawAuto = (value as { subagentsFollowAuto?: unknown }).subagentsFollowAuto;
 	if (typeof rawAuto === "boolean") subagentsFollowAuto = rawAuto;
 	else if (rawAuto !== undefined) warnings.push("subagentsFollowAuto must be true or false; using false");
-	let projectExactCommands = false;
+	let projectExactCommands = true;
 	const rawExact = (value as { projectExactCommands?: unknown }).projectExactCommands;
 	if (typeof rawExact === "boolean") projectExactCommands = rawExact;
-	else if (rawExact !== undefined) warnings.push("projectExactCommands must be true or false; using false");
+	else if (rawExact !== undefined) warnings.push("projectExactCommands must be true or false; using true");
 	let backgroundAutoFallback = false;
 	const rawHeadless = (value as { backgroundAutoFallback?: unknown }).backgroundAutoFallback;
 	if (typeof rawHeadless === "boolean") backgroundAutoFallback = rawHeadless;
 	else if (rawHeadless !== undefined) warnings.push("backgroundAutoFallback must be true or false; using false");
-	const flag = (key: "projectCommandApprovals" | "projectReadApprovals" | "backgroundAsks" | "ccExtensionsPrompt", fallbackValue: boolean): boolean => {
+	const flag = (key: "projectCommandApprovals" | "projectReadApprovals" | "backgroundAsks" | "ccExtensionsPrompt" | "modeStatus" | "modeWorkingRow", fallbackValue: boolean): boolean => {
 		const raw = (value as Record<string, unknown>)[key];
 		if (typeof raw === "boolean") return raw;
 		if (raw !== undefined) warnings.push(`${key} must be true or false; using ${fallbackValue}`);
@@ -216,6 +224,8 @@ export function parseConfig(text: string): KeeperConfig {
 	const projectCommandApprovals = flag("projectCommandApprovals", true);
 	const projectReadApprovals = flag("projectReadApprovals", false);
 	const ccExtensionsPrompt = flag("ccExtensionsPrompt", true);
+	const modeStatus = flag("modeStatus", true);
+	const modeWorkingRow = flag("modeWorkingRow", false);
 	let modeInstructions: "message" | "prompt" = "message";
 	const rawInstructions = (value as { modeInstructions?: unknown }).modeInstructions;
 	if (rawInstructions === "prompt") modeInstructions = "prompt";
@@ -246,11 +256,11 @@ export function parseConfig(text: string): KeeperConfig {
 		if (backgroundAskTimeoutMs !== rawTimeout) warnings.push(`backgroundAskTimeoutMs must be between ${MIN_BACKGROUND_ASK_TIMEOUT_MS} and ${MAX_BACKGROUND_ASK_TIMEOUT_MS}; using ${backgroundAskTimeoutMs}`);
 	} else if (rawTimeout !== undefined) warnings.push(`backgroundAskTimeoutMs must be a number of milliseconds; using ${DEFAULT_BACKGROUND_ASK_TIMEOUT_MS}`);
 	// readOnlyTools absent or unusable: the defaults; a valid list (empty included) replaces them
-	return { readOnlyTools: Array.isArray(listed) ? names : new Set(DEFAULT_READ_ONLY_TOOLS), subagentsFollowAuto, projectExactCommands, backgroundAutoFallback, projectCommandApprovals, projectReadApprovals, ccExtensionsPrompt, modeInstructions, modeFlashSecs, backgroundAsks, backgroundAskTimeoutMs, backgroundAskPopup, subagentThinking, commandColors, warnings };
+	return { readOnlyTools: Array.isArray(listed) ? names : new Set(DEFAULT_READ_ONLY_TOOLS), subagentsFollowAuto, projectExactCommands, backgroundAutoFallback, projectCommandApprovals, projectReadApprovals, ccExtensionsPrompt, modeInstructions, modeFlashSecs, modeStatus, modeWorkingRow, backgroundAsks, backgroundAskTimeoutMs, backgroundAskPopup, subagentThinking, commandColors, warnings };
 }
 
 function fallback(warnings: string[]): KeeperConfig {
-	return { readOnlyTools: new Set(DEFAULT_READ_ONLY_TOOLS), subagentsFollowAuto: false, projectExactCommands: false, backgroundAutoFallback: false, projectCommandApprovals: true, projectReadApprovals: false, ccExtensionsPrompt: true, modeInstructions: "message", modeFlashSecs: DEFAULT_MODE_FLASH_SECS, backgroundAsks: true, backgroundAskTimeoutMs: DEFAULT_BACKGROUND_ASK_TIMEOUT_MS, backgroundAskPopup: "always",subagentThinking: "follow", commandColors: undefined, warnings };
+	return { readOnlyTools: new Set(DEFAULT_READ_ONLY_TOOLS), subagentsFollowAuto: false, projectExactCommands: true, backgroundAutoFallback: false, projectCommandApprovals: true, projectReadApprovals: false, ccExtensionsPrompt: true, modeInstructions: "message", modeFlashSecs: DEFAULT_MODE_FLASH_SECS, modeStatus: true, modeWorkingRow: false, backgroundAsks: true, backgroundAskTimeoutMs: DEFAULT_BACKGROUND_ASK_TIMEOUT_MS, backgroundAskPopup: "always",subagentThinking: "follow", commandColors: undefined, warnings };
 }
 
 /** Background asks are on in this process: the setting, and the env kill switch not set to "0". */
@@ -276,7 +286,7 @@ export function loadConfig(agentDir: string): KeeperConfig {
  * temp file in the same directory, then rename), so a crash mid-write leaves
  * the old file. Returns a warning instead of throwing on any problem.
  */
-export function saveConfig(agentDir: string, update: { subagentsFollowAuto?: boolean; projectExactCommands?: boolean; backgroundAutoFallback?: boolean; backgroundAsks?: boolean; projectCommandApprovals?: boolean; projectReadApprovals?: boolean; ccExtensionsPrompt?: boolean; backgroundAskPopup?: BackgroundAskPopup; backgroundAskTimeoutMs?: number; subagentThinking?: SubagentThinkingMode; commandColors?: PreviewTextColor; modeFlashSecs?: number }): string | undefined {
+export function saveConfig(agentDir: string, update: { subagentsFollowAuto?: boolean; projectExactCommands?: boolean; backgroundAutoFallback?: boolean; backgroundAsks?: boolean; projectCommandApprovals?: boolean; projectReadApprovals?: boolean; ccExtensionsPrompt?: boolean; backgroundAskPopup?: BackgroundAskPopup; backgroundAskTimeoutMs?: number; subagentThinking?: SubagentThinkingMode; commandColors?: PreviewTextColor; modeFlashSecs?: number; modeStatus?: boolean; modeWorkingRow?: boolean }): string | undefined {
 	const file = join(agentDir, CONFIG_FILE);
 	let value: Record<string, unknown>;
 	try {
@@ -311,6 +321,8 @@ export function saveConfig(agentDir: string, update: { subagentsFollowAuto?: boo
 	if (update.subagentThinking !== undefined) value.subagentThinking = update.subagentThinking;
 	if (update.commandColors !== undefined) value.commandColors = update.commandColors;
 	if (update.modeFlashSecs !== undefined) value.modeFlashSecs = update.modeFlashSecs;
+	if (update.modeStatus !== undefined) value.modeStatus = update.modeStatus;
+	if (update.modeWorkingRow !== undefined) value.modeWorkingRow = update.modeWorkingRow;
 	const temp = `${file}.tmp-${process.pid}-${Date.now()}`;
 	try {
 		writeFileSync(temp, `${JSON.stringify(value, null, "\t")}\n`);

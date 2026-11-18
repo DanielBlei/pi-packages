@@ -112,7 +112,7 @@ export interface Verdict {
 	matcher: string | null;
 }
 
-type EventKind = "auto-allow" | "auto-deny" | "no-ui" | "cancelled" | "timeout" | "parent-gone" | "dropped" | "clamped";
+type EventKind = "auto-allow" | "auto-deny" | "no-ui" | "cancelled" | "timeout" | "parent-gone" | "asks-off" | "dropped" | "clamped";
 
 /** What happened to a request without a dialog of its own (a dialog's answer is logged where it is shown). */
 export interface ServerEvent {
@@ -162,8 +162,11 @@ export interface AskServer {
 	openNow(): number;
 	/** Requests held (queued or on screen). */
 	pending(): number;
-	/** The session is ending: deny everything pending, close its dialogs, stop polling. */
-	stop(): void;
+	/**
+	 * The session is ending (or background asks were turned off): deny everything pending with `reason`,
+	 * close its dialogs, stop polling. Files left for children that are gone are removed.
+	 */
+	stop(reason?: "parent-session-ended" | "asks-turned-off"): void;
 }
 
 type Why = "cancel" | "timeout" | "dropped" | "ended";
@@ -198,6 +201,8 @@ export function startAskServer(options: AskServerOptions): AskServer {
 	let stopped = false;
 	let shownBadge = 0;
 	const warned = new Set<string>();
+	/** Requests this server claimed: id -> the child's pid. Their reply and .taken files are this server's to clean up. */
+	const claimedBy = new Map<string, number>();
 	let lastBeat = Number.NEGATIVE_INFINITY;
 
 	/** Keep the "listening" note fresh (throttled); a mailbox that cannot be written just leaves it stale. */
@@ -263,6 +268,7 @@ export function startAskServer(options: AskServerOptions): AskServer {
 	}
 
 	function enqueue(request: AskRequest): void {
+		claimedBy.set(request.id, request.childPid);
 		const entry: Entry = { request, receivedAt: now() };
 		if (queue.length >= MAX_QUEUE) {
 			reply(entry, "deny", "rules");
@@ -418,7 +424,7 @@ export function startAskServer(options: AskServerOptions): AskServer {
 			return waiting;
 		},
 		pending: () => queue.length,
-		stop() {
+		stop(reason = "parent-session-ended") {
 			if (stopped) return;
 			// one last look, so a request that just arrived is denied too and not left waiting
 			try {
@@ -433,9 +439,12 @@ export function startAskServer(options: AskServerOptions): AskServer {
 			for (const entry of [...queue]) {
 				if (!held.has(entry.request.id)) continue;
 				entry.why = "ended";
-				reply(entry, "deny", "parent-session-ended");
-				emit("parent-gone", entry);
+				reply(entry, "deny", reason);
+				emit(reason === "asks-turned-off" ? "asks-off" : "parent-gone", entry);
 			}
+			// a child that is still running reads its reply and removes its own files; the rest would stay forever
+			for (const [id, pid] of claimedBy) if (!alive(pid)) cleanup(dir, id);
+			claimedBy.clear();
 			for (const entry of queue) entry.controller?.abort();
 			queue.length = 0;
 			open = undefined;

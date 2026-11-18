@@ -27,6 +27,7 @@ export interface SessionGrantsSnapshot {
 	readonly outsideReadsAllowed: boolean;
 	readonly outsideReadDirs: readonly string[];
 	readonly fetchHosts: readonly string[];
+	readonly gitRepos: readonly string[];
 }
 
 export class SessionGrants {
@@ -36,6 +37,7 @@ export class SessionGrants {
 	#outsideReadsAllowed = false;
 	readonly #outsideReadDirs: string[] = [];
 	readonly #fetchHosts: string[] = [];
+	readonly #gitRepos: string[] = [];
 
 	/** Command prefixes approved for the session. */
 	get prefixes(): readonly (readonly string[])[] {
@@ -67,6 +69,11 @@ export class SessionGrants {
 		return this.#fetchHosts;
 	}
 
+	/** "Yes, and allow git in <repo>/ this session": realpaths of granted git repository roots. */
+	get gitRepos(): readonly string[] {
+		return this.#gitRepos;
+	}
+
 	/** Empty everything in place (the arrays keep their identity, so a live reader sees the reset). */
 	reset(): void {
 		this.#prefixes.length = 0;
@@ -75,6 +82,7 @@ export class SessionGrants {
 		this.#outsideReadsAllowed = false;
 		this.#outsideReadDirs.length = 0;
 		this.#fetchHosts.length = 0;
+		this.#gitRepos.length = 0;
 	}
 
 	/** A deep copy, frozen: mutating it can't reach the live state. */
@@ -87,6 +95,7 @@ export class SessionGrants {
 			outsideReadsAllowed: this.#outsideReadsAllowed,
 			outsideReadDirs: Object.freeze([...this.#outsideReadDirs]),
 			fetchHosts: Object.freeze([...this.#fetchHosts]),
+			gitRepos: Object.freeze([...this.#gitRepos]),
 		});
 	}
 
@@ -135,5 +144,14 @@ export class SessionGrants {
 	removeFetchHost(host: string): void {
 		const at = this.#fetchHosts.indexOf(host);
 		if (at !== -1) this.#fetchHosts.splice(at, 1);
+	}
+
+	addGitRepo(realpath: string): void {
+		if (!this.#gitRepos.includes(realpath)) this.#gitRepos.push(realpath);
+	}
+
+	removeGitRepo(realpath: string): void {
+		const at = this.#gitRepos.indexOf(realpath);
+		if (at !== -1) this.#gitRepos.splice(at, 1);
 	}
 }

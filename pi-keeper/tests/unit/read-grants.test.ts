@@ -400,9 +400,9 @@ test("$PWD and ${PWD} words expand to the command's cwd, so a `..` after them is
 			assert.equal(decideIn(mode, "cat $PWD/../../../../etc/hosts", cwd), "ask", mode);
 			assert.equal(decideIn(mode, "cat ${PWD}/../../../../etc/hosts", cwd), "ask", mode);
 		}
-		// other forms stay as they were: ${PWD:-x} and ~user are not expanded
+		// other forms stay as they were: ${PWD:-x} is not expanded; another account's ~name is outside (see expandHome)
 		assert.deepEqual(outsideCwdReadPaths("cat ${PWD:-/x}/../other/c.txt", { cwd }), []);
-		assert.deepEqual(outsideCwdReadPaths("cat ~nobody/../other/c.txt", { cwd }), []);
+		assert.deepEqual(outsideCwdReadPaths("cat ~nobody/../other/c.txt", { cwd }), ["~nobody/../other/c.txt"]);
 	}));
 
 test("a `..` segment that leaves the cwd is an outside read, the same as the absolute path", () =>
