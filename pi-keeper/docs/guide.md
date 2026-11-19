@@ -47,6 +47,10 @@ resume.
   cannot reach outside the pipeline (no `system`, `getline`, pipe, redirect or
   `-f` file); anything it can't read means a dialog (`docs/design.md`, "Read-only
   analysis").
+  `kubectl` and the OpenShift `oc` count as read-only for `get`, `describe`, `logs`,
+  `top`, `explain`, `version` and `api-resources` (plus `oc whoami`, `status`,
+  `projects`, `api-versions` and `project` without a name) on the current cluster;
+  Secrets, tokens, other clusters and every other subcommand still ask.
   Small shell programs are read as the shell would run them, so these run too:
   a `for` loop over up to 16 literal words (`for f in a.txt b.txt; do wc -l
   "$f"; done`), a literal lowercase variable (`out=notes.txt; … > "$out"`),
@@ -237,9 +241,12 @@ How rules match:
   up`, `npm run build`).
 - **rtk is transparent:** `git add` and `rtk git add` are the same rule.
 - **Shell keywords are never a prefix:** `for`, `do`, `if`, `while` and the
-  other reserved words are never remembered, so a loop gets the exact-command
-  options instead (a prefix rule for the loop body's command still covers each
-  copy). `time` and `!` before a command are stripped, like `nice`.
+  other reserved words are never remembered. When a `for` loop over literal
+  words still asks, the dialog offers its body's command instead
+  (`for p in a b; do harbor repo list --project "$p"; done` offers `harbor`, for
+  the session or the project), and that rule covers each copy. A loop that can't
+  be expanded gets the exact-command options. `time` and `!` before a command are
+  stripped, like `nice`.
 - **Writes stay in the project:** a rule for a command that writes files
   (`sed -i`, `cp`, `mkdir`, `tee`, `tar -czf`, `curl -o`, `zip`, `rsync`,
   ...) covers it only while every target is inside the project (or the

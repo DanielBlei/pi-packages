@@ -1498,35 +1498,50 @@ function ghApiBlocker(args: string[]): Blocker | undefined {
 	return undefined;
 }
 
-/** kubectl options that point it at another cluster, user or kubeconfig (a kubeconfig can run a credential plugin). */
+/** kubectl and oc options that point it at another cluster, user or kubeconfig (a kubeconfig can run a credential plugin). */
 const KUBECTL_CONNECTION_FLAGS = new Set([
 	"--kubeconfig", "--server", "-s", "--token", "--as", "--as-group", "--as-uid", "--username", "--password",
 	"--client-certificate", "--client-key", "--certificate-authority", "--tls-server-name", "--proxy-url", "--cluster", "--user", "--context",
 ]);
+/** More connection options only `oc` has. */
+const OC_CONNECTION_FLAGS = new Set(["--insecure-skip-tls-verify", "--config"]);
 
 /** kubectl options that read an arbitrary API path, write a profile file, or take a manifest (which may be a Secret). */
 const KUBECTL_UNCHECKED_FLAGS = new Set(["--raw", "--profile", "--profile-output"]);
 
-/** `kubectl get|describe|logs|top|explain|version|api-resources` on the current cluster; Secrets still ask. */
-function kubectlBlocker(args: string[]): Blocker | undefined {
+/** `oc` subcommands that only print (`project` only without a name; `whoami` only without a token flag). */
+const OC_READ_ONLY_SUBCOMMANDS = ["whoami", "status", "projects", "api-versions", "project"];
+
+/**
+ * `kubectl|oc get|describe|logs|top|explain|version|api-resources` on the current cluster, plus `oc whoami|status|projects|api-versions|project`;
+ * Secrets still ask. `root` is the command name (`kubectl` or `oc`).
+ */
+function kubectlBlocker(root: string, args: string[]): Blocker | undefined {
+	const oc = root === "oc";
 	const sub = args[0];
-	if (sub === undefined || !READ_ONLY_KUBECTL_SUBCOMMANDS.includes(sub)) {
-		return plain(`\`${["kubectl", sub].filter(Boolean).join(" ")}\` isn't a read-only kubectl command`);
+	if (sub === undefined || !(READ_ONLY_KUBECTL_SUBCOMMANDS.includes(sub) || (oc && OC_READ_ONLY_SUBCOMMANDS.includes(sub)))) {
+		return plain(`\`${[root, sub].filter(Boolean).join(" ")}\` isn't a read-only ${root} command`);
 	}
 	const rest = args.slice(1);
-	if (rest.some((a) => KUBECTL_CONNECTION_FLAGS.has(a.split("=")[0]) || /^-s./.test(a))) {
-		return execBlock("`kubectl` pointed at another server, user or kubeconfig can't be checked");
+	if (rest.some((a) => KUBECTL_CONNECTION_FLAGS.has(a.split("=")[0]) || /^-s./.test(a) || (oc && OC_CONNECTION_FLAGS.has(a.split("=")[0])))) {
+		return execBlock(`\`${root}\` pointed at another server, user or kubeconfig can't be checked`);
 	}
 	if (rest.some((a) => KUBECTL_UNCHECKED_FLAGS.has(a.split("=")[0]))) {
-		return plain("`kubectl` with --raw or --profile can't be checked");
+		return plain(`\`${root}\` with --raw or --profile can't be checked`);
+	}
+	if (oc && sub === "whoami" && rest.some((a) => a.split("=")[0] === "--show-token" || /^-[a-zA-Z]*t/.test(a))) {
+		return plain("`oc whoami` with -t or --show-token prints your login token");
+	}
+	if (oc && sub === "project" && rest.some((a) => !a.startsWith("-"))) {
+		return plain("`oc project` with a name switches the project and writes the kubeconfig");
 	}
 	// a manifest or kustomization can name a Secret
 	if ((sub === "get" || sub === "describe") && rest.some((a) => /^-[fk]/.test(a) || /^--(filename|kustomize)(=|$)/.test(a))) {
-		return plain(`\`kubectl ${sub}\` from a file can't be checked (the manifest may be a Secret)`);
+		return plain(`\`${root} ${sub}\` from a file can't be checked (the manifest may be a Secret)`);
 	}
 	// Secret contents are credentials: reading them asks
 	if (rest.some((a) => !a.startsWith("-") && /(^|[,/])secrets?(\.[a-z0-9.]+)?([,/]|$)/i.test(a))) {
-		return plain(`\`kubectl ${sub}\` of Secrets prints credentials`);
+		return plain(`\`${root} ${sub}\` of Secrets prints credentials`);
 	}
 	return undefined;
 }
@@ -1552,7 +1567,7 @@ export const SECRET_ENV_NAME = /KEY|TOKEN|SECRET|PASS|CRED|AUTH/i;
 const SECRET_PRINT_NAME = /(^|_)(KEY|TOKEN|SECRET|PASS(WORD|WD)?|CRED(ENTIALS?)?|AUTH(_TOKEN)?)(_|$)|API_?KEY/i;
 
 /** Commands whose read-only classification depends on every argument, so it can't hold behind xargs. */
-const XARGS_UNTRUSTED = new Set(["git", "rtk", "gh", "kubectl", "docker", "podman", "env", "printenv"]);
+const XARGS_UNTRUSTED = new Set(["git", "rtk", "gh", "kubectl", "oc", "docker", "podman", "env", "printenv"]);
 
 /** Shell syntax words that start a loop, conditional or function. */
 const SHELL_SYNTAX_WORDS = new Set(["for", "while", "until", "if", "then", "else", "elif", "fi", "do", "done", "case", "esac", "select", "function", "{", "}", "!", "[["]);
@@ -1639,7 +1654,8 @@ function segmentBlocker(segment: Segment, cwd: string | undefined, scratch?: str
 		case "gh":
 			return ghBlocker(args);
 		case "kubectl":
-			return kubectlBlocker(args);
+		case "oc":
+			return kubectlBlocker(root, args);
 		case "docker":
 		case "podman":
 			return containerBlocker(root, args);

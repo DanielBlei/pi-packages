@@ -443,6 +443,7 @@ export const READ_ONLY_BASH_COMMANDS: string[] = [
 	// Subcommand-checked service CLIs (query subcommands only; see utils.ts)
 	"gh",
 	"kubectl",
+	"oc",
 	"docker",
 	"podman",
 	// Environment listing (`env` with no command, `printenv [NAME…]`)
@@ -524,7 +525,7 @@ export const OUTPUT_FLAGS: Record<string, { short: string; longs: string[]; valu
  * `find *` destructive; `uniq *` writes its second file). → not read-only,
  * and exec-effect: the targets are unknowable.
  */
-export const GLOB_SENSITIVE_COMMANDS = new Set(["find", "fd", "rg", "git", "sort", "tree", "file", "uniq", "sed", "gh", "kubectl", "docker", "podman"]);
+export const GLOB_SENSITIVE_COMMANDS = new Set(["find", "fd", "rg", "git", "sort", "tree", "file", "uniq", "sed", "gh", "kubectl", "oc", "docker", "podman"]);
 
 /**
  * Commands that only write files named by their operands. Not read-only;
