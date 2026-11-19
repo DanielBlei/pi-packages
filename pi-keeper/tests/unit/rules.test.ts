@@ -407,7 +407,9 @@ test("scratch dir: writable in every mode, symlinks out are refused, bash redire
 		assert.equal(at("plan", "bash", bash(`tee ${scratch}/t /tmp/x`)), "ask");
 		// a heredoc fed to anything but cat, an unquoted one, or one redirected elsewhere is not data
 		assert.equal(at("plan", "bash", bash(`sh > ${scratch}/n <<'EOF'\nls\nEOF`)), "ask");
-		assert.equal(at("plan", "bash", bash(`cat > ${scratch}/n <<EOF\nhello\nEOF`)), "ask");
+		// an unquoted delimiter is data too when the body has nothing the shell would expand
+		assert.equal(at("plan", "bash", bash(`cat > ${scratch}/n <<EOF\nhello\nEOF`)), "allow");
+		assert.equal(at("plan", "bash", bash(`cat > ${scratch}/n <<EOF\nhello $USER\nEOF`)), "ask");
 		assert.equal(at("plan", "bash", bash(`cat > out.md <<'EOF'\nhello\nEOF`)), "ask");
 		assert.equal(at("plan", "bash", bash(`cat <<'EOF' | sh > ${scratch}/n\nls\nEOF`)), "ask");
 		assert.equal(at("default", "bash", bash(`rg foo > ${scratch}/escape/out.txt`)), "ask");

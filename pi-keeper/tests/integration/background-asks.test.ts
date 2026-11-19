@@ -317,6 +317,27 @@ describe("a lasting answer applies to the parent session", () => {
 		assert.equal(parent.dialogs.length, 1);
 	});
 
+	it("\"allow loops over globs\" is offered in the shared wording, lands in the parent's grants and is published", async () => {
+		const sandbox = sandboxed();
+		mkdirSync(join(sandbox.cwd, "data"), { recursive: true });
+		writeFileSync(join(sandbox.cwd, "data", "a.json"), "{}");
+		writeFileSync(join(sandbox.cwd, "data", "b.json"), "{}");
+		const loop = (body: string): AskRequest["call"] => ({ toolName: "bash", input: { command: `for f in data/*.json; do ${body} "$f"; done` } });
+		const parent = await parentOf(sandbox);
+		parent.answer(BG, "Yes, and allow loops over globs this session, for the parent and its subagents");
+		const first = file(sandbox, parent, { call: loop("cat") });
+		parent.pollAsks();
+		await until(() => replyTo(sandbox, parent, first) !== undefined, "the reply");
+		assert.equal(outcomeOf(sandbox, parent, first), "allow");
+		assert.equal(readParentGrants(sandbox.agentDir, { [PARENT_SESSION_ENV]: parent.sessionId })?.loopGlobs, true);
+		// the next background glob loop is judged with the parent's grant: no dialog
+		const second = file(sandbox, parent, { call: loop("head -n 1") });
+		parent.pollAsks();
+		await until(() => replyTo(sandbox, parent, second) !== undefined, "the reply");
+		assert.equal(outcomeOf(sandbox, parent, second), "allow");
+		assert.equal(parent.dialogs.length, 1);
+	});
+
 	it("an outside-read directory grant lands in the parent's grants", async () => {
 		const sandbox = sandboxed();
 		const outside = mkdtempSync(join(sandbox.root, "outside-"));
@@ -892,6 +913,59 @@ describe("hardening", () => {
 		await until(() => replyTo(sandbox, parent, request) !== undefined, "the reply");
 		assert.equal(outcomeOf(sandbox, parent, request), "deny/user");
 		assert.equal(parent.dialogs.length, 2);
+	});
+
+	it("a request file carrying claimed grants or a claimed scratch dir is never decided: the parser rejects unknown fields, so those claims cannot widen anything", async () => {
+		const sandbox = sandboxed();
+		const parent = await parentOf(sandbox);
+		// control: the same call without extras is decided (it asks, and the user declines)
+		parent.answer(BG, "esc");
+		const plain = file(sandbox, parent, { call: { toolName: "bash", input: { command: "python3 x.py" } } });
+		parent.pollAsks();
+		await until(() => replyTo(sandbox, parent, plain) !== undefined, "the control reply");
+		assert.equal(outcomeOf(sandbox, parent, plain), "deny/user");
+		assert.equal(parent.dialogs.length, 1);
+		const claimed = mkdtempSync(join(sandbox.root, "claimed-"));
+		const extras = { scratchDir: claimed, remembered: [["python3"]], grants: { prefixes: [["python3"]], exact: [["python3", "x.py"]], edits: true }, verbatim: ["python3 x.py"], rememberedVerbatim: ["python3 x.py"] };
+		const calls: AskRequest["call"][] = [
+			{ toolName: "bash", input: { command: "python3 x.py" } }, // covered only by a claimed grant
+			{ toolName: "write", input: { path: join(claimed, "o.txt"), content: "x" } }, // into the claimed scratch dir
+		];
+		const raw: AskRequest[] = [];
+		for (const call of calls) {
+			const request = file(sandbox, parent, { call }); // valid file first: creates the mailbox dir; the parent never serves it (no pollAsks yet)
+			writeFileSync(join(mailbox(sandbox, parent), "requests", `${request.id}.json`), JSON.stringify({ ...request, ...extras }));
+			raw.push(request);
+		}
+		parent.pollAsks();
+		await settle();
+		for (const request of raw) assert.equal(replyTo(sandbox, parent, request), undefined, "not decided, not allowed");
+		assert.equal(parent.dialogs.length, 1, "no new dialog either");
+		parent.assertNoPendingAnswers();
+	});
+
+	// phase 3b: expanded. The parent judges the unrolled loop: read-only, so it answers without a dialog.
+	it("a background request for a literal read-only for-loop is answered by the parent's rules without a dialog", async () => {
+		const sandbox = sandboxed();
+		const parent = await parentOf(sandbox);
+		const request = file(sandbox, parent, { call: { toolName: "bash", input: { command: 'for f in a.txt b.txt; do wc -l "$f"; done' } } });
+		parent.pollAsks();
+		await until(() => replyTo(sandbox, parent, request) !== undefined, "the reply");
+		assert.equal(outcomeOf(sandbox, parent, request), "allow");
+		assert.equal(parent.dialogs.length, 0);
+	});
+
+	// phase 3b: expanded. The parent has no scratch dir for the child, so a redirect into one is not accepted: it still asks.
+	it("a background request for a for-loop that redirects into a scratch dir still asks", async () => {
+		const sandbox = sandboxed();
+		const parent = await parentOf(sandbox);
+		parent.answer(BG, "esc");
+		const request = file(sandbox, parent, { call: { toolName: "bash", input: { command: 'for f in a.txt b.txt; do wc -l "$f"; done > /tmp/pi-keeper-child/o' } } });
+		parent.pollAsks();
+		await until(() => replyTo(sandbox, parent, request) !== undefined, "the reply");
+		assert.equal(outcomeOf(sandbox, parent, request), "deny/user");
+		assert.equal(parent.dialogs.length, 1);
+		assert.match(parent.dialogs[0].title, BG);
 	});
 
 	it("a workflow command's allowed-tools do not allow a background request", async () => {

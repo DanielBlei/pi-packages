@@ -64,6 +64,8 @@ export interface UiRelaySessionRules {
 	fetchHosts?: readonly string[];
 	/** Realpaths of git repo roots granted for the session ("Yes, and allow git in <repo>/ this session"). Optional: an older parent publishes none. */
 	gitRepos?: readonly string[];
+	/** "Yes, and allow loops over globs this session" is set. Optional: an older parent publishes none (read as false). */
+	loopGlobs?: boolean;
 	/** The parent session's working directory: a child's cwd must lie in its project (child-cwd.ts). Optional: an older parent publishes none. */
 	cwd?: string;
 	/** The parent session's current thinking level (`/keeper subagent-thinking: follow` runs the child at the higher of this and its own). Optional: an older parent publishes none. */
@@ -99,6 +101,8 @@ export interface UiRelay {
 	grantFetchHosts?(hosts: readonly string[]): void;
 	/** Add git repo roots to the parent's session grants (answered in a child). Optional: an older parent lacks it and the child keeps the grant locally. */
 	grantGitRepos?(roots: readonly string[]): void;
+	/** Set the loops-over-globs grant in the parent session (answered in a child). Optional: an older parent lacks it and the child keeps the grant locally. */
+	grantLoopGlobs?(): void;
 }
 
 export interface RelayOptions {

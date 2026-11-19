@@ -70,6 +70,7 @@ export function publishGrants(agentDir: string, sessionId: string, rules: Sessio
 			outsideReadDirs: rules.outsideReadDirs ?? [],
 			fetchHosts: rules.fetchHosts ?? [],
 			gitRepos: rules.gitRepos ?? [],
+			loopGlobs: rules.loopGlobs === true,
 			...(rules.cwd !== undefined ? { cwd: rules.cwd } : {}),
 			...(rules.thinking !== undefined ? { thinking: rules.thinking } : {}),
 		};
@@ -121,6 +122,7 @@ function parse(file: string): Snapshot | undefined {
 		if (!strings(value.outsideReadDirs)) return undefined;
 		if (value.fetchHosts !== undefined && !strings(value.fetchHosts)) return undefined;
 		if (value.gitRepos !== undefined && !strings(value.gitRepos)) return undefined;
+		if (value.loopGlobs !== undefined && typeof value.loopGlobs !== "boolean") return undefined;
 		if (value.cwd !== undefined && (typeof value.cwd !== "string" || !value.cwd.startsWith("/"))) return undefined;
 		if (value.thinking !== undefined && typeof value.thinking !== "string") return undefined;
 		return value as Snapshot;
@@ -146,6 +148,7 @@ export function readParentGrants(agentDir: string, env: NodeJS.ProcessEnv = proc
 		outsideReadDirs: snapshot.outsideReadDirs,
 		fetchHosts: snapshot.fetchHosts ?? [],
 		gitRepos: snapshot.gitRepos ?? [],
+		loopGlobs: snapshot.loopGlobs === true,
 		...(snapshot.cwd !== undefined ? { cwd: snapshot.cwd } : {}),
 		...(snapshot.thinking !== undefined ? { thinking: snapshot.thinking } : {}),
 	};

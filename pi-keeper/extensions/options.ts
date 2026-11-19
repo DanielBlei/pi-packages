@@ -9,6 +9,10 @@ export const ALLOW_ONCE = "Yes";
 export const SWITCH_TO_AUTO = "Yes, and switch to auto mode";
 export const REJECT = "No";
 export const REJECT_WITH_FEEDBACK = "No, and tell pi what to do instead";
+/** A `for` loop over a glob asks once: the grant lets the expander unroll such loops for the session (hard limits still ask). */
+export const ALLOW_LOOP_GLOBS = "Yes, and allow loops over globs this session";
+/** The same grant for a background subagent's ask: the answer is stored in the parent session. */
+export const ALLOW_LOOP_GLOBS_SHARED = "Yes, and allow loops over globs this session, for the parent and its subagents";
 export const ALLOW_EDITS = "Yes, allow all edits this session";
 /** The same grant as ALLOW_EDITS, worded for a background subagent's ask: the answer covers the parent session too. */
 export const ALLOW_EDITS_SHARED = "Yes, allow all edits this session, for the parent and its subagents";
@@ -78,6 +82,8 @@ export interface DialogOptionsInput {
 	feedback?: boolean;
 	/** Word the edits grant as covering the parent and its subagents (a background child's ask is answered in the parent). */
 	sharedEdits?: boolean;
+	/** Offer ALLOW_LOOP_GLOBS: a dry run with the grant would allow the call. Never in auto. */
+	loopGlobsGrant?: boolean;
 }
 
 export interface DialogOptions {
@@ -103,6 +109,7 @@ export function dialogOptions(input: DialogOptionsInput): DialogOptions {
 	if (input.fetchGrantLabel !== undefined) primary.push(input.fetchGrantLabel);
 	if (input.projectFetchGrantLabel !== undefined) primary.push(input.projectFetchGrantLabel);
 	if (input.gitGrantLabel !== undefined) primary.push(input.gitGrantLabel);
+	if (input.loopGlobsGrant === true && input.mode !== "auto") primary.push(input.sharedEdits === true ? ALLOW_LOOP_GLOBS_SHARED : ALLOW_LOOP_GLOBS);
 	if (canAllowEdits) primary.push(input.sharedEdits === true ? ALLOW_EDITS_SHARED : ALLOW_EDITS);
 	primary.push(REJECT);
 

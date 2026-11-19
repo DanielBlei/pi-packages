@@ -7,7 +7,7 @@ solved belong to [design.md](design.md) and are not repeated here.
 
 - **Plan approvals often do not lead to execution:** many go back to planning or are declined, and the plan view and plan prompt have changed since, so whether that shows in outcomes is not yet known.
 
-- **Prompts that remain:** reads outside the project, inline interpreter runs (`python3 -c`, heredocs), edits to pi's `models.json` and recursive `rtk grep -r` over a tree with a `.env` still ask by design, and each one is a cost.
+- **Prompts that remain:** reads outside the project, inline python that is not statically readable (an unknown import, a computed path, `python3 x.py`, a double-quoted `-c`), other heredocs than a plain scratch-dir write, `while`/`if`/`case` and functions, `$( )`, `cd` out of the project, a loop over a glob (once per session), edits to pi's `models.json` and recursive `rtk grep -r` over a tree with a `.env` still ask by design, and each one is a cost.
 
 - **Subagents:** background asks are limited (a reply takes up to about half a second; a parent blocked over 15 seconds looks gone to its children), and artifact writes are not scoped to the child's own directory because the artifact id is not the run id.
 

@@ -66,6 +66,7 @@ import {
 	NEVER_RULE_ROOTS,
 	WRAPPERS,
 	WRITE_FLAGS,
+	CHECKSUM_COMMANDS,
 	PROGRAM_FLAGS,
 	type FlagSpec,
 	type OptionSpec,
@@ -259,7 +260,7 @@ export function tokenize(command: string, scratch?: string): Segment[] | null {
 }
 
 /** Characters of a path literal we accept without expansion: no `$`, quotes, globs, `~`, backslash. */
-const LITERAL_PATH_CHARS = "A-Za-z0-9_\\-./+@:,=";
+export const LITERAL_PATH_CHARS = "A-Za-z0-9_\\-./+@:,=";
 
 /**
  * End index of a redirect target at `start` that is a literal absolute path
@@ -736,7 +737,7 @@ export function maskCommitHeredocs(command: string): string {
 }
 
 /**
- * For analysis only: removes a quoted heredoc that feeds `cat` when the line
+ * For analysis only: removes a heredoc that feeds `cat` (quoted delimiter, or unquoted with a body free of `$`, backticks and backslashes) when the line
  * redirects `cat`'s output (`cat > /scratch/x <<'EOF' … EOF`), leaving
  * `cat > /scratch/x`, so the tokenizer can judge the redirect target (only a
  * literal path in the scratch dir passes). The body is data: the delimiter is
@@ -753,7 +754,8 @@ export function maskScratchHeredocs(command: string, scratch: string | undefined
 		if (m === null) return text;
 		const at = from + m.index;
 		from = at + 2;
-		if (text[at - 1] === "<" || !/['"\\]/.test(m[2])) continue; // here-string, or an unquoted delimiter (expands)
+		const quoted = /['"\\]/.test(m[2]);
+		if (text[at - 1] === "<" || (!quoted && m[1] === "-")) continue; // here-string, or `<<-` with an unquoted delimiter
 		const opEnd = at + m[0].length;
 		const lineStart = text.lastIndexOf("\n", at - 1) + 1;
 		const lineEnd = text.indexOf("\n", opEnd);
@@ -766,6 +768,8 @@ export function maskScratchHeredocs(command: string, scratch: string | undefined
 		const lines = text.slice(lineEnd + 1).split("\n");
 		const end = lines.findIndex((l) => (m[1] === "-" ? l.replace(/^\t+/, "") : l) === delimiter);
 		if (end === -1) continue;
+		// an unquoted delimiter expands `$`, backticks and backslashes: only a body without them is plain data
+		if (!quoted && /[$`\\]/.test(lines.slice(0, end).join("\n"))) continue;
 		const after = lines.slice(end + 1);
 		text = text.slice(0, at) + text.slice(opEnd, lineEnd) + (after.length > 0 ? `\n${after.join("\n")}` : "");
 		from = at;
@@ -1201,7 +1205,8 @@ const plain = (reason: string): Blocker => ({ reason });
 const execBlock = (reason: string): Blocker => ({ reason, effect: "exec" });
 const writeBlock = (reason: string, label: string, targets: Target[] | null): Blocker => ({ reason, effect: "write", label, targets });
 
-function writeFlagReason(label: string, flag: string): string {
+function writeFlagReason(label: string, flag: string, root?: string): string {
+	if (root !== undefined && CHECKSUM_COMMANDS.includes(root)) return `\`${label} ${flag}\` reads the file names to check from a file, so the files it reads can't be checked`;
 	return `\`${label} ${flag}\` can write files or run programs`;
 }
 
@@ -1561,7 +1566,7 @@ function segmentBlocker(segment: Segment, cwd: string | undefined, scratch?: str
 	const stripped = stripPrefixes(segment.argv, segment.globs, true);
 	if (stripped === null) {
 		const name = segment.argv.map((w) => ASSIGNMENT.exec(w)?.[1]).find((n) => n !== undefined && !isSafeEnvVar(n));
-		return plain(`sets \`${name ?? "a variable"}=…\` (only known-safe variables keep a command read-only)`);
+		return plain(`sets \`${name ?? "a variable"}=…\` (only known-safe variables, or a literal lowercase variable used later in the same command, keep a command read-only)`);
 	}
 	// xargs appends words read from stdin, so the arguments seen here are not the ones that run
 	viaXargs ||= segment.argv.slice(0, segment.argv.length - stripped.argv.length).includes("xargs");
@@ -1775,7 +1780,7 @@ function scratchCloneOk(args: string[], globs: boolean[], inScratch: (word: stri
  */
 function flagBlocker(root: string, args: string[], label: string): Blocker | undefined {
 	const flag = writeFlag(root, args);
-	if (flag !== undefined) return execBlock(writeFlagReason(label, flag));
+	if (flag !== undefined) return execBlock(writeFlagReason(label, flag, root));
 	const spec = Object.hasOwn(OUTPUT_FLAGS, root) ? OUTPUT_FLAGS[root] : undefined;
 	if (spec === undefined) return undefined;
 	const values = optionValues(args, spec.short, spec.longs, spec.valueShort, spec.attached);
@@ -2235,13 +2240,13 @@ function rootOf(segment: Segment): string | undefined {
 }
 
 /** Why the tokenizer rejected a command (see its header). */
-function unparseableReason(command: string): string {
+export function unparseableReason(command: string): string {
 	if (command.includes("$(") || command.includes("`")) return "uses command substitution (`$(…)`), which can't be checked";
 	// quoted text can't trigger the remaining rejections
 	const unquoted = command.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''");
 	if (unquoted.includes("<")) return "reads from a heredoc or input redirect";
 	if (unquoted.includes("(") || unquoted.includes(")")) return "uses a subshell or process substitution";
-	if (unquoted.includes(">")) return "writes output to a file (only /dev/null is allowed)";
+	if (unquoted.includes(">")) return "writes output to a file (only /dev/null or a file in the scratch dir is allowed)";
 	return "can't be parsed safely (unbalanced quotes or an empty command)";
 }
 

@@ -404,9 +404,9 @@ test("reasons name what isn't read-only", () => {
 		["git -c core.pager=x log", /`git -c` can make git run programs/],
 		["rtk tsc --noEmit", /^`tsc` isn't on the read-only list/],
 		["npm test", /`npm test` isn't a read-only npm command/],
-		["FOO=1 ls", /sets `FOO=…`/],
+		["FOO=1 ls", /sets `FOO=…`.*literal lowercase variable used later in the same command/],
 		["sort -o out.txt in.txt", /`sort -o` writes `out.txt`/],
-		["echo hi > out.txt", /writes output to a file/],
+		["echo hi > out.txt", /writes output to a file \(only \/dev\/null or a file in the scratch dir is allowed\)/],
 		["cat <<EOF\nx\nEOF", /heredoc or input redirect/],
 		["node script.js", /`node` runs code/],
 		["cd .. && ls", /`cd` leaves the working directory/],
@@ -2048,12 +2048,15 @@ test("git config writes of code-running keys are dangerous; reads and other keys
 // Scratch heredocs
 // ---------------------------------------------------------------------------
 
-test("maskScratchHeredocs: only a quoted heredoc feeding a redirected cat", () => {
+test("maskScratchHeredocs: a quoted (or inert unquoted) heredoc feeding a redirected cat", () => {
 	const scratch = "/tmp/pdf-scratch";
 	assert.equal(maskScratchHeredocs("cat > /tmp/pdf-scratch/x <<'EOF'\nbody $(x)\nEOF", scratch), "cat > /tmp/pdf-scratch/x ");
 	assert.equal(maskScratchHeredocs("cat <<'EOF' > /tmp/pdf-scratch/x\nbody\nEOF\nls", scratch), "cat  > /tmp/pdf-scratch/x\nls");
 	assert.equal(maskScratchHeredocs("cat <<-'EOF' >> f\n\tbody\n\tEOF", scratch), "cat  >> f");
-	for (const c of ["cat > f <<EOF\nx\nEOF", "sh > f <<'EOF'\nx\nEOF", "cat <<'EOF'\nx\nEOF", "cat <<'EOF' | sh > f\nx\nEOF", "cat > f <<'EOF'\nx", "cat <<< 'x' > f"]) {
+	// an unquoted delimiter is accepted only when the body has no `$`, backtick or backslash
+	assert.equal(maskScratchHeredocs("cat > /tmp/pdf-scratch/x <<EOF\nplain\nEOF", scratch), "cat > /tmp/pdf-scratch/x ");
+	assert.equal(maskScratchHeredocs("cat >> /tmp/pdf-scratch/x <<EOF\nplain\nEOF", scratch), "cat >> /tmp/pdf-scratch/x ");
+	for (const c of ["cat > f <<EOF\n$x\nEOF", "cat > f <<EOF\n`id`\nEOF", "cat > f <<EOF\na\\nb\nEOF", "cat > f <<-EOF\nx\nEOF", "sh > f <<EOF\nx\nEOF", "sh > f <<'EOF'\nx\nEOF", "cat <<'EOF'\nx\nEOF", "cat <<'EOF' | sh > f\nx\nEOF", "cat > f <<'EOF'\nx", "cat <<< 'x' > f"]) {
 		assert.equal(maskScratchHeredocs(c, scratch), c, c);
 	}
 	assert.equal(maskScratchHeredocs("cat > f <<'EOF'\nx\nEOF", undefined), "cat > f <<'EOF'\nx\nEOF");

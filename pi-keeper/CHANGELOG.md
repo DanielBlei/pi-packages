@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Loops over globs ask once. `for f in *.md; do …; done` gets a new option, "Yes, and
+  allow loops over globs this session". Subagents share the grant.
+- Dev: `npm run replay` (`scripts/replay.ts`) replays a recorded session and compares
+  the decisions of two code trees.
+
+### Changed
+
+- More safe commands run without a dialog when every part is read-only or covered:
+  literal `for` loops and literal lowercase variables, pipes and redirects after `done`,
+  `cmd < file`, checksum tools (not `-c`/`--check`), plain heredocs into the scratch dir
+  (unquoted delimiter with an inert body, and `cat >>`), and statically readable inline
+  python (`python3 -c '…'`, `python3 - <<'EOF'`).
+- The secret, outside-read and dangerous-command checks judge the expanded command.
+- Dialogs name the real reason, taken from the expanded command.
+- No answer of an earlier version becomes stricter. Auto mode is unchanged.
+
 ## 0.1.2 - 2026-11-18
 
 ### Added
