@@ -7,7 +7,7 @@ Permission modes and a project rulebook for pi: `default`, `auto` and `plan`, pe
 ## Install
 
 ```bash
-pi install npm:pi-keeper    # every session; writes ~/.pi/agent/settings.json
+pi install npm:pi-keeper
 ```
 
 `pi update --extensions` picks up new releases. From a checkout, see [Working from a checkout](https://github.com/DanielBlei/pi-packages/blob/main/pi-keeper/docs/development.md#working-from-a-checkout).
@@ -16,7 +16,7 @@ pi install npm:pi-keeper    # every session; writes ~/.pi/agent/settings.json
 
 | Mode | Use it for | Runs without asking | Asks | Blocked |
 |---|---|---|---|---|
-| `default` (blue) | everyday work: you approve changes | reads, searches, read-only bash, anything your rules cover, read-only tools | edits, other bash, other tools | `sudo` & co |
+| `default` (blue) | everyday work: you approve changes | reads, searches, read-only bash (loops and inline python included), anything your rules cover, read-only tools | edits, other bash, other tools | `sudo` & co |
 | `auto` (yellow) | a trusted task you are watching | almost everything, including deletes inside the project | dangerous or destructive commands, protected paths, writes outside the project, secrets, the first outside read | `sudo` & co |
 | `plan` (green) | researching and writing a plan | reads, read-only bash, the plan file, the scratch dir | other bash | edits, other tools, dangerous commands, `sudo` & co |
 
@@ -34,7 +34,7 @@ In plan mode the agent writes a plan file and calls `exit_plan_mode`; you then p
 | `/rules` | Open the rulebook: rules that fire when the model slips |
 | `/keeper [setting value]` | Settings panel, or set one directly |
 
-Dialogs offer *Yes* once, *Don't ask again this session*, or *Always allow … in this project*, which is saved to `.pi/settings.local.json` (default mode only). `ask` and `deny` rules apply in every mode; `allow` rules load after you review the file once. Details: [Managing rules](https://github.com/DanielBlei/pi-packages/blob/main/pi-keeper/docs/guide.md#managing-rules), [The dialogs](https://github.com/DanielBlei/pi-packages/blob/main/pi-keeper/docs/guide.md#the-dialogs), [/keeper](https://github.com/DanielBlei/pi-packages/blob/main/pi-keeper/docs/guide.md#keeper).
+Dialogs offer *Yes* once, *Don't ask again this session*, or *Always allow … in this project*, for commands as well as MCP and other tools. Project rules are saved to `.pi/settings.local.json` (default mode only). Session answers reach every subagent. `ask` and `deny` rules apply in every mode; `allow` rules load after you review the file once. Details: [Managing rules](https://github.com/DanielBlei/pi-packages/blob/main/pi-keeper/docs/guide.md#managing-rules), [The dialogs](https://github.com/DanielBlei/pi-packages/blob/main/pi-keeper/docs/guide.md#the-dialogs), [/keeper](https://github.com/DanielBlei/pi-packages/blob/main/pi-keeper/docs/guide.md#keeper).
 
 ## Optional companions
 

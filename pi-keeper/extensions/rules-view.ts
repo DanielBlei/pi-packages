@@ -26,7 +26,7 @@ export interface RulesTheme {
 
 /** One line of the list, before colours. */
 export type RulesRow =
-	| { readonly kind: "rule"; readonly rule: RulebookRule; readonly fired: boolean }
+	| { readonly kind: "rule"; readonly rule: RulebookRule; readonly fired: boolean; readonly count: number }
 	/** A project rule file waiting for its one-time review. */
 	| { readonly kind: "untrusted"; readonly file: string }
 	/** A rule file that could not be read at all. */
@@ -38,20 +38,26 @@ export interface RulesViewInput {
 	readonly problems: readonly { readonly file: string; readonly problem: string }[];
 	/** Rule names that fired this session. */
 	readonly fired: ReadonlySet<string>;
+	/** Lifetime fires by rule name: a user rule's across all projects, a project rule's in this project. */
+	readonly lifetime?: ReadonlyMap<string, number>;
 }
 
 /** The rows to show: every rule, then the files that did not become one. */
-export function rulesRows({ rules, untrusted, problems, fired }: RulesViewInput): RulesRow[] {
+export function rulesRows({ rules, untrusted, problems, fired, lifetime }: RulesViewInput): RulesRow[] {
 	return [
-		...rules.map((rule): RulesRow => ({ kind: "rule", rule, fired: fired.has(rule.name) })),
+		...rules.map((rule): RulesRow => ({ kind: "rule", rule, fired: fired.has(rule.name), count: lifetime?.get(rule.name) ?? 0 })),
 		...untrusted.map((entry): RulesRow => ({ kind: "untrusted", file: entry.file })),
 		...problems.map((entry): RulesRow => ({ kind: "problem", file: entry.file, problem: entry.problem })),
 	];
 }
 
 const SEP = " · ";
-/** A rule fires once per session, so the count is 0 or 1; the word says it plainly. */
-const fireText = (fired: boolean): string => (fired ? "1 fire" : "not fired");
+/** "12 fires · fired this session", "12 fires", "not fired yet". A fire this session counts even if the store could not be written. */
+export function fireText(count: number, fired: boolean): string {
+	const total = Math.max(count, fired ? 1 : 0);
+	if (total === 0) return "not fired yet";
+	return `${total} ${total === 1 ? "fire" : "fires"}${fired ? " · fired this session" : ""}`;
+}
 const baseName = (file: string): string => file.split("/").pop() ?? file;
 
 /**
@@ -88,16 +94,16 @@ export function renderRulesList(theme: RulesTheme, rows: readonly RulesRow[], se
 		}
 		const name = theme.bold(theme.fg(index === selected ? "accent" : "mdLink", sanitizeForTerminal(row.rule.name)));
 		const source = row.rule.kind === "user" ? theme.fg("success", "user") : theme.fg("warning", "project");
-		const fires = row.fired ? theme.fg("success", fireText(true)) : theme.fg("muted", fireText(false));
+		const fires = theme.fg(row.fired || row.count > 0 ? "success" : "muted", fireText(row.count, row.fired));
 		out.push(...wrapLine(`${cursor}${name}${sep}${source}${sep}${fires}${sep}${theme.fg("text", sanitizeForTerminal(row.rule.description))}`, width, "    "));
 	}
 	return out;
 }
 
 /** One rule in full: where it lives, what makes it fire, and what it says. */
-export function renderRuleDetail(theme: RulesTheme, rule: RulebookRule, fired: boolean, width: number): string[] {
+export function renderRuleDetail(theme: RulesTheme, rule: RulebookRule, fired: boolean, width: number, count = 0): string[] {
 	const lines: string[] = [
-		...wrapLine(`${theme.bold(theme.fg("accent", sanitizeForTerminal(rule.name)))}${theme.fg("dim", SEP)}${rule.kind === "user" ? theme.fg("success", "user") : theme.fg("warning", "project")}${theme.fg("dim", SEP)}${fired ? theme.fg("success", fireText(true)) : theme.fg("muted", fireText(false))}`, width),
+		...wrapLine(`${theme.bold(theme.fg("accent", sanitizeForTerminal(rule.name)))}${theme.fg("dim", SEP)}${rule.kind === "user" ? theme.fg("success", "user") : theme.fg("warning", "project")}${theme.fg("dim", SEP)}${theme.fg(fired || count > 0 ? "success" : "muted", fireText(count, fired))}`, width),
 		...wrapLine(theme.fg("text", sanitizeForTerminal(rule.description)), width),
 		"",
 		...wrapLine(theme.fg("dim", "condition"), width),
@@ -128,7 +134,7 @@ export function rulesText(input: RulesViewInput): string {
 	for (const row of rulesRows(input)) {
 		if (row.kind === "untrusted") lines.push(`  ${baseName(row.file)} · project · needs review (asked on the next prompt)`);
 		else if (row.kind === "problem") lines.push(`  ${baseName(row.file)} · skipped: ${row.problem}`);
-		else lines.push(`  ${row.rule.name} · ${row.rule.kind} · ${fireText(row.fired)} · ${row.rule.description}`);
+		else lines.push(`  ${row.rule.name} · ${row.rule.kind} · ${fireText(row.count, row.fired)} · ${row.rule.description}`);
 	}
 	lines.push("A fired rule sends one hidden correction and shows a card. Sources: ~/.pi/agent/pi-keeper/rules/ and .pi/rules/. /rules <name> shows one.");
 	return lines.join("\n");
@@ -156,7 +162,7 @@ export async function rulesPanel(ctx: ExtensionContext, input: RulesViewInput): 
 			render(width: number): string[] {
 				if (detail !== undefined) {
 					const fired = input.fired.has(detail.name);
-					return [...renderRuleDetail(theme, detail, fired, width), "", ...wrapLine(theme.fg("dim", "  Esc back · Esc again closes"), width)];
+					return [...renderRuleDetail(theme, detail, fired, width, input.lifetime?.get(detail.name) ?? 0), "", ...wrapLine(theme.fg("dim", "  Esc back · Esc again closes"), width)];
 				}
 				return listScreen(theme, rows, selected, width);
 			},

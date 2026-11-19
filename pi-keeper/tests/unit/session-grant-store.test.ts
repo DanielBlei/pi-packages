@@ -39,7 +39,7 @@ describe("SessionGrants", () => {
 		g.removeVerbatim("a");
 		g.removeReadDir("/data");
 		g.removeFetchHost("pypi.org");
-		assert.deepEqual(g.snapshot(), { prefixes: [], exact: [], verbatim: [], outsideReadsAllowed: false, outsideReadDirs: [], fetchHosts: [], gitRepos: [], loopGlobs: false });
+		assert.deepEqual(g.snapshot(), { prefixes: [], exact: [], verbatim: [], outsideReadsAllowed: false, outsideReadDirs: [], fetchHosts: [], gitRepos: [], loopGlobs: false, pythonWhile: false, tools: [] });
 	});
 
 	it("removes one pattern by text", () => {
@@ -61,7 +61,7 @@ describe("SessionGrants", () => {
 		g.addFetchHost("h.io");
 		g.reset();
 		assert.equal(g.prefixes, live);
-		assert.deepEqual(g.snapshot(), { prefixes: [], exact: [], verbatim: [], outsideReadsAllowed: false, outsideReadDirs: [], fetchHosts: [], gitRepos: [], loopGlobs: false });
+		assert.deepEqual(g.snapshot(), { prefixes: [], exact: [], verbatim: [], outsideReadsAllowed: false, outsideReadDirs: [], fetchHosts: [], gitRepos: [], loopGlobs: false, pythonWhile: false, tools: [] });
 	});
 
 	it("dedupes git repos, removes them, and resets them with the rest", () => {
@@ -167,6 +167,38 @@ describe("the loop-glob grant", () => {
 			delete old.loopGlobs;
 			writeFileSync(file, JSON.stringify(old), { mode: 0o600 });
 			assert.equal(readParentGrants(dir, env)?.loopGlobs, false);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("the python-while grant", () => {
+	it("is off by default, set by allowPythonWhile, in the snapshot, cleared by reset", () => {
+		const g = new SessionGrants();
+		assert.equal(g.pythonWhile, false);
+		g.allowPythonWhile();
+		assert.equal(g.pythonWhile, true);
+		assert.equal(g.snapshot().pythonWhile, true);
+		g.reset();
+		assert.equal(g.pythonWhile, false);
+		assert.equal(g.snapshot().pythonWhile, false);
+		g.allowPythonWhile();
+		g.revokePythonWhile();
+		assert.equal(g.pythonWhile, false);
+	});
+
+	it("travels in the published snapshot; an old snapshot without the key reads as false", () => {
+		const dir = mkdtempSync(join(tmpdir(), "grants-"));
+		const env = { [PARENT_SESSION_ENV]: "session-1" };
+		try {
+			publishGrants(dir, "session-1", { prefixes: [], exact: [], edits: false, outsideReads: false, pythonWhile: true });
+			assert.equal(readParentGrants(dir, env)?.pythonWhile, true);
+			const file = grantsFile(dir, "session-1");
+			const old = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+			delete old.pythonWhile;
+			writeFileSync(file, JSON.stringify(old), { mode: 0o600 });
+			assert.equal(readParentGrants(dir, env)?.pythonWhile, false);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

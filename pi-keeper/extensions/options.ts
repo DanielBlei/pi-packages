@@ -13,6 +13,10 @@ export const REJECT_WITH_FEEDBACK = "No, and tell pi what to do instead";
 export const ALLOW_LOOP_GLOBS = "Yes, and allow loops over globs this session";
 /** The same grant for a background subagent's ask: the answer is stored in the parent session. */
 export const ALLOW_LOOP_GLOBS_SHARED = "Yes, and allow loops over globs this session, for the parent and its subagents";
+/** A script whose only problem is a python `while` loop asks once: the grant lets the analyzer accept it (a loop may not end or may fill memory, so higher risk). */
+export const ALLOW_PYTHON_WHILE = "Yes, and allow python `while` loops this session (higher risk: a loop may not end or may fill memory)";
+/** The same grant for a background subagent's ask: the answer is stored in the parent session. */
+export const ALLOW_PYTHON_WHILE_SHARED = "Yes, and allow python `while` loops this session (higher risk: a loop may not end or may fill memory), for the parent and its subagents";
 export const ALLOW_EDITS = "Yes, allow all edits this session";
 /** The same grant as ALLOW_EDITS, worded for a background subagent's ask: the answer covers the parent session too. */
 export const ALLOW_EDITS_SHARED = "Yes, allow all edits this session, for the parent and its subagents";
@@ -42,6 +46,16 @@ export function gitGrantLabel(roots: readonly string[]): string {
 /** "Yes, and always allow fetching from <host> in this project": saved as Fetch(<host>). */
 export function projectFetchGrantLabel(hosts: readonly string[]): string {
 	return `Yes, and always allow fetching from ${hosts.map((h) => sanitizeForTerminal(h)).join(", ")} in this project`;
+}
+/** Appended to a tool grant label when the tool's name suggests it changes data. */
+export const MAY_CHANGE_DATA = " (may change data)";
+/** "Yes, and don't ask again for `<key>` this session": a tool that is not built in, or a gateway call (tool-grants.ts). */
+export function toolGrantLabel(key: string, risky: boolean, child: boolean): string {
+	return `Yes, and don't ask again for \`${key}\` this session${child ? ", for me and my subagents" : ""}${risky ? MAY_CHANGE_DATA : ""}`;
+}
+/** "Yes, and always allow `<key>` in this project": saved as the allow rule `<key>`. */
+export function projectToolGrantLabel(key: string, risky: boolean): string {
+	return `Yes, and always allow \`${key}\` in this project${risky ? MAY_CHANGE_DATA : ""}`;
 }
 /** Offered when no prefix rule can be made for a command (an interpreter, a compound with a script): only this exact text is remembered. */
 export const REMEMBER_EXACT = "Yes, and don't ask again for this exact command this session";
@@ -77,6 +91,10 @@ export interface DialogOptionsInput {
 	projectFetchGrantLabel?: string;
 	/** "Yes, and allow git in <repo>/ this session" label; undefined when no repo grant would remove the ask. */
 	gitGrantLabel?: string;
+	/** `toolGrantLabel(...)`; undefined unless the call is a tool or gateway call with a grantable key that fell to default mode's fallback. */
+	toolGrantLabel?: string;
+	/** `projectToolGrantLabel(...)`; undefined unless project approvals are on as well. */
+	projectToolGrantLabel?: string;
 	/** The ask comes from a subagent child: no switching to auto mode (children can't switch). */
 	child?: boolean;	/** Offer REJECT_WITH_FEEDBACK (default true). False when the answer cannot carry text back, as for a background child. */
 	feedback?: boolean;
@@ -84,6 +102,8 @@ export interface DialogOptionsInput {
 	sharedEdits?: boolean;
 	/** Offer ALLOW_LOOP_GLOBS: a dry run with the grant would allow the call. Never in auto. */
 	loopGlobsGrant?: boolean;
+	/** Offer ALLOW_PYTHON_WHILE: a dry run with the grant would allow the call. Never in auto. */
+	pythonWhileGrant?: boolean;
 }
 
 export interface DialogOptions {
@@ -109,7 +129,10 @@ export function dialogOptions(input: DialogOptionsInput): DialogOptions {
 	if (input.fetchGrantLabel !== undefined) primary.push(input.fetchGrantLabel);
 	if (input.projectFetchGrantLabel !== undefined) primary.push(input.projectFetchGrantLabel);
 	if (input.gitGrantLabel !== undefined) primary.push(input.gitGrantLabel);
+	if (input.toolGrantLabel !== undefined) primary.push(input.toolGrantLabel);
+	if (input.projectToolGrantLabel !== undefined) primary.push(input.projectToolGrantLabel);
 	if (input.loopGlobsGrant === true && input.mode !== "auto") primary.push(input.sharedEdits === true ? ALLOW_LOOP_GLOBS_SHARED : ALLOW_LOOP_GLOBS);
+	if (input.pythonWhileGrant === true && input.mode !== "auto") primary.push(input.sharedEdits === true ? ALLOW_PYTHON_WHILE_SHARED : ALLOW_PYTHON_WHILE);
 	if (canAllowEdits) primary.push(input.sharedEdits === true ? ALLOW_EDITS_SHARED : ALLOW_EDITS);
 	primary.push(REJECT);
 

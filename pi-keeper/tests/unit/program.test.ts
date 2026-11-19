@@ -708,3 +708,26 @@ test("python: a path that cannot be quoted refuses", { skip: hasPython ? false :
 	pyCheck(`python3 -c 'print(open("a(1)").read())'`, { problem: PROBLEMS.brackets });
 	pyCheck(`python3 -c 'import glob; print(glob.glob("a b/*"))'`, { problem: PROBLEMS.pyPath("a b/*") });
 });
+
+test("python: literal-list and listing loops, and the while switch", { skip: hasPython ? false : "python3 is not installed" }, () => {
+	pyCheck(`python3 -c 'for n in ["a.json", "b.json"]: print(open("data/" + n).read())'`, { text: "cat -- 'data/a.json' 'data/b.json'" });
+	pyCheck(`python3 -c 'import glob\nfor f in glob.glob("data/*.json"): print(open(f).read())'`, { text: "cat -- data/*.json; ls -- data/*.json" });
+	pyCheck(`python3 -c 'import os\nfor n in os.listdir("data"): print(os.path.getsize("data/" + n))'`, { text: "cat -- data/*; ls -- 'data'" });
+	pyCheck(`python3 -c 'from pathlib import Path\nfor p in Path("data").glob("*.json"): print(p.read_text())'`, { text: "cat -- data/*.json; ls -- data/*.json" });
+	const whileCmd = `python3 -c 'n = 2\nwhile n: n -= 1'`;
+	pyCheck(whileCmd, { problem: "python: a `while` loop may not end or may fill memory, so it needs the session option" });
+	const on = expandCommand(whileCmd, { cwd: pyRoot, scratch: pyScratch, env: pyEnv, pythonWhile: true });
+	assert.deepEqual(on, { text: "true", changed: true });
+	const pow = expandCommand(`python3 -c 'n = 2\nwhile n: n = n ** 2'`, { cwd: pyRoot, scratch: pyScratch, env: pyEnv, pythonWhile: true });
+	assert.match(pow.problem ?? "", /can run without end or fill memory/);
+	assert.equal(pow.changed, false);
+});
+
+test("python: dotfile patterns become the dotfiles that exist", { skip: hasPython ? false : "python3 is not installed" }, () => {
+	mkdirSync(join(pyRoot, "dots"), { recursive: true });
+	writeFileSync(join(pyRoot, "dots", "x.json"), "{}\n");
+	writeFileSync(join(pyRoot, "dots", ".env"), "T=1\n");
+	writeFileSync(join(pyRoot, "dots", ".hid.json"), "{}\n");
+	pyCheck(`python3 -c 'import os\nfor n in os.listdir("dots"): print(open(os.path.join("dots", n)).read())'`, { text: "cat -- dots/* 'dots/.env' 'dots/.hid.json'; ls -- 'dots'" });
+	pyCheck(`python3 -c 'from pathlib import Path\nfor p in Path("dots").glob("*.json"): print(p.read_text())'`, { text: "cat -- dots/*.json 'dots/.hid.json'; ls -- dots/*.json" });
+});

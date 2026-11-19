@@ -56,6 +56,9 @@ export function rulesLine({ mode, project, session }: RulesLineInput): string {
 		groups.push({ label: "Hosts curl/wget GETs reach without asking", items: [...new Set(hosts)] });
 	}
 
+	// tool grants (`Tool(x)`, `Mcp(server/tool)`) are honoured where the toolGrant matcher is listed
+	if (honours(mode, "toolGrant")) groups.push({ label: "Tools allowed without asking", items: [...new Set(session?.tools ?? [])].map((key) => `\`${key}\``) });
+
 	let budget = RULES_LINE_CAP;
 	const parts: string[] = [];
 	for (const { label, items } of groups) {
@@ -67,5 +70,7 @@ export function rulesLine({ mode, project, session }: RulesLineInput): string {
 	}
 	if (session?.outsideReads === true) parts.push("All reads outside the working directory are allowed this session (secrets still ask).");
 	if (session?.edits === true && honours(mode, "sessionEdits")) parts.push("All file edits are allowed this session (protected paths still ask).");
+	if (session?.loopGlobs === true) parts.push("Loops over globs are allowed this session (read-only bodies).");
+	if (session?.pythonWhile === true) parts.push("Python `while` loops are allowed this session (a loop may not end or may fill memory).");
 	return parts.length === 0 ? "" : `Your user's rules: ${parts.join(" ")}`;
 }

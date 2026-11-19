@@ -29,6 +29,8 @@ export interface SessionGrantsSnapshot {
 	readonly fetchHosts: readonly string[];
 	readonly gitRepos: readonly string[];
 	readonly loopGlobs: boolean;
+	readonly pythonWhile: boolean;
+	readonly tools: readonly string[];
 }
 
 export class SessionGrants {
@@ -40,6 +42,8 @@ export class SessionGrants {
 	readonly #fetchHosts: string[] = [];
 	readonly #gitRepos: string[] = [];
 	#loopGlobs = false;
+	#pythonWhile = false;
+	readonly #tools: string[] = [];
 
 	/** Command prefixes approved for the session. */
 	get prefixes(): readonly (readonly string[])[] {
@@ -81,6 +85,16 @@ export class SessionGrants {
 		return this.#loopGlobs;
 	}
 
+	/** "Yes, and allow python `while` loops this session": a script whose only problem is a `while` loop may run (higher risk: it may not end or may fill memory). */
+	get pythonWhile(): boolean {
+		return this.#pythonWhile;
+	}
+
+	/** "Yes, and don't ask again for `Tool(x)` / `Mcp(server/tool)` this session": tool grant keys (tool-grants.ts). */
+	get tools(): readonly string[] {
+		return this.#tools;
+	}
+
 	/** Empty everything in place (the arrays keep their identity, so a live reader sees the reset). */
 	reset(): void {
 		this.#prefixes.length = 0;
@@ -91,6 +105,8 @@ export class SessionGrants {
 		this.#fetchHosts.length = 0;
 		this.#gitRepos.length = 0;
 		this.#loopGlobs = false;
+		this.#pythonWhile = false;
+		this.#tools.length = 0;
 	}
 
 	/** A deep copy, frozen: mutating it can't reach the live state. */
@@ -105,6 +121,8 @@ export class SessionGrants {
 			fetchHosts: Object.freeze([...this.#fetchHosts]),
 			gitRepos: Object.freeze([...this.#gitRepos]),
 			loopGlobs: this.#loopGlobs,
+			pythonWhile: this.#pythonWhile,
+			tools: Object.freeze([...this.#tools]),
 		});
 	}
 
@@ -120,12 +138,29 @@ export class SessionGrants {
 		if (at !== -1) list.splice(at, 1);
 	}
 
+	addTool(key: string): void {
+		if (!this.#tools.includes(key)) this.#tools.push(key);
+	}
+
+	removeTool(key: string): void {
+		const at = this.#tools.indexOf(key);
+		if (at !== -1) this.#tools.splice(at, 1);
+	}
+
 	allowLoopGlobs(): void {
 		this.#loopGlobs = true;
 	}
 
 	revokeLoopGlobs(): void {
 		this.#loopGlobs = false;
+	}
+
+	allowPythonWhile(): void {
+		this.#pythonWhile = true;
+	}
+
+	revokePythonWhile(): void {
+		this.#pythonWhile = false;
 	}
 
 	allowOutsideReads(): void {

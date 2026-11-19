@@ -20,6 +20,7 @@ import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from "no
 import { homedir } from "node:os";
 import { canonicalize, commandUnits, hasRemoval, isPrivilegedCommand, isRememberableExact, isRememberablePrefix } from "./utils.ts";
 import { countWork } from "./perf.ts";
+import { parseGrantKey } from "./tool-grants.ts";
 
 export const NAMESPACE = "pi-keeper";
 
@@ -59,6 +60,14 @@ export interface ParsedVerbatim {
 	command: string;
 }
 
+/** `Tool(<name>)` / `Mcp([<server>/]<tool>)` (tool-grants.ts): a tool that is not built in, or a gateway call. */
+export interface ParsedToolRule {
+	/** The entry as written, trimmed. */
+	text: string;
+	/** The canonical key (`Tool(x)`, `Mcp(server/tool)`), compared with the call's key. */
+	key: string;
+}
+
 export interface ParsedRules {
 	allow: ParsedRule[];
 	ask: ParsedRule[];
@@ -69,6 +78,10 @@ export interface ParsedRules {
 	fetchHosts: ParsedFetchHost[];
 	/** Allow-list `BashExact(<command text>)` entries. */
 	allowVerbatim: ParsedVerbatim[];
+	/** `Tool(...)` / `Mcp(...)` entries of the allow, ask and deny lists. */
+	allowTools: ParsedToolRule[];
+	askTools: ParsedToolRule[];
+	denyTools: ParsedToolRule[];
 	/** Malformed entries and structure problems, one line each. */
 	warnings: string[];
 }
@@ -84,11 +97,27 @@ export interface ProjectPermissions {
 	readDirs: string[];
 	/** Trusted `Fetch(<host>)` hosts (curl/wget GETs that run without asking). */
 	fetchHosts: string[];
+	/** Trusted `Tool(...)` / `Mcp(...)` allow keys (absent in hand-built permissions: read as none). */
+	tools?: string[];
+	/** `Tool(...)` / `Mcp(...)` ask and deny keys; they always load. */
+	askTools?: string[];
+	denyTools?: string[];
 	/** The file exists but cannot be read or parsed: every shell command asks (see LoadedRules.broken). */
 	broken?: string;
 }
 
-export const NO_PROJECT_RULES: ProjectPermissions = { allow: { prefixes: [], exact: [], verbatim: [] }, ask: [], deny: [], readDirs: [], fetchHosts: [] };
+export const NO_PROJECT_RULES: ProjectPermissions = { allow: { prefixes: [], exact: [], verbatim: [] }, ask: [], deny: [], readDirs: [], fetchHosts: [], tools: [], askTools: [], denyTools: [] };
+
+/**
+ * Parse a `Tool(<name>)` or `Mcp([<server>/]<tool>)` entry: undefined when it isn't one, an error when it names
+ * something that can't be granted (bash, the gateway itself, a built-in tool, `mcpScript`).
+ */
+export function parseToolRule(entry: string): ParsedToolRule | { error: string } | undefined {
+	const parsed = parseGrantKey(entry);
+	if (parsed === undefined) return undefined;
+	if ("error" in parsed) return parsed;
+	return { text: entry.trim(), key: parsed.key };
+}
 
 /**
  * Parse a `Read(<dir>/**)` entry: undefined when it isn't one, an error when
@@ -202,7 +231,7 @@ export function parsePattern(text: string, list: RuleList): ParsedRule | { error
 
 /** Parse the file's JSON. Malformed entries are skipped and reported. */
 export function parseRules(json: unknown): ParsedRules {
-	const out: ParsedRules = { allow: [], ask: [], deny: [], readDirs: [], fetchHosts: [], allowVerbatim: [], warnings: [] };
+	const out: ParsedRules = { allow: [], ask: [], deny: [], readDirs: [], fetchHosts: [], allowVerbatim: [], allowTools: [], askTools: [], denyTools: [], warnings: [] };
 	const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 	if (!isObject(json)) return out;
 	const ns = json[NAMESPACE];
@@ -240,6 +269,12 @@ export function parseRules(json: unknown): ParsedRules {
 				if (list !== "allow") out.warnings.push(`${list}: ignored \`${label}\` (BashExact(...) entries belong in allow)`);
 				else if ("error" in verbatim) out.warnings.push(`${list}: ignored \`${label}\` (${verbatim.error})`);
 				else out.allowVerbatim.push(verbatim);
+				continue;
+			}
+			const toolRule = typeof entry === "string" ? parseToolRule(entry) : undefined;
+			if (toolRule !== undefined) {
+				if ("error" in toolRule) out.warnings.push(`${list}: ignored \`${label}\` (${toolRule.error})`);
+				else out[`${list}Tools`].push(toolRule);
 				continue;
 			}
 			const parsed = typeof entry === "string" ? parseRule(entry, list) : { error: "not a string" };
@@ -291,6 +326,9 @@ export function compilePermissions(rules: ParsedRules, allowActive: boolean, bro
 		deny: rules.deny,
 		readDirs: allowActive ? rules.readDirs.map((r) => r.dir) : [],
 		fetchHosts: allowActive ? rules.fetchHosts.map((r) => r.host) : [],
+		tools: allowActive ? rules.allowTools.map((r) => r.key) : [],
+		askTools: rules.askTools.map((r) => r.key),
+		denyTools: rules.denyTools.map((r) => r.key),
 		...(broken === undefined ? {} : { broken }),
 	};
 }
@@ -420,7 +458,7 @@ export interface LoadedRules {
 	broken?: string;
 }
 
-const NO_RULES: ParsedRules = { allow: [], ask: [], deny: [], readDirs: [], fetchHosts: [], allowVerbatim: [], warnings: [] };
+const NO_RULES: ParsedRules = { allow: [], ask: [], deny: [], readDirs: [], fetchHosts: [], allowVerbatim: [], allowTools: [], askTools: [], denyTools: [], warnings: [] };
 
 /** Read, parse and trust-check the project's rules file. Never throws. */
 export function loadProjectRules(cwd: string, agentDir: string): LoadedRules {
@@ -506,7 +544,7 @@ export function saveRules(cwd: string, agentDir: string, list: RuleList, entries
 	const file = join(root, RULES_FILE);
 	for (const entry of entries) {
 		const special = list === "allow" ? (parseReadDir(entry) ?? parseFetchHost(entry) ?? parseVerbatim(entry)) : undefined;
-		const parsed = special ?? parseRule(entry, list);
+		const parsed = special ?? parseToolRule(entry) ?? parseRule(entry, list);
 		if ("error" in parsed) throw new Error(`${entry}: ${parsed.error}`);
 	}
 	const { doc, wasTrusted } = readRulesDoc(file, agentDir, approvedHash);

@@ -235,6 +235,8 @@ export const MODES: Record<ModeName, ModeDefinition> = {
 				{ tools: ["bash"], match: "projectAllowBash", action: "allow" },
 				// tools declaring readOnlyHint (MCP): no dialog
 				{ tools: [ANY_TOOL], match: "readOnlyTool", action: "allow" },
+				// a tool or gateway call granted for the session or by the project; plan and auto ignore it
+				{ tools: [ANY_TOOL], match: "toolGrant", action: "allow" },
 				// ask beats allow: a remembered `git` never covers `git push`
 				{ tools: SHELL_TOOLS, match: "dangerousBash", action: "ask" },
 				// "Yes, allow all edits this session": the asks below still win
@@ -345,6 +347,9 @@ export const GLOBAL_RULES: ModeRules["rules"] = [
 	// user rules from .pi/settings.local.json: deny and ask apply in every mode
 	{ tools: SHELL_TOOLS, match: "projectDeny", action: "deny" },
 	{ tools: SHELL_TOOLS, match: "projectAsk", action: "ask" },
+	// Tool(...) and Mcp(...) rules for tools that are not built in
+	{ tools: [ANY_TOOL], match: "projectDenyTool", action: "deny" },
+	{ tools: [ANY_TOOL], match: "projectAskTool", action: "ask" },
 ];
 
 /** Every tool any mode activates; tools outside this set are preserved as-is. */

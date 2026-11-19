@@ -6,7 +6,7 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { GLOBAL_RULES, MODES, type ModeName } from "../../extensions/modes.ts";
@@ -27,6 +27,15 @@ before(() => {
 	mkdirSync(join(cwd, "src"), { recursive: true });
 	writeFileSync(join(cwd, "data", "a.json"), '{"x": [1, 2], "y": [3]}\n');
 	writeFileSync(join(cwd, ".env"), "TOKEN=synthetic\n");
+	mkdirSync(join(cwd, "plain"), { recursive: true });
+	writeFileSync(join(cwd, "plain", "one.json"), "{}\n");
+	writeFileSync(join(cwd, "plain", "two.json"), "{}\n");
+	mkdirSync(join(cwd, "mixed"), { recursive: true });
+	writeFileSync(join(cwd, "mixed", "one.json"), "{}\n");
+	writeFileSync(join(cwd, "mixed", ".env"), "TOKEN=synthetic\n");
+	mkdirSync(join(cwd, "linked"), { recursive: true });
+	writeFileSync(join(cwd, "linked", "one.json"), "{}\n");
+	symlinkSync("/etc", join(cwd, "linked", "etc.json"));
 });
 after(() => {
 	rmSync(root, { recursive: true, force: true });
@@ -168,4 +177,80 @@ test("fix wave: environment leaks, unbounded loops and device reads keep the dia
 		for (const mode of ["default", "plan"] as const) assert.notEqual(decide(mode, command).action, "allow", `${mode}: ${command}`);
 	}
 	assert.equal(decide("default", `python3 -c 'print("{} {}".format(1, 2))'`).action, "allow");
+});
+
+// ---- loops over literal lists and listings, and the while switch -----------------------------
+
+const py = (script: string) => `python3 - <<'PYEOF'\n${script}\nPYEOF`;
+const modes = ["default", "plan"] as const;
+
+test("loops that pick a file: proved ones are allowed", { skip }, () => {
+	const passing = [
+		['for n in ["a.json"]:', '    print(len(open("data/" + n).read()))'],
+		["import glob", 'for f in sorted(glob.glob("plain/*.json")):', "    print(len(open(f).read()))"],
+		["from pathlib import Path", 'for p in Path("plain").glob("*.json"):', "    print(p.read_text())"],
+		["import os", 'for n in os.listdir("plain"):', '    print(n, os.path.getsize(os.path.join("plain", n)))'],
+		["import glob", `for f in glob.glob("plain/*.json"):`, "    text = open(f).read().strip()", `    open("${scratch}/clean.txt", "w").write(text)`],
+	];
+	for (const lines of passing) {
+		const command = py(lines.join("\n"));
+		for (const mode of modes) assert.equal(decide(mode, command).action, "allow", `${mode}: ${lines.join(" / ")}`);
+	}
+});
+
+test("loops that pick a file: what the pattern matches decides", { skip }, () => {
+	const asks: [string[], string][] = [
+		[["import glob", 'for f in glob.glob("mixed/.*"):', "    print(open(f).read())"], "secretBash"],
+		[["import os", 'for n in os.listdir("mixed"):', '    print(open(os.path.join("mixed", n)).read())'], "secretBash"],
+		[["from pathlib import Path", 'for p in Path("mixed").iterdir():', "    print(p.read_text())"], "secretBash"],
+		[["import glob", 'for f in glob.glob("linked/*.json"):', "    print(open(f).read())"], "outsideCwdRead"],
+	];
+	for (const [lines, rule] of asks) {
+		const command = py(lines.join("\n"));
+		for (const mode of modes) assert.deepEqual(decide(mode, command), { action: "ask", rule }, `${mode}: ${lines.join(" / ")}`);
+	}
+	const refused: string[][] = [
+		["from pathlib import Path", 'for p in Path("mixed").glob("?env"):', "    print(p.read_text())"],
+		["from pathlib import Path", 'for p in Path("mixed").glob("[.]*"):', "    print(p.read_text())"],
+		["from pathlib import Path", 'for p in Path("mixed").glob("[.]git-*"):', "    print(p.read_text())"],
+		["import glob", 'for f in glob.glob("mixed/*/../../../../../../../*/*"):', "    print(open(f).read())"],
+		["import glob", 'for f in glob.glob("../*"):', "    print(open(f).read())"],
+		["from pathlib import Path", 'for p in Path("mixed").glob("*/../../.."):', "    print(p.read_text())"],
+		["import os", 'for n in os.listdir("mixed"):', '    print(open(os.path.join("x/../mixed", n)).read())'],
+
+		["import glob", 'for f in glob.glob("plain/*.json"):', '    open(f, "w").write("x")'],
+		[`for n in [${Array.from({ length: 17 }, (_, i) => `"f${i}"`).join(", ")}]:`, '    print(open("plain/" + n).read())'],
+		["from pathlib import Path", 'for p in Path("plain").rglob("*.json"):', "    print(p.read_text())"],
+		["import glob", 'for f in glob.glob("plain/*", recursive=True):', "    print(open(f).read())"],
+	];
+	for (const lines of refused) {
+		const command = py(lines.join("\n"));
+		for (const mode of modes) assert.equal(decide(mode, command).action, "ask", `${mode}: ${lines.join(" / ")}`);
+		assert.ok(expandCommand(command, { cwd, scratch, env: process.env }).problem, lines.join(" / "));
+	}
+});
+
+test("pathlib glob with * still passes and is judged with its dot variant", { skip }, () => {
+	const ok = py(["from pathlib import Path", 'for p in Path("plain").glob("*.json"):', "    print(p.read_text())"].join("\n"));
+	for (const mode of modes) assert.equal(decide(mode, ok).action, "allow", mode);
+	const bad = py(["from pathlib import Path", 'for p in Path("mixed").glob("*"):', "    print(p.read_text())"].join("\n"));
+	for (const mode of modes) assert.deepEqual(decide(mode, bad), { action: "ask", rule: "secretBash" }, mode);
+});
+
+test("the effect program leaves patterns unquoted", { skip }, () => {
+	const run = (script: string) => expandCommand(py(script), { cwd, scratch, env: process.env }).text;
+	assert.equal(run('import glob\nfor f in glob.glob("plain/*.json"): print(open(f).read())'), "cat -- plain/*.json; ls -- plain/*.json");
+	assert.equal(run('import os\nfor n in os.listdir("plain"): print(os.path.getsize("plain/" + n))'), "cat -- plain/*; ls -- 'plain'");
+});
+
+test("while: asks without the session option, runs with it, other rules still apply", { skip }, () => {
+	const script = "n = 3\nwhile n:\n    n -= 1\nprint(n)";
+	const command = py(script);
+	for (const mode of modes) assert.equal(decide(mode, command).action, "ask", mode);
+	assert.match(expandCommand(command, { cwd, scratch, env: process.env }).problem ?? "", /a `while` loop may not end or may fill memory, so it needs the session option/);
+	const granted = expandCommand(command, { cwd, scratch, env: process.env, pythonWhile: true });
+	assert.deepEqual(granted, { text: "true", changed: true });
+	const pow = expandCommand(py("n = 3\nwhile n:\n    n = n ** 2"), { cwd, scratch, env: process.env, pythonWhile: true });
+	assert.equal(pow.changed, false);
+	assert.match(pow.problem ?? "", /can run without end or fill memory/);
 });

@@ -66,6 +66,10 @@ export interface UiRelaySessionRules {
 	gitRepos?: readonly string[];
 	/** "Yes, and allow loops over globs this session" is set. Optional: an older parent publishes none (read as false). */
 	loopGlobs?: boolean;
+	/** "Yes, and allow python `while` loops this session" is set. Optional: an older parent publishes none (read as false). */
+	pythonWhile?: boolean;
+	/** Tool grant keys (`Tool(x)`, `Mcp(server/tool)`) approved for the session. Optional: an older parent publishes none (read as none). */
+	tools?: readonly string[];
 	/** The parent session's working directory: a child's cwd must lie in its project (child-cwd.ts). Optional: an older parent publishes none. */
 	cwd?: string;
 	/** The parent session's current thinking level (`/keeper subagent-thinking: follow` runs the child at the higher of this and its own). Optional: an older parent publishes none. */
@@ -103,6 +107,10 @@ export interface UiRelay {
 	grantGitRepos?(roots: readonly string[]): void;
 	/** Set the loops-over-globs grant in the parent session (answered in a child). Optional: an older parent lacks it and the child keeps the grant locally. */
 	grantLoopGlobs?(): void;
+	/** Set the python-while grant in the parent session (answered in a child). Optional: an older parent lacks it and the child keeps the grant locally. */
+	grantPythonWhile?(): void;
+	/** Add a tool grant key to the parent's session grants (answered in a child). Optional: an older parent lacks it and the child keeps the grant locally. */
+	grantTool?(key: string): void;
 }
 
 export interface RelayOptions {
@@ -124,7 +132,8 @@ function isRelay(value: unknown): value is UiRelay {
 		typeof candidate.setSessionFlag === "function" &&
 		(candidate.grantReadDirs === undefined || typeof candidate.grantReadDirs === "function") &&
 		(candidate.grantFetchHosts === undefined || typeof candidate.grantFetchHosts === "function") &&
-		(candidate.grantGitRepos === undefined || typeof candidate.grantGitRepos === "function")
+		(candidate.grantGitRepos === undefined || typeof candidate.grantGitRepos === "function") &&
+		(candidate.grantTool === undefined || typeof candidate.grantTool === "function")
 	);
 }
 

@@ -40,103 +40,115 @@ resume.
 
 ## In every mode
 
-- **Reading is free** inside the project: reads, searches and read-only
-  bash (`rtk grep`, `rtk find`, `git status`, `sed -n 1,5p`,
-  `… | cat -n | awk '{printf "%d\t%s\n", $1+9, substr($0, index($0,$2))}'`,
-  ...) never ask. `awk` counts as read-only only when its command-line program
-  cannot reach outside the pipeline (no `system`, `getline`, pipe, redirect or
-  `-f` file); anything it can't read means a dialog (`docs/design.md`, "Read-only
-  analysis").
-  `kubectl` and the OpenShift `oc` count as read-only for `get`, `describe`, `logs`,
-  `top`, `explain`, `version` and `api-resources` (plus `oc whoami`, `status`,
-  `projects`, `api-versions` and `project` without a name) on the current cluster;
-  Secrets, tokens, other clusters and every other subcommand still ask.
-  Small shell programs are read as the shell would run them, so these run too:
-  a `for` loop over up to 16 literal words (`for f in a.txt b.txt; do wc -l
-  "$f"; done`), a literal lowercase variable (`out=notes.txt; … > "$out"`),
-  `cmd < file` (judged as a read of that file) and checksum tools (`sha256sum`,
-  `md5sum`, `b2sum`, `cksum`, `sum`; not with `-c`/`--check`). A pipe or output
-  redirect after `done` is judged on the last copy. The command runs without a
-  dialog when every copy is read-only or covered by a rule; a prefix rule
-  covers every copy. In the scratch dir, a heredoc with an unquoted delimiter
-  is accepted when its body has no `$`, backtick or backslash, and `cat >> file
-  <<EOF` works like `>`. The secret, outside-read and dangerous-command checks
-  judge the expanded text too whenever it is what makes a command run. No
-  answer gets stricter, and auto mode is unchanged: it has no read-only allow
-  rule, so it gains nothing.
-- **Loops over globs ask:** `for f in *.md; do …; done` asks, and when the loop
-  is otherwise safe the dialog offers *Yes, and allow loops over globs this
-  session*. Some glob loops always ask: a match that starts with `-` (unless the
-  glob starts with `./` or contains `/`), an unquoted use of a name with a
-  space, a write or `cd` earlier in the command, a glob in the scratch dir, a
-  body that is not read-only, more than 64 matches, or no match.
-- **Still asks, by design:** `while`, `if`, `case` and functions (their control
-  flow is not followed), `$( )` and backticks (the output can become options or
-  commands), `cd` out of the working directory, a variable set after `&&` or
-  `||` (it may not be set), backslashes or non-ASCII text in an expanded
-  command (the shell's reading is not certain), and heredocs other than the
-  one above and the python one below. The dialog's *Why:* line names the reason
-  from the expanded program, or the reason the expansion was refused. In plan
-  mode an ask may now name the sharper rule (for example the secret check
-  rather than "not approved"); the action itself is unchanged.
-- **Inline python runs when it is statically readable:** `python3 -c '<script>'`
-  (single quotes) and `python3 - <<'EOF' … EOF` (quoted delimiter) run without a
-  dialog when the script uses only allow-listed stdlib imports (`json`, `csv`,
-  `re`, `collections`, `pathlib`, `glob`, ...), allow-listed calls and methods,
-  reads from literal paths, listings that do not recurse, and writes only to
-  literal files in the scratch dir. Its reads are checked like a shell read: a
-  secret file or a path outside the working directory asks for the same reason
-  `cat` would, and a granted read dir counts. It still asks for an unknown or
-  third-party import (`requests`, `pandas`, `subprocess`), `os.system`,
-  `os.environ`, `eval`, `exec`, `getattr` or dunder names, a path built from a
-  variable, input, argv or the environment, a write outside the scratch dir,
-  recursion (`os.walk`, `rglob`, `**`), anything that may not end or may fill
-  memory (`while`, `**` and `pow`, `itertools.count`/`cycle`/`repeat`, a `*` by a
-  number over a million or by another product), any path under `/dev` or `/proc`
-  (except `/dev/null`), `.format` on anything but a plain string literal without
-  attribute, index or conversion fields (also `format_map`, `%` on a built
-  string, `format()` with a computed spec), `python3 script.py`, `python3 -m`, a
-  double-quoted `-c` script, piped stdin, python after a `cd`, any `PYTHON*`
-  variable in the environment, and a project dir holding a file that would
-  shadow a module the script loads (such as `json.py`). It needs `python3` on
-  `PATH`: the script is parsed with Python's own `ast` in an isolated
-  interpreter and never run. Auto mode is unchanged.
-  pi's built-in `grep`/`find`/`ls` tools are off; the model uses `rtk` in
-  bash (`pi --enable-builtin-tools` turns them back on; tools enabled
-  through pi's `defaultTools` setting are left alone). `rtk` itself is
-  **optional**: the extension checks `PATH` once at load, and without rtk the
-  prompt asks for the built-in search tools, or plain `grep`/`find`/`ls` in
-  bash when those are off too. `RTK_DISABLED=1` (rtk's own kill switch) counts
-  as absent.
-- **Secrets ask:** `.env`, private keys, credential stores (`~/.ssh`,
-  `~/.aws`, ...). So do a recursive or hidden-file search over a tree that
-  holds one (`grep -r KEY .`, `rg --hidden KEY`), even when a rule covers
-  the command, and an upload of one (`curl -d @.env URL`), even in auto.
-  So do `grep -f.env`, `git show HEAD:.env`, a file list piped to a reader
-  (`ls | xargs cat`, `find … -exec cat {} +`), a glob under `~` or outside the
-  project, and a dump of the environment (`printenv`, `env`, `/proc/*/environ`).
-  Exclude filters (`--exclude=.env`, `rg -g '!.env'`) do not ask.
-  `echo` and `printf` of a credential-named variable (`$GITHUB_TOKEN`,
-  `${AWS_SECRET_ACCESS_KEY}`, `$DB_PASSWORD`) ask too, in every mode; other
-  variables such as `$HOME` or `$GIT_AUTHOR_NAME` run, and a single-quoted
-  `'$GITHUB_TOKEN'` is literal text and runs.
-  A secret-looking file that **git tracks** is repository content, not a
-  credential: searching a project full of committed demo certificates or a
-  template `.env` does not ask. An untracked file (the `.env` you keep
-  locally, usually gitignored) still does, and so does any secret in a tree
-  the session may not read.
-- **`sudo`, `su`, `doas`, ... are denied.** The model gives you the command
-  to run yourself (`! <command>`) and waits.
-- **Dangerous commands ask** (`git push`, `reset --hard`, publishing,
-  infrastructure, download-and-run, `git config core.hooksPath`, ...),
+Four kinds of call, in plain terms: what runs without asking, what asks once,
+what always asks, and what is denied.
+
+### Runs without asking
+
+- **Reading inside the project:** reads, searches and read-only bash (`rtk
+  grep`, `rtk find`, `git status`, `sed -n 1,5p`, `… | awk '{print $1}'`) never
+  ask. `awk` counts only when its program cannot reach outside the pipeline (no
+  `system`, `getline`, pipe, redirect or `-f`).
+- **`kubectl` and `oc`:** `get`, `describe`, `logs`, `top`, `explain`, `version`
+  and `api-resources` on the current cluster (plus `oc whoami`, `status`,
+  `projects`, `api-versions` and `project` without a name). Secrets, tokens,
+  other clusters and every other subcommand ask.
+- **Small shell programs**, read as the shell would run them:
+  - a `for` loop over up to 16 literal words:
+    `for f in a.txt b.txt; do wc -l "$f"; done`
+  - a literal lowercase variable: `dir=src; ls "$dir"`, or a redirect into the
+    scratch dir through one: `out=<scratch>/n.txt; sort a.txt > "$out"` (a
+    redirect into the project still asks)
+  - `cmd < file`, judged like a read of that file
+  - checksum tools: `sha256sum`, `md5sum`, `b2sum`, `cksum`, `sum` (not with
+    `-c`)
+  - a plain heredoc into the scratch dir: `cat >> <scratch>/notes.md <<EOF` when
+    the body has no `$`, backtick or backslash
+
+  The command runs when every copy of the loop is read-only or covered by a
+  rule. A rule for the loop body's command covers every copy. The secret,
+  outside-read and dangerous-command checks judge the expanded text too.
+- **Inline python that pi-keeper can read ahead of time:** `python3 -c '<script>'`
+  (single quotes) and `python3 - <<'EOF' … EOF` (quoted delimiter). The script
+  may use plain standard-library modules (`json`, `csv`, `re`, `collections`,
+  `pathlib`, `glob`, ...), read literal paths and list directories without
+  recursion, and write literal files in the scratch dir. pi-keeper checks the
+  files the script reads like `cat` would: a secret or an outside path asks for
+  the same reason. A `for` loop over a literal list of names, or over
+  `glob.glob`, `os.listdir`, `Path.glob` or `Path.iterdir`, runs too. The files
+  it lists are judged when the command is checked, so a matching `.env` or a
+  symlink out of the project still asks, and `listdir` includes dotfiles. The
+  script is parsed with Python's own `ast` and never run, so `python3` must be
+  on `PATH`.
+- **No change to what already asked.** Expanding a program only adds allows.
+  Auto mode has no read-only allow rule, so it is unchanged.
+
+### Asks once per session
+
+- **Loops over globs:** `for f in *.md; do wc -l "$f"; done` asks. When the
+  loop is otherwise safe, the dialog offers *Yes, and allow loops over globs
+  this session*. Some glob loops always ask: a match starting with `-` (unless
+  the glob starts with `./` or contains `/`), an unquoted name with a space, a
+  write or `cd` earlier in the command, a glob in the scratch dir, a body that is
+  not read-only, more than 64 matches, or none.
+- **Python `while`:** asks once, with *Yes, and allow python `while` loops this
+  session (higher risk: a loop may not end or may fill memory)*. The rest of the script is still
+  judged.
+- **Tools and MCP calls:** see [MCP and other packages' tools that
+  ask](#mcp-and-other-packages-tools-that-ask).
+
+Subagents share these grants with their parent.
+
+### Always asks, and why
+
+- **Shell control flow:** `while`, `if`, `case` and functions (pi-keeper does not
+  follow them), `$( )` and backticks (the output can become options or
+  commands), a variable set after `&&` or `||` (it may not be set), and
+  backslashes or non-ASCII text in an expanded command (the shell's reading is
+  not certain).
+- **`cd` out of the working directory.** It asks as an ordinary command.
+- **Other heredocs** than the plain scratch-dir one above and the python one.
+- **Python that is not readable ahead of time:** a third-party import
+  (`requests`, `pandas`, `subprocess`), `os.system`, `os.environ`, `eval`,
+  `exec`, `getattr`, a path built from a variable, input or the environment, a
+  write outside the scratch dir, recursion (`os.walk`, `rglob`, `**`), anything
+  that may fill memory, `.format` on built strings, `python3 script.py`,
+  `python3 -m`, a double-quoted `-c`, piped stdin, python after a `cd`, a
+  `PYTHON*` variable, and a project dir with a file that would shadow a loaded
+  module (such as `json.py`).
+- **Secrets:** `.env`, private keys, credential stores (`~/.ssh`, `~/.aws`, ...).
+  So do a recursive or hidden-file search over a tree that holds one (`grep -r
+  KEY .`, `rg --hidden KEY`), an upload of one (`curl -d @.env URL`, even in
+  auto), a file list piped to a reader (`ls | xargs cat`), a glob under `~` or
+  outside the project, and a dump of the environment (`printenv`, `env`).
+  `--exclude=.env` and `rg -g '!.env'` do not ask. `echo` of a credential-named
+  variable (`$GITHUB_TOKEN`, `$DB_PASSWORD`) asks in every mode; `$HOME` runs,
+  and a single-quoted `'$GITHUB_TOKEN'` is literal text. A secret-looking file
+  that **git tracks** (a committed demo certificate, a template `.env`) is
+  repository content and does not ask.
+- **Dangerous commands** (`git push`, `reset --hard`, publishing,
+  infrastructure, download-and-run, `git config core.hooksPath`, ...) ask
   whatever your rules say, and are never remembered. In plan mode they are
   denied: the step goes in the plan.
-- **Removals** (`rm`, `git rm`, ...) are never remembered, and commands that
-  run other programs (sed's `e`, `tar --to-command`, `git -c`,
-  `find -exec`, ...) are never covered by a rule.
-- **No UI** (`pi -p`, RPC): every ask is denied. A background subagent has
-  no UI either, but its asks go to your session's dialog instead
+- **Removals** (`rm`, `git rm`, ...) are never remembered. Commands that run
+  other programs (sed's `e`, `tar --to-command`, `git -c`, `find -exec`, ...) are
+  never covered by a rule.
+
+The dialog's *Why:* line names the reason.
+
+### Denied, and the rest
+
+- **`sudo`, `su`, `doas`, ... are denied.** The model gives you the command to
+  run yourself (`! <command>`) and waits.
+- **No UI** (`pi -p`, RPC): every ask is denied. A background subagent has no UI
+  either, but its asks go to your session's dialog instead
   ([Background subagents](#background-subagents)).
+- **rtk is optional.** pi's built-in `grep`/`find`/`ls` tools are off and the
+  model uses `rtk` in bash (`pi --enable-builtin-tools` turns them back on;
+  tools enabled through pi's `defaultTools` setting are left alone). The
+  extension checks `PATH` once at load; without rtk the prompt asks for the
+  built-in search tools, or plain `grep`/`find`/`ls` in bash when those are off
+  too. `RTK_DISABLED=1` counts as absent.
 
 ### Reads outside the project
 
@@ -333,6 +345,10 @@ desktop notification with a fixed label, never the command). Set
   mode and tells the model which rule. If the file cannot be read or is not valid JSON, every shell command asks until you fix it. `ask` and `deny` always load; `allow`
   rules that pi-keeper didn't write (a cloned repo, a hand or model
   edit) load only after a one-time *Load N allow rules?* review.
+- **Sharing with subagents:** session grants (remembered commands, read
+  directories, fetch hosts, loops over globs, python `while`, tool and MCP
+  grants) reach every subagent, and a grant given in one subagent's dialog
+  covers its siblings. Project rules are read by each subagent like any other.
 - **A typical setup:** allow `git add *`, `git commit *`, `npm test *`; deny
   `git push *`. The agent commits freely and never pushes.
 
@@ -381,7 +397,9 @@ What happens on a match (this is the whole lifecycle):
    request so the model can fix what it just said.
 2. A card appears in the transcript: `⚠ rule fired: no-claims — <description>`.
 3. The fire is recorded in the session, so a rule fires **once per session**:
-   a resume or a fork does not repeat it.
+   a resume or a fork does not repeat it. `/rules` shows each rule's lifetime
+   count (`12 fires · fired this session`): your own rules across all projects,
+   a project's rules in that project.
 4. Nothing is interrupted and no tool call is blocked or re-judged. That is the
    promise, and `intent.test.ts` pins it.
 
@@ -430,6 +448,42 @@ but the name promises a write; add it by hand if you want it. A broken file warn
 apply. Any other unknown tool still asks in default
 mode and is denied in plan mode, with a message that tells the model it is
 unavailable while planning.
+
+### MCP and other packages' tools that ask
+
+A tool that is not built in, and not read-only, asks in default mode. The dialog
+offers *Yes, and don't ask again for `<key>` this session* and, with project
+approvals on, *Yes, and always allow `<key>` in this project*. The keys:
+
+- `Tool(<name>)` for a tool registered under its own name.
+- `Mcp(<server>/<tool>)`, or `Mcp(<tool>)` without a server, for a call through
+  the `mcp` gateway.
+- `Mcp(<server>/catalog)` for a search, describe or list lookup.
+
+A key matches exactly: the arguments are not part of it, and `Mcp(docs/search)`
+does not cover `Mcp(search)`. Project rules go in `.pi/settings.local.json`,
+next to your Bash rules:
+
+```json
+{ "pi-keeper": { "permissions": {
+  "allow": ["Mcp(docs/catalog)", "Mcp(docs/get_page)", "Tool(tracker_list)"],
+  "ask":   ["Mcp(tracker/update_issue)"],
+  "deny":  ["Mcp(tracker/delete_issue)"]
+} } }
+```
+
+Ask and deny rules apply in every mode. Allow rules apply in default mode only.
+
+Never offered: `mcpScript` (it runs code, in any spelling), the gateway's
+`connect` and `action`, a directly registered tool the server marks destructive,
+and `bash`, `edit`, `write` and the other tools that cannot be listed. A call
+through the gateway carries no such mark, so pi-keeper goes by the name: one that
+looks like a write (`delete_issue`, `run_query`) shows "(may change data)" on the
+option. Ask and deny rules match broadly (any case, with or without the server,
+`docs_search` as well as `docs/search`), so a deny cannot be dodged by reshaping
+the call; allow rules match exactly. Plan mode lets through
+only tools whose annotations say read-only, as before. Auto mode is unchanged.
+
 
 ## Plan mode
 

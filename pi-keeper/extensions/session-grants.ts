@@ -71,6 +71,8 @@ export function publishGrants(agentDir: string, sessionId: string, rules: Sessio
 			fetchHosts: rules.fetchHosts ?? [],
 			gitRepos: rules.gitRepos ?? [],
 			loopGlobs: rules.loopGlobs === true,
+			pythonWhile: rules.pythonWhile === true,
+			tools: rules.tools ?? [],
 			...(rules.cwd !== undefined ? { cwd: rules.cwd } : {}),
 			...(rules.thinking !== undefined ? { thinking: rules.thinking } : {}),
 		};
@@ -123,6 +125,8 @@ function parse(file: string): Snapshot | undefined {
 		if (value.fetchHosts !== undefined && !strings(value.fetchHosts)) return undefined;
 		if (value.gitRepos !== undefined && !strings(value.gitRepos)) return undefined;
 		if (value.loopGlobs !== undefined && typeof value.loopGlobs !== "boolean") return undefined;
+		if (value.pythonWhile !== undefined && typeof value.pythonWhile !== "boolean") return undefined;
+		if (value.tools !== undefined && !strings(value.tools)) return undefined;
 		if (value.cwd !== undefined && (typeof value.cwd !== "string" || !value.cwd.startsWith("/"))) return undefined;
 		if (value.thinking !== undefined && typeof value.thinking !== "string") return undefined;
 		return value as Snapshot;
@@ -149,6 +153,8 @@ export function readParentGrants(agentDir: string, env: NodeJS.ProcessEnv = proc
 		fetchHosts: snapshot.fetchHosts ?? [],
 		gitRepos: snapshot.gitRepos ?? [],
 		loopGlobs: snapshot.loopGlobs === true,
+		pythonWhile: snapshot.pythonWhile === true,
+		tools: snapshot.tools ?? [],
 		...(snapshot.cwd !== undefined ? { cwd: snapshot.cwd } : {}),
 		...(snapshot.thinking !== undefined ? { thinking: snapshot.thinking } : {}),
 	};

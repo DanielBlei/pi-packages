@@ -1,29 +1,42 @@
 # Changelog
 
-## Unreleased
+## 0.1.3 - 
 
 ### Added
 
-- Loops over globs ask once. `for f in *.md; do …; done` gets a new option, "Yes, and
-  allow loops over globs this session". Subagents share the grant.
-- Dev: `npm run replay` (`scripts/replay.ts`) replays a recorded session and compares
-  the decisions of two code trees.
+- Tool and MCP grants: a tool that is not built in, or a call through the `mcp`
+  gateway, can be allowed for the session or the project with `Tool(<name>)`,
+  `Mcp(<server>/<tool>)`, `Mcp(<tool>)` or `Mcp(<server>/catalog)`. Project rules
+  support allow, ask and deny; ask and deny match broadly, so reshaping a call does
+  not dodge them. `mcpScript`, gateway `connect`/`action`, directly registered tools
+  marked destructive and bash/edit/write are never offered.
+- Loops over globs ask once per session (`for f in *.md; do …; done`), with a new
+  option "Yes, and allow loops over globs this session".
+- Inline python `while` loops ask once per session, with a new option "allow python
+  `while` loops this session (higher risk: a loop may not end or may fill memory)".
+- Session grants for the two options above and for tools are shared with subagents.
+- Dev: `npm run replay` replays a recorded session and compares the decisions of two
+  code trees.
 
 ### Changed
 
 - More safe commands run without a dialog when every part is read-only or covered:
-  literal `for` loops and literal lowercase variables, pipes and redirects after `done`,
-  `cmd < file`, checksum tools (not `-c`/`--check`), plain heredocs into the scratch dir
-  (unquoted delimiter with an inert body, and `cat >>`), and statically readable inline
-  python (`python3 -c '…'`, `python3 - <<'EOF'`).
-- The secret, outside-read and dangerous-command checks judge the expanded command.
-- Dialogs name the real reason, taken from the expanded command.
-- A literal `for` loop that still asks offers its body's command as the session or
-  project rule (`harbor` in `for p in a b; do harbor repo list --project "$p"; done`),
-  instead of only the exact command.
-- `oc` is judged like `kubectl`: `oc get|describe|logs|top|explain|version|api-resources`,
-  `oc whoami` (not `-t`), `status`, `projects`, `api-versions` and `oc project` without a
-  name run without a dialog. Secrets, other clusters, `oc project <name>` and the rest ask.
+  literal `for` loops, literal lowercase variables, pipes and redirects after `done`,
+  `cmd < file`, checksum tools (not `-c`/`--check`), plain heredocs into the scratch
+  dir, and statically readable inline python (`python3 -c '…'`, `python3 - <<'EOF'`),
+  including `for` loops over a literal list or over `glob.glob`/`iglob`,
+  `os.listdir`, `Path.glob` and `Path.iterdir`.
+- The secret, outside-read and dangerous-command checks judge the expanded command,
+  and dialogs name the real reason.
+- A `for` loop that still asks offers its body's command as the session or project
+  rule (`harbor` in `for p in a b; do harbor repo list --project "$p"; done`).
+- `oc` is judged like `kubectl`: `get`, `describe`, `logs`, `top`, `explain`,
+  `version`, `api-resources`, `whoami`, `status`, `projects`, `api-versions` and
+  `project` without a name run without a dialog. Secrets, other clusters and the
+  rest ask.
+- `/rules` shows each rule's lifetime fire count (`12 fires · fired this session`):
+  your own rules across all projects, a project's rules in that project. Stored in
+  `~/.pi/agent/pi-keeper/rule-fires.json`.
 - No answer of an earlier version becomes stricter. Auto mode is unchanged.
 
 ## 0.1.2 - 2026-11-18
