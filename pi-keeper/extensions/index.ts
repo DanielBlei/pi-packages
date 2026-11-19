@@ -98,6 +98,7 @@ import {
 	verbatimKey,
 } from "./rules.ts";
 import { PROBLEMS } from "./program.ts";
+import { PYTHON_PROBLEMS } from "./python.ts";
 import {
 	commandEffects,
 	createScratchDir,
@@ -165,7 +166,8 @@ import {
 	type RulebookRule,
 	type RuleFireRecord,
 } from "./rulebook.ts";
-import { rulesPanel, rulesText } from "./rules-view.ts";
+import { fireText, rulesPanel, rulesText } from "./rules-view.ts";
+import { recordRuleFire, ruleFireCounts } from "./rule-fires.ts";
 import { childModeFor, registerChildMode, type BridgeRegistration } from "./subagents-bridge.ts";
 import { askDirFor, type AskRequest } from "./ask-mailbox.ts";
 import { askParent, canAskParent, parentListening, type AskParentOptions, type RelayResult } from "./remote-relay.ts";
@@ -183,6 +185,7 @@ import { childCwdProblem } from "./child-cwd.ts";
 import { rulesLine } from "./rules-line.ts";
 import { PARENT_SESSION_ENV, publishGrants, readParentGrants, sweepStaleGrants, withdrawGrants, type SessionGitRules } from "./session-grants.ts";
 import { SessionGrants } from "./session-grant-store.ts";
+import { grantableTool, parseGrantKey, toolCallKey } from "./tool-grants.ts";
 import { findUiRelay, registerUiRelay, type UiRelay, type UiRelaySessionRules } from "./ui-relay.ts";
 import {
 	blankLine,
@@ -211,6 +214,8 @@ import {
 import {
 	ALLOW_EDITS,
 	ALLOW_EDITS_SHARED,
+	ALLOW_PYTHON_WHILE,
+	ALLOW_PYTHON_WHILE_SHARED,
 	ALLOW_LOOP_GLOBS,
 	ALLOW_LOOP_GLOBS_SHARED,
 	ALLOW_ONCE,
@@ -227,6 +232,8 @@ import {
 	fetchGrantLabel,
 	projectFetchGrantLabel,
 	gitGrantLabel,
+	toolGrantLabel,
+	projectToolGrantLabel,
 	SWITCH_TO_AUTO,
 } from "./options.ts";
 import { DESCRIBE_COMMAND_LIMIT, previewFor, sanitizeForTerminal, type Preview } from "./preview.ts";
@@ -380,6 +387,7 @@ const ASK_HINTS: Partial<Record<string, string>> = {
 	secretUpload: "Uploads a secret file (.env, private key, credential file).",
 	unapprovedBash: "Plan mode: approve only if it is needed to gather context for the plan.",
 	projectAsk: `Matches an ask rule in ${RULES_FILE}, or the file cannot be read or is not valid JSON (then every shell command asks until it is fixed).`,
+	projectAskTool: `Matches an ask rule for this tool in ${RULES_FILE}.`,
 	secretFile: "May expose secrets (.env, private keys, credential files).",
 	secretBash: "May expose secrets (.env, private keys, credential files).",
 };
@@ -733,13 +741,13 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			ctx.ui.notify(sanitizeForTerminal(`pi-keeper: ignored in ${loaded.file}:\n${problems.join("\n")}`), "warning");
 		}
 		// command, read and fetch rules all take effect only once the file is trusted
-		const allow = [...loaded.rules.allow, ...loaded.rules.readDirs, ...loaded.rules.fetchHosts, ...loaded.rules.allowVerbatim];
+		const allow = [...loaded.rules.allow, ...loaded.rules.readDirs, ...loaded.rules.fetchHosts, ...loaded.rules.allowVerbatim, ...loaded.rules.allowTools];
 		if (allow.length === 0 || allowActive(loaded) || ignoredKey === key || !ctx.hasUI) return;
 		const shown = allow.slice(0, 20).map((r) => `  ${r.text}`);
 		if (allow.length > 20) shown.push(`  …and ${allow.length - 20} more`);
 		attention(ctx, "pi: rules need review");
 		const choice = await whileWaiting(ctx, () => withDialogLock(() => ctx.ui.select(
-			sanitizeForTerminal(`Load ${allow.length} allow rule${allow.length === 1 ? "" : "s"} from ${RULES_FILE}?\n(The file was not written by pi-keeper or changed since; allowed commands, reads and fetches run without asking.)\n\n${shown.join("\n")}`),
+			sanitizeForTerminal(`Load ${allow.length} allow rule${allow.length === 1 ? "" : "s"} from ${RULES_FILE}?\n(The file was not written by pi-keeper or changed since; allowed commands, reads, fetches and tool calls run without asking.)\n\n${shown.join("\n")}`),
 			[LOAD_RULES, IGNORE_RULES],
 			ctx.signal === undefined ? undefined : { signal: ctx.signal },
 		), ctx.signal));
@@ -836,7 +844,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 
 	/** This session's own grants (a parent's; what it relays and publishes to its children). */
 	function ownGrants(cwd: string | undefined): SessionGitRules {
-		return { prefixes: grants.prefixes, exact: grants.exact, edits: sessionEdits, outsideReads: grants.outsideReadsAllowed, outsideReadDirs: grants.outsideReadDirs, fetchHosts: grants.fetchHosts, gitRepos: grants.gitRepos, loopGlobs: grants.loopGlobs, ...(cwd !== undefined ? { cwd } : {}), ...(parentThinking !== undefined ? { thinking: parentThinking } : {}) };
+		return { prefixes: grants.prefixes, exact: grants.exact, edits: sessionEdits, outsideReads: grants.outsideReadsAllowed, outsideReadDirs: grants.outsideReadDirs, fetchHosts: grants.fetchHosts, gitRepos: grants.gitRepos, loopGlobs: grants.loopGlobs, pythonWhile: grants.pythonWhile, tools: grants.tools, ...(cwd !== undefined ? { cwd } : {}), ...(parentThinking !== undefined ? { thinking: parentThinking } : {}) };
 	}
 
 	/** This session's thinking level, from the harness (the session's own level wins over the event copy). */
@@ -903,6 +911,9 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			sessionEdits: sessionEdits || (shared?.edits ?? false),
 			// a background request is judged in the parent, with the parent's own grant (the request carries none)
 			loopGlobs: grants.loopGlobs || shared?.loopGlobs === true,
+			pythonWhile: grants.pythonWhile || shared?.pythonWhile === true,
+			// tool grants: this session's, and the parent's for an in-process or background child (a background request is judged in the parent with its own)
+			toolGrants: shared?.tools === undefined ? grants.tools : [...grants.tools, ...shared.tools],
 			project,
 			commandGrants: remote ? { prefixes: [], exact: [] } : grantPatterns(),
 			annotationsOf: hintsOf,
@@ -1041,6 +1052,11 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				grants.allowLoopGlobs();
 				syncGrants();
 			},
+			grantPythonWhile: () => {
+				grants.allowPythonWhile();
+				syncGrants();
+			},
+			grantTool: (key) => addToolGrant(key),
 			rememberSession: (patterns) => rememberForSession(patterns),
 			setSessionFlag: (flag) => {
 				if (flag === "edits") sessionEdits = true;
@@ -1245,6 +1261,13 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			const parsed = typeof host === "string" ? parseFetchHost(fetchRuleFor(host)) : undefined;
 			if (parsed !== undefined && !("error" in parsed)) grants.addFetchHost(parsed.host);
 		}
+		syncGrants();
+	}
+
+	/** Add a tool grant key (deduplicated). Checked again like addFetchHosts: a child's relay call arrives from outside. */
+	function addToolGrant(key: string): void {
+		const parsed = typeof key === "string" ? parseGrantKey(key) : undefined;
+		if (parsed !== undefined && !("error" in parsed)) grants.addTool(parsed.key);
 		syncGrants();
 	}
 
@@ -1532,6 +1555,9 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			const rule = findMatchingRule(projectState?.permissions.deny ?? [], commandOf(call.input));
 			return `"${description}" is blocked by the project rule ${rule?.text ?? "(deny)"} in ${RULES_FILE}. Do not retry it; tell the user if it is needed.`;
 		}
+		if (decision.rule?.match === "projectDenyTool") {
+			return `"${description}" is blocked by a project rule in ${RULES_FILE} (${toolCallKey(call.toolName, call.input)?.key ?? "deny"}). Do not retry it; tell the user if it is needed.`;
+		}
 		if (call.toolName === EXIT_PLAN_TOOL) {
 			return childMode !== undefined
 				? `${EXIT_PLAN_TOOL} is not available to a subagent: the parent session owns the plan. Put your findings in your final report.`
@@ -1638,6 +1664,22 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		}
 	}
 
+	/**
+	 * Whether to offer "allow python `while` loops this session": a bash call whose expansion stops only at
+	 * PYTHON_PROBLEMS.whileNeedsGrant() (judged WITHOUT the grant), and whose dry run WITH the grant would allow.
+	 */
+	function offerPythonWhile(call: ToolCall, decision: Decision, ctx: ExtensionContext, subject: AskSubject): boolean {
+		if (call.toolName !== "bash" || subject.mode === "auto" || decision.action !== "ask") return false;
+		try {
+			const evalCtx = evalContext(ctx, subject);
+			if (evalCtx.pythonWhile === true) return false;
+			if (programOf(commandOf(call.input), evalCtx).problem !== PYTHON_PROBLEMS.whileNeedsGrant()) return false;
+			return evaluate(MODES[subject.mode].permissions, GLOBAL_RULES, call, { ...evalCtx, pythonWhile: true }).action === "allow";
+		} catch {
+			return false;
+		}
+	}
+
 	/** Permission dialog for an "ask" decision. Runs serialized. */
 	async function ask(call: ToolCall, decision: Decision, ctx: ExtensionContext, toolCallId: string, subject: AskSubject = selfSubject(ctx), recheck?: () => boolean): Promise<ToolCallBlock | undefined> {
 		const description = describe(call);
@@ -1717,6 +1759,9 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		const gitRoots = call.toolName === "bash" && (decision.rule === undefined || decision.rule.match === "unapprovedBash") ? gitGrantRoots(commandOf(call.input), subject.cwd, subject.scratchDir, pathContext(ctx, subject).gitRepos) : undefined;
 		// a `for` loop over a glob that only the loop-glob grant keeps from running: offer the grant when a dry run with it would allow
 		const loopGlobsOffer = offerLoopGlobs(call, decision, ctx, subject);
+		const pythonWhileOffer = offerPythonWhile(call, decision, ctx, subject);
+		// a tool that is not built in, or a gateway call, that fell to default mode's fallback: offer its key for the session and the project
+		const toolOffer = call.toolName !== "bash" && decision.rule === undefined && subject.mode === "default" ? grantableTool(call.toolName, call.input, hintsOf(call.toolName)) : undefined;
 		const { primary, secondary } = dialogOptions({
 			mode: subject.mode,
 			toolName: call.toolName,
@@ -1730,12 +1775,15 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			fetchGrantLabel: hostGrant === undefined ? undefined : fetchGrantLabel(hostGrant),
 			projectFetchGrantLabel: hostGrant === undefined || !config.projectCommandApprovals ? undefined : projectFetchGrantLabel(hostGrant),
 			gitGrantLabel: gitRoots === undefined ? undefined : gitGrantLabel(gitRoots),
+			toolGrantLabel: toolOffer === undefined ? undefined : toolGrantLabel(toolOffer.key, toolOffer.risky, subject.child),
+			projectToolGrantLabel: toolOffer === undefined || !config.projectCommandApprovals ? undefined : projectToolGrantLabel(toolOffer.key, toolOffer.risky),
 			hasLadder: ladder !== undefined,
 			child: subject.child,
 			// a background child's reply carries no text back, so there is nowhere for feedback to go
 			feedback: subject.remote === undefined,
 			sharedEdits: subject.remote !== undefined,
 			loopGlobsGrant: loopGlobsOffer,
+			pythonWhileGrant: pythonWhileOffer,
 		});
 
 		// the claims come from the same expanded text the rules judged (bashWhy); the title below stays the typed command
@@ -1828,6 +1876,20 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			ui.notify("Loops over globs allowed for this session (read-only bodies; a match starting with '-', a write or cd earlier in the command, and the scratch dir still ask). /permissions lists and removes it.", "info");
 			return undefined;
 		}
+		if ((choice === ALLOW_PYTHON_WHILE || choice === ALLOW_PYTHON_WHILE_SHARED) && primary.includes(choice)) {
+			report("remember-session", { remembered: "python while loops", scope: "session" });
+			grants.allowPythonWhile();
+			syncGrants();
+			if (relay?.grantPythonWhile !== undefined) {
+				try {
+					relay.grantPythonWhile();
+				} catch {
+					// the local grant stands
+				}
+			}
+			ui.notify("Python `while` loops allowed for this session (a loop may not end or may fill memory; everything else the script does is still judged). /permissions lists and removes it.", "info");
+			return undefined;
+		}
 		if (choice === SWITCH_TO_AUTO) {
 			report("switch-auto");
 			switchMode("auto", ctx);
@@ -1897,6 +1959,24 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			// judged again: the rest of the command may still need an answer
 			const again = decide(call, ctx, subject);
 			return again.action === "allow" ? undefined : ask(call, again, ctx, toolCallId, subject, recheck);
+		}
+		if (toolOffer !== undefined && choice === toolGrantLabel(toolOffer.key, toolOffer.risky, subject.child)) {
+			report("remember-session", { remembered: toolOffer.key, scope: "session" });
+			addToolGrant(toolOffer.key);
+			if (relay?.grantTool !== undefined) {
+				try {
+					relay.grantTool(toolOffer.key);
+				} catch {
+					// the local grant stands
+				}
+			}
+			ui.notify(`Allowed for this session: ${toolOffer.key}${subject.child ? " (the parent and its subagents too)" : " (its subagents too)"}. /permissions lists and removes it.`, "info");
+			return undefined;
+		}
+		if (toolOffer !== undefined && config.projectCommandApprovals && choice === projectToolGrantLabel(toolOffer.key, toolOffer.risky)) {
+			report("remember-project", { remembered: toolOffer.key, scope: "project" });
+			saveToolToProject(subject, ui, toolOffer.key, relay);
+			return undefined;
 		}
 		if (choice === REJECT_WITH_FEEDBACK) {
 			const feedback = (await ui.input("What should pi do instead? (empty: just say no)"))?.trim();
@@ -2113,6 +2193,32 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		} catch (error) {
 			addReadDirs(dirs);
 			ui.notify(sanitizeForTerminal(`Could not save to ${RULES_FILE}: ${error instanceof Error ? error.message : String(error)}\nReads from ${shown} allowed for this session instead.`), "error");
+		}
+	}
+
+	/** "Yes, and always allow `<key>` in this project": the allow rule `Tool(x)` / `Mcp(server/tool)`; the session grant when the file can't take it. */
+	function saveToolToProject(where: { cwd: string }, ui: AskUI, key: string, relay: UiRelay | undefined): void {
+		const { loaded } = syncProject(where);
+		const shared = (): void => {
+			addToolGrant(key);
+			try {
+				relay?.grantTool?.(key);
+			} catch {
+				// the local grant stands
+			}
+		};
+		try {
+			const saved = saveRules(where.cwd, getAgentDir(), "allow", [key], allowActive(loaded) ? loaded.hash : undefined);
+			projectState = undefined;
+			if (saved.trusted) {
+				ui.notify(`Saved to ${RULES_FILE}: ${key}; /permissions lists and removes it.`, "info");
+			} else {
+				shared();
+				ui.notify(`Saved to ${RULES_FILE}, but it holds unreviewed rules, so ${key} is allowed only for this session`, "warning");
+			}
+		} catch (error) {
+			shared();
+			ui.notify(sanitizeForTerminal(`Could not save to ${RULES_FILE}: ${error instanceof Error ? error.message : String(error)}\n${key} allowed for this session instead.`), "error");
 		}
 	}
 
@@ -2581,10 +2687,10 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			const { loaded } = syncProject(ctx);
 			const lines = [`Current mode: ${MODES[currentMode].badge}`];
 			if (loaded.exists) {
-				const { allow, ask, deny, readDirs, fetchHosts, allowVerbatim } = loaded.rules;
-				const state = allow.length + readDirs.length + fetchHosts.length + allowVerbatim.length === 0 ? "" : allowActive(loaded) ? " (loaded)" : ignoredKey === keyOf(loaded) ? " (ignored this session)" : " (awaiting review)";
-				lines.push(`Project rules (${loaded.file}): allow ${allow.length + readDirs.length + fetchHosts.length + allowVerbatim.length}${state}, ask ${ask.length}, deny ${deny.length}`);
-				for (const [list, rules] of [["allow", [...allow, ...allowVerbatim]], ["ask", ask], ["deny", deny]] as const) {
+				const { allow, ask, deny, readDirs, fetchHosts, allowVerbatim, allowTools, askTools, denyTools } = loaded.rules;
+				const state = allow.length + readDirs.length + fetchHosts.length + allowVerbatim.length + allowTools.length === 0 ? "" : allowActive(loaded) ? " (loaded)" : ignoredKey === keyOf(loaded) ? " (ignored this session)" : " (awaiting review)";
+				lines.push(`Project rules (${loaded.file}): allow ${allow.length + readDirs.length + fetchHosts.length + allowVerbatim.length + allowTools.length}${state}, ask ${ask.length + askTools.length}, deny ${deny.length + denyTools.length}`);
+				for (const [list, rules] of [["allow", [...allow, ...allowVerbatim, ...allowTools]], ["ask", [...ask, ...askTools]], ["deny", [...deny, ...denyTools]]] as const) {
 					for (const rule of rules) lines.push(`  ${list}: ${rule.text}`);
 				}
 			}
@@ -2683,7 +2789,9 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			ensureUserRuleDir(getAgentDir()); // first use: create the folder and an example rule
 			const book = syncRulebook(ctx);
 			const wanted = args.trim().toLowerCase();
-			const fires = (name: string): string => (firedRules.has(name) ? "1 fire" : "not fired");
+			const stored = ruleFireCounts(getAgentDir(), ctx.cwd);
+			const lifetime = new Map(book.rules.map((r) => [r.name, (r.kind === "user" ? stored.user : stored.project)[r.name] ?? 0]));
+			const fires = (name: string): string => fireText(lifetime.get(name) ?? 0, firedRules.has(name));
 			if (wanted !== "") {
 				const rule = book.rules.find((r) => r.name.toLowerCase() === wanted);
 				if (rule === undefined) {
@@ -2706,7 +2814,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				return;
 			}
 			// a TUI gets the coloured view (rules-view.ts); anything else the plain listing
-			const view = { rules: book.rules, untrusted: book.untrusted, problems: book.problems, fired: firedRules };
+			const view = { rules: book.rules, untrusted: book.untrusted, problems: book.problems, fired: firedRules, lifetime };
 			if (ctx.mode === "tui") {
 				await rulesPanel(ctx, view);
 				return;
@@ -2785,11 +2893,29 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				},
 			});
 		}
+		for (const key of [...grants.tools]) {
+			entries.push({
+				label: `[session] ${sanitizeForTerminal(key)} allowed`,
+				remove: () => {
+					grants.removeTool(key);
+					syncGrants();
+				},
+			});
+		}
 		if (grants.loopGlobs) {
 			entries.push({
 				label: "[session] Loops over globs: allowed this session",
 				remove: () => {
 					grants.revokeLoopGlobs();
+					syncGrants();
+				},
+			});
+		}
+		if (grants.pythonWhile) {
+			entries.push({
+				label: "[session] Python while loops: allowed this session",
+				remove: () => {
+					grants.revokePythonWhile();
 					syncGrants();
 				},
 			});
@@ -2814,6 +2940,18 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 					if (!result.removed) ctx.ui.notify(`${rule.text} is no longer in ${RULES_FILE}`, "warning");
 				},
 			});
+		}
+		for (const [list, rules] of [["allow", loaded.rules.allowTools], ["ask", loaded.rules.askTools], ["deny", loaded.rules.denyTools]] as const) {
+			for (const rule of rules) {
+				entries.push({
+					label: `[project ${list}] ${sanitizeForTerminal(rule.text)} (tool)${list === "allow" ? state : ""}`,
+					remove: () => {
+						const result = removeRule(ctx.cwd, getAgentDir(), list, rule.text, allowActive(loaded) ? loaded.hash : undefined);
+						projectState = undefined;
+						if (!result.removed) ctx.ui.notify(`${rule.text} is no longer in ${RULES_FILE}`, "warning");
+					},
+				});
+			}
 		}
 		for (const rule of loaded.rules.allowVerbatim) {
 			entries.push({
@@ -3597,6 +3735,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		for (const rule of fired) {
 			// marking before the return keeps a retry of this turn from firing it twice
 			firedRules.add(ruleKey(rule));
+			recordRuleFire(getAgentDir(), ctx.cwd, rule.kind, ruleKey(rule)); // the lifetime count; a failed save never fails the fire
 			const data: RuleFireRecord = { rule: ruleKey(rule), kind: rule.kind, description: rule.description, at };
 			entries.push({ type: "custom", customType: RULE_FIRED_ENTRY, data });
 		}

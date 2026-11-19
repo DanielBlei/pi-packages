@@ -23,6 +23,8 @@ export interface PythonEffects {
 	lists: string[];
 	/** Absolute literal paths inside the scratch dir that the script writes. */
 	writes: string[];
+	/** Glob patterns the script may read: paths built from a loop variable over a listing. Omitted when empty. */
+	patterns?: string[];
 }
 
 export type PythonVerdict =
@@ -38,6 +40,8 @@ export interface AnalyzeOptions {
 	/** Interpreter name or path. Default `python3`, resolved through `env.PATH`. */
 	python?: string;
 	timeoutMs?: number;
+	/** Accept `while` statements (a session grant). Without it a script whose only problem is a `while` gets `whileNeedsGrant`. */
+	allowWhile?: boolean;
 }
 
 const P = "python: ";
@@ -79,6 +83,9 @@ export const PYTHON_PROBLEMS = {
 	withNotOpen: (_detail = "") => `${P}with accepts only open(...) here`,
 	importFailed: (detail: string) => `${P}importing an allowed module failed in the analyzer: ${detail}`,
 	shadow: (entry: string) => `${P}${entry} in the run directory would shadow a python module`,
+	whileNeedsGrant: (_detail = "") => `${P}a \`while\` loop may not end or may fill memory, so it needs the session option`,
+	matchWrite: (_detail = "") => `${P}a path derived from a listing match may not be written`,
+	badPattern: (pattern: string) => `${P}the pattern ${JSON.stringify(pattern)} is not a plain glob`,
 	unbounded: (what: string) => `${P}${what} can run without end or fill memory`,
 	formatString: (what: string) => `${P}${what}: format strings are allowed only on a plain string literal without attribute, index or conversion fields`,
 	deviceRoot: (path: string) => `${P}${path} is under /dev or /proc`,
@@ -103,6 +110,7 @@ def fail(code, detail=""):
 
 SCRATCH = sys.argv[1] if len(sys.argv) > 1 else ""
 RUNDIR = sys.argv[2] if len(sys.argv) > 2 else ""
+ALLOW_WHILE = len(sys.argv) > 3 and sys.argv[3] == "1"
 
 MODULES = set("json csv re sys os os.path pathlib collections itertools functools operator statistics math datetime time string textwrap glob fnmatch difflib pprint typing dataclasses decimal fractions enum heapq bisect hashlib base64 unicodedata".split())
 
@@ -181,7 +189,7 @@ CSV_WRITE = set(["writerow", "writerows", "writeheader"])
 
 OK_NODES = (ast.Module, ast.Expr, ast.Assign, ast.AugAssign, ast.AnnAssign, ast.For, ast.If,
     ast.Import, ast.ImportFrom, ast.Return, ast.Pass, ast.Break, ast.Continue, ast.Try, ast.Raise, ast.Assert,
-    ast.With, ast.FunctionDef,
+    ast.With, ast.FunctionDef, ast.While,
     ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Lambda, ast.IfExp, ast.Dict, ast.Set, ast.ListComp, ast.SetComp,
     ast.DictComp, ast.GeneratorExp, ast.Compare, ast.FormattedValue, ast.JoinedStr, ast.Subscript, ast.Starred,
     ast.List, ast.Tuple, ast.Slice,
@@ -193,6 +201,9 @@ def analyze(src):
     READS = []
     LISTS = []
     WRITES = []
+    PATTERNS = []
+    WHILE_SEEN = [False]
+    PAT_OK = re.compile(r"^[A-Za-z0-9_\-./*?\[\]]+$")
 
     def device_path(v):
         p = v if v.startswith("/") else posixpath.join(RUNDIR, v)
@@ -217,6 +228,21 @@ def analyze(src):
             fail("deviceRoot", value[:80])
         if value not in lst:
             lst.append(value)
+
+    def dotdot(s):
+        return ".." in s.split("/")
+    def no_dotdot(s):
+        if dotdot(s):
+            fail("badPattern", s[:80])
+    def record_pats(pats):
+        for p in pats:
+            no_dotdot(p)
+            if not PAT_OK.match(p):
+                fail("badPattern", p[:80])
+            if device_path(p):
+                fail("deviceRoot", p[:80])
+            if p not in PATTERNS:
+                PATTERNS.append(p)
 
     # identifiers: no double underscore anywhere
     for n in ast.walk(tree):
@@ -332,7 +358,7 @@ def analyze(src):
                     out += part.value
                 elif isinstance(part, ast.FormattedValue) and part.conversion == -1 and part.format_spec is None:
                     v = fold(part.value)
-                    if v is None:
+                    if v is None or v[0] not in ("s", "p"):
                         return None
                     out += v[1]
                 else:
@@ -345,8 +371,12 @@ def analyze(src):
                 return None
             if isinstance(n.op, ast.Add) and a[0] == "s" and b[0] == "s":
                 return ("s", a[1] + b[1])
-            if isinstance(n.op, ast.Div) and a[0] == "p":
+            if isinstance(n.op, ast.Add) and a[0] == "s" and b[0] == "l" and a[1] == b[1] + "/" and not dotdot(b[1]):
+                return ("g", [posixpath.join(b[1], "*"), posixpath.join(b[1], ".*")])
+            if isinstance(n.op, ast.Div) and a[0] == "p" and b[0] in ("s", "p"):
                 return ("p", str(PurePosixPath(a[1]) / b[1]))
+            if isinstance(n.op, ast.Div) and a[0] == "p" and b[0] == "l" and not dotdot(b[1]) and PurePosixPath(a[1]) == PurePosixPath(b[1]):
+                return ("gp", [posixpath.join(b[1], "*"), posixpath.join(b[1], ".*")])
             return None
         if isinstance(n, ast.Call) and not n.keywords:
             q = qual_of(n.func)
@@ -355,7 +385,11 @@ def analyze(src):
                 return None
             if q == "os.path.join" and vals and all(v[0] == "s" for v in vals):
                 return ("s", posixpath.join(*[v[1] for v in vals]))
-            if q == "pathlib.Path":
+            if q == "os.path.join" and len(vals) == 2 and vals[0][0] == "s" and vals[1][0] == "l" and vals[0][1] == vals[1][1] and not dotdot(vals[1][1]):
+                return ("g", [posixpath.join(vals[1][1], "*"), posixpath.join(vals[1][1], ".*")])
+            if q == "pathlib.Path" and len(vals) == 1 and vals[0][0] == "g":
+                return ("gp", vals[0][1])
+            if q == "pathlib.Path" and all(v[0] in ("s", "p") for v in vals):
                 return ("p", str(PurePosixPath(*[v[1] for v in vals])))
             return None
         if isinstance(n, ast.Attribute) and n.attr in ("name", "stem", "suffix", "parent"):
@@ -515,11 +549,19 @@ def analyze(src):
         if isinstance(target, ast.Constant) and type(target.value) is not str:
             fail("openFd", "open")
         v = fold(target)
-        if v is None:
+        if v is None or v[0] == "l":
             fail("pathNotLiteral", "open")
         mode = open_mode(node)
         if mode is None:
             fail("openMode", "(not a literal)")
+        if v[0] in ("g", "gp"):
+            if mode in READ_MODES:
+                record_pats(v[1])
+            elif mode in WRITE_MODES:
+                fail("matchWrite", "open")
+            else:
+                fail("openMode", mode)
+            return
         if mode in READ_MODES:
             record(READS, v[1])
         elif mode in WRITE_MODES:
@@ -546,9 +588,12 @@ def analyze(src):
             if len(args) != 1 or kws:
                 fail("badArgs", q)
             v = fold(args[0])
-            if v is None:
+            if v is None or v[0] == "l":
                 fail("pathNotLiteral", q)
-            record(READS, v[1])
+            if v[0] in ("g", "gp"):
+                record_pats(v[1])
+            else:
+                record(READS, v[1])
         elif kind == "list":
             if kws or len(args) > 1:
                 fail("badArgs", q)
@@ -556,8 +601,9 @@ def analyze(src):
                 record(LISTS, ".")
             else:
                 v = fold(args[0])
-                if v is None:
+                if v is None or v[0] not in ("s", "p"):
                     fail("pathNotLiteral", q)
+                no_dotdot(v[1])
                 record(LISTS, v[1])
         elif kind == "glob":
             for k in kws:
@@ -572,6 +618,7 @@ def analyze(src):
                 fail("pathNotLiteral", q)
             if "**" in v[1]:
                 fail("recursion", v[1])
+            no_dotdot(v[1])
             record(LISTS, v[1])
         elif kind == "dump":
             target = args[1] if len(args) > 1 else None
@@ -612,6 +659,19 @@ def analyze(src):
             if any(isinstance(a, ast.Starred) for a in args):
                 fail("splat", attr)
             v = fold(recv)
+            if v is not None and v[0] == "gp" and attr in ("read_text", "read_bytes", "exists", "is_file", "is_dir"):
+                if attr in ("read_text", "read_bytes"):
+                    if len(args) > 2:
+                        fail("badArgs", attr)
+                    for k in kws:
+                        if k.arg not in ("encoding", "errors"):
+                            fail("badArgs", attr + " " + str(k.arg))
+                elif args or kws:
+                    fail("badArgs", attr)
+                record_pats(v[1])
+                visit(recv)
+                visit_all(node)
+                return
             if v is None or v[0] != "p":
                 fail("pathNotLiteral", attr)
             if attr == "glob":
@@ -622,10 +682,13 @@ def analyze(src):
                     fail("pathNotLiteral", attr)
                 if "**" in pv[1]:
                     fail("recursion", pv[1])
+                no_dotdot(v[1])
+                no_dotdot(pv[1])
                 record(LISTS, posixpath.join(v[1], pv[1]))
             elif attr == "iterdir":
                 if args or kws:
                     fail("badArgs", attr)
+                no_dotdot(v[1])
                 record(LISTS, v[1])
             elif attr in ("read_text", "read_bytes"):
                 if len(args) > 2:
@@ -738,7 +801,117 @@ def analyze(src):
             return
         fail("unknownAttribute", a)
 
+    # literal-list and listing loops: the loop variable folds once per value, or stands for "a match"
+    ITER_NAMES = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.For):
+            it = n.iter
+            if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "sorted" and len(it.args) == 1 and not it.keywords:
+                it = it.args[0]
+            if isinstance(it, ast.Name):
+                ITER_NAMES.add(id(it))
+    def str_items(it):
+        if isinstance(it, (ast.List, ast.Tuple)) and 1 <= len(it.elts) <= 16 and all(is_str_const(e) for e in it.elts):
+            return [e.value for e in it.elts]
+        return None
+    LITLISTS = {}
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name) and BINDS.get(stmt.targets[0].id) == 1:
+            items = str_items(stmt.value)
+            if items is not None:
+                LITLISTS[stmt.targets[0].id] = items
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in LITLISTS and id(n) not in ITER_NAMES:
+            LITLISTS.pop(n.id, None)
+    def unsorted_iter(it):
+        if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "sorted" and len(it.args) == 1 and not it.keywords:
+            return it.args[0]
+        return it
+    def lit_items(it):
+        it = unsorted_iter(it)
+        if isinstance(it, ast.Name):
+            return LITLISTS.get(it.id)
+        return str_items(it)
+    def path_glob_patterns(d, g):
+        no_dotdot(d)
+        no_dotdot(g)
+        parts = g.split("/")
+        for c in parts:
+            if c[:1] in ("?", "[") or "[" in c:
+                fail("badPattern", g[:80])
+        idx = [i for i, c in enumerate(parts) if c and c[0] in "*?["]
+        if len(idx) > 3:
+            fail("badPattern", g[:80])
+        pats = []
+        for mask in range(1 << len(idx)):
+            ps = list(parts)
+            for bit, i in enumerate(idx):
+                if mask >> bit & 1:
+                    ps[i] = "." + ps[i]
+            pats.append(posixpath.join(d, "/".join(ps)))
+        return pats
+    def listing_source(it):
+        it = unsorted_iter(it)
+        if not isinstance(it, ast.Call) or it.keywords or any(isinstance(a, ast.Starred) for a in it.args):
+            return None
+        q = qual_of(it.func)
+        if q in ("glob.glob", "glob.iglob") and len(it.args) == 1:
+            v = fold(it.args[0])
+            if v is not None and v[0] == "s" and "**" not in v[1]:
+                no_dotdot(v[1])
+                return ("g", [v[1]])
+            return None
+        if q == "os.listdir" and len(it.args) == 1:
+            v = fold(it.args[0])
+            if v is not None and v[0] == "s":
+                no_dotdot(v[1])
+                return ("l", v[1])
+            return None
+        if isinstance(it.func, ast.Attribute):
+            base = fold(it.func.value)
+            if base is not None and base[0] == "p":
+                if it.func.attr == "glob" and len(it.args) == 1:
+                    g = fold(it.args[0])
+                    if g is not None and g[0] == "s" and "**" not in g[1]:
+                        return ("gp", path_glob_patterns(base[1], g[1]))
+                elif it.func.attr == "iterdir" and not it.args:
+                    no_dotdot(base[1])
+                    return ("gp", [posixpath.join(base[1], "*"), posixpath.join(base[1], ".*")])
+        return None
+    COMBOS = [1]
+    DERIVED = []
+    def try_for(node):
+        if not isinstance(node.target, ast.Name) or BINDS.get(node.target.id) != 1:
+            return False
+        nm = node.target.id
+        items = lit_items(node.iter)
+        if items is not None:
+            values = [("s", x) for x in dict.fromkeys(items)]
+            if COMBOS[0] * len(values) > 64:
+                return False
+        else:
+            src = listing_source(node.iter)
+            if src is None:
+                return False
+            values = [src]
+        visit(node.iter)
+        COMBOS[0] *= len(values)
+        for val in values:
+            FOLDED[nm] = val
+            DERIVED.append([])
+            for c in node.body:
+                visit(c)
+            for d in DERIVED.pop():
+                FOLDED.pop(d, None)
+        FOLDED.pop(nm, None)
+        COMBOS[0] //= len(values)
+        for c in node.orelse:
+            visit(c)
+        return True
+
     def visit(node):
+        if isinstance(node, ast.For) and try_for(node):
+            return
         if isinstance(node, ast.Call):
             return visit_call(node)
         if isinstance(node, ast.Attribute):
@@ -749,8 +922,8 @@ def analyze(src):
             if type(node.value) is int and abs(node.value) > 10000000:
                 fail("unbounded", "the number " + str(node.value)[:20])
             return
-        if isinstance(node, ast.While):
-            fail("unbounded", "while")
+        if isinstance(node, ast.While) and not ALLOW_WHILE:
+            WHILE_SEEN[0] = True
         if not isinstance(node, OK_NODES):
             fail("unsupportedSyntax", type(node).__name__)
         if isinstance(node, ast.BinOp):
@@ -771,6 +944,13 @@ def analyze(src):
                 fail("decorator")
         for c in ast.iter_child_nodes(node):
             visit(c)
+        if DERIVED and isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            nm = node.targets[0].id
+            if BINDS.get(nm) == 1 and nm not in FOLDED:
+                v = fold(node.value)
+                if v is not None:
+                    FOLDED[nm] = v
+                    DERIVED[-1].append(nm)
 
     visit(tree)
 
@@ -786,7 +966,7 @@ def analyze(src):
         fail("importFailed", type(e).__name__)
     for name in list(sys.modules):
         CLOSURE.add(name.split(".")[0])
-    return {"ok": True, "closure": sorted(CLOSURE), "reads": READS, "lists": LISTS, "writes": WRITES, "imports": sorted(ROOTS)}
+    return {"ok": True, "closure": sorted(CLOSURE), "reads": READS, "lists": LISTS, "writes": WRITES, "patterns": PATTERNS, "whileSeen": WHILE_SEEN[0], "imports": sorted(ROOTS)}
 
 def main():
     src = sys.stdin.buffer.read()
@@ -812,6 +992,8 @@ interface RawOk {
 	reads: string[];
 	lists: string[];
 	writes: string[];
+	patterns: string[];
+	whileSeen: boolean;
 	imports: string[];
 	closure: string[];
 }
@@ -865,7 +1047,7 @@ function inside(child: string, parent: string): boolean {
 	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
-function runAnalyzer(script: string, interpreter: string, scratch: string, runDir: string, pathEnv: string, timeoutMs: number): Raw {
+function runAnalyzer(script: string, interpreter: string, scratch: string, runDir: string, pathEnv: string, timeoutMs: number, allowWhile: boolean): Raw {
 	// Neutral, empty cwd: the analyzer imports allowed modules and must never see the run dir.
 	let neutral: string;
 	try {
@@ -875,7 +1057,7 @@ function runAnalyzer(script: string, interpreter: string, scratch: string, runDi
 	}
 	let result;
 	try {
-		result = spawnSync(interpreter, ["-I", "-S", "-c", ANALYZER_SOURCE, scratch, runDir], {
+		result = spawnSync(interpreter, ["-I", "-S", "-c", ANALYZER_SOURCE, scratch, runDir, allowWhile ? "1" : "0"], {
 			input: script,
 			timeout: timeoutMs,
 			env: { PATH: pathEnv, LC_ALL: "C" },
@@ -917,10 +1099,12 @@ function runAnalyzer(script: string, interpreter: string, scratch: string, runDi
 		isStringArray(o.reads) &&
 		isStringArray(o.lists) &&
 		isStringArray(o.writes) &&
+		isStringArray(o.patterns) &&
+		typeof o.whileSeen === "boolean" &&
 		isStringArray(o.imports) &&
 		isStringArray(o.closure)
 	) {
-		return { ok: true, reads: o.reads, lists: o.lists, writes: o.writes, imports: o.imports, closure: o.closure };
+		return { ok: true, reads: o.reads, lists: o.lists, writes: o.writes, patterns: o.patterns, whileSeen: o.whileSeen, imports: o.imports, closure: o.closure };
 	}
 	return { ok: false, problem: PYTHON_PROBLEMS.badOutput() };
 }
@@ -960,10 +1144,11 @@ export function analyzePythonScript(script: string, options: AnalyzeOptions): Py
 	const interpreter = resolveInterpreter(wanted, pathEnv, runDir);
 	if (!interpreter) return { ok: false, problem: PYTHON_PROBLEMS.noInterpreter(wanted) };
 
-	const key = [createHash("sha256").update(script).digest("hex"), interpreter, scratch, runDir].join("\0");
+	const allowWhile = options.allowWhile === true;
+	const key = [createHash("sha256").update(script).digest("hex"), interpreter, scratch, runDir, allowWhile ? "while" : ""].join("\0");
 	let raw = cache.get(key);
 	if (!raw) {
-		raw = runAnalyzer(script, interpreter, scratch, runDir, pathEnv, options.timeoutMs ?? 2000);
+		raw = runAnalyzer(script, interpreter, scratch, runDir, pathEnv, options.timeoutMs ?? 2000, allowWhile);
 		if (cache.size >= CACHE_LIMIT) cache.clear();
 		cache.set(key, raw);
 	}
@@ -973,5 +1158,8 @@ export function analyzePythonScript(script: string, options: AnalyzeOptions): Py
 	const names = new Set<string>(raw.closure);
 	const shadow = shadowProblem(runDir, names);
 	if (shadow) return { ok: false, problem: shadow };
-	return { ok: true, effects: { reads: [...raw.reads], lists: [...raw.lists], writes: [...raw.writes] }, imports: [...raw.imports] };
+	if (raw.whileSeen) return { ok: false, problem: PYTHON_PROBLEMS.whileNeedsGrant() };
+	const effects: PythonEffects = { reads: [...raw.reads], lists: [...raw.lists], writes: [...raw.writes] };
+	if (raw.patterns.length > 0) effects.patterns = [...raw.patterns];
+	return { ok: true, effects, imports: [...raw.imports] };
 }

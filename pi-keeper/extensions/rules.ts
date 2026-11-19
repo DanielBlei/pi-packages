@@ -37,6 +37,7 @@ import {
 import { ANY_TOOL, SUBAGENT_LAUNCH_TOOL } from "./modes.ts";
 import { expandCommand, type ExpandOptions, type Program } from "./program.ts";
 import { findMatchingRule, type ProjectPermissions } from "./project-rules.ts";
+import { anyToolRuleMatches, grantableTool } from "./tool-grants.ts";
 
 export type Action = "allow" | "ask" | "deny";
 
@@ -51,6 +52,11 @@ export type Matcher =
 	| "scratchFile"
 	| "projectAsk"
 	| "projectDeny"
+	/** `Tool(...)` / `Mcp(...)` deny and ask rules of the project file (tool-grants.ts); every mode. */
+	| "projectAskTool"
+	| "projectDenyTool"
+	/** A tool grant: the call's key is a session grant, a parent's grant or a project allow rule (default mode only). */
+	| "toolGrant"
 	| "dangerousBash"
 	| "privilegedBash"
 	| "bridgeInactive"
@@ -108,8 +114,12 @@ export interface EvalContext extends PathContext {
 	subagentBridge?: boolean;
 	/** This session is a pi-subagents child. */
 	child?: boolean;
+	/** Tool grant keys (`Tool(x)`, `Mcp(server/tool)`) approved for this session, its parent's included. */
+	toolGrants?: readonly string[];
 	/** The session grant "allow loops over globs": the expander may unroll a loop over a glob (plumbing comes later; absent = never). */
 	loopGlobs?: boolean;
+	/** The session grant "allow python `while` loops": the python analyzer accepts a `while` statement (absent = never). */
+	pythonWhile?: boolean;
 }
 
 /** The subset of tool annotations the rules read. */
@@ -119,10 +129,10 @@ export interface ToolHints {
 }
 
 /** Tools that never count as read-only, whatever their annotations claim. */
-const NEVER_READ_ONLY_TOOLS = new Set(["bash", "powershell", "edit", "write", "exit_plan_mode", "mcp", "subagent", SUBAGENT_LAUNCH_TOOL]);
+const NEVER_READ_ONLY_TOOLS = new Set(["bash", "powershell", "edit", "write", "exit_plan_mode", "mcp", "mcpScript", "subagent", SUBAGENT_LAUNCH_TOOL]);
 
 /** Tools that front other tools or launch agents: listing the name would allow whatever they are asked to run. */
-const NEVER_LISTED_TOOLS = new Set(["mcp", "subagent", SUBAGENT_LAUNCH_TOOL]);
+const NEVER_LISTED_TOOLS = new Set(["mcp", "mcpScript", "subagent", SUBAGENT_LAUNCH_TOOL]);
 
 /** How a whole command is remembered and compared: trimmed, otherwise as typed. */
 export function verbatimKey(command: string): string {
@@ -219,6 +229,17 @@ function body(matcher: Matcher, call: ToolCall, ctx: EvalContext): boolean {
 			return ctx.project?.broken !== undefined || findMatchingRule(ctx.project?.ask ?? [], commandOf(call.input)) !== undefined;
 		case "projectDeny":
 			return findMatchingRule(ctx.project?.deny ?? [], commandOf(call.input)) !== undefined;
+		// a non-built-in tool or gateway call whose key was granted for the session or allowed by the project
+		case "toolGrant": {
+			const grant = grantableTool(call.toolName, call.input, ctx.annotationsOf?.(call.toolName));
+			return grant !== undefined && (ctx.toolGrants?.includes(grant.key) === true || ctx.project?.tools?.includes(grant.key) === true);
+		}
+		case "projectAskTool": {
+			return anyToolRuleMatches(ctx.project?.askTools, call.toolName, call.input);
+		}
+		case "projectDenyTool": {
+			return anyToolRuleMatches(ctx.project?.denyTools, call.toolName, call.input);
+		}
 		case "dangerousBash":
 			return isDangerousCommand(commandOf(call.input), ctx);
 		case "privilegedBash":
@@ -295,6 +316,9 @@ export const MATCHER_KIND: Record<Matcher, MatcherKind> = {
 	privilegedBash: "scanner",
 	unapprovedBash: "complement",
 	readOnlyTool: "blind",
+	toolGrant: "blind",
+	projectAskTool: "blind",
+	projectDenyTool: "blind",
 	scratchFile: "blind",
 	sessionEdits: "blind",
 	bridgeInactive: "blind",
@@ -308,11 +332,11 @@ export const MATCHER_KIND: Record<Matcher, MatcherKind> = {
 };
 
 /** What the expander needs from a context. */
-type ExpandContext = PathContext & { loopGlobs?: boolean };
+type ExpandContext = PathContext & { loopGlobs?: boolean; pythonWhile?: boolean };
 
 /** The expanded program `P` of a bash command in this context (never cached: `process.env` is read each time). */
 export function programOf(command: string, ctx: ExpandContext): Program {
-	const options: ExpandOptions & { globs?: boolean } = { cwd: ctx.cwd, scratch: ctx.scratchDir, env: process.env, globs: ctx.loopGlobs === true };
+	const options: ExpandOptions & { globs?: boolean } = { cwd: ctx.cwd, scratch: ctx.scratchDir, env: process.env, globs: ctx.loopGlobs === true, pythonWhile: ctx.pythonWhile === true };
 	return expandCommand(command, options);
 }
 

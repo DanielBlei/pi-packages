@@ -3,7 +3,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ALLOW_LOOP_GLOBS, ALLOW_LOOP_GLOBS_SHARED, dialogOptions, gitGrantLabel, readGrantLabel, type DialogOptionsInput } from "../../extensions/options.ts";
+import { ALLOW_LOOP_GLOBS, ALLOW_LOOP_GLOBS_SHARED, ALLOW_PYTHON_WHILE, ALLOW_PYTHON_WHILE_SHARED, dialogOptions, gitGrantLabel, readGrantLabel, type DialogOptionsInput } from "../../extensions/options.ts";
 
 const SESSION = "Yes, and don't ask again for `sed` this session";
 const PROJECT = "Yes, and always allow `sed` in this project";
@@ -153,4 +153,14 @@ test("the loop-glob option is offered when asked for, shared for a background as
 		assert.ok(dialogOptions({ ...base, sharedEdits: true }).primary.includes(ALLOW_LOOP_GLOBS_SHARED));
 		assert.ok(!dialogOptions({ ...base, mode: "auto" }).primary.includes(ALLOW_LOOP_GLOBS));
 		assert.ok(!dialogOptions({ ...base, loopGlobsGrant: undefined }).primary.includes(ALLOW_LOOP_GLOBS));
+});
+
+test("the python-while option is offered when asked for, shared for a background ask, and never in auto", () => {
+	const base: DialogOptionsInput = { mode: "default", toolName: "bash", ruleMatch: undefined, hasLadder: false, pythonWhileGrant: true };
+	assert.ok(dialogOptions(base).primary.includes(ALLOW_PYTHON_WHILE));
+	assert.ok(dialogOptions({ ...base, mode: "plan" }).primary.includes(ALLOW_PYTHON_WHILE));
+	assert.ok(dialogOptions({ ...base, sharedEdits: true }).primary.includes(ALLOW_PYTHON_WHILE_SHARED));
+	assert.ok(!dialogOptions({ ...base, mode: "auto" }).primary.includes(ALLOW_PYTHON_WHILE));
+	assert.ok(!dialogOptions({ ...base, pythonWhileGrant: undefined }).primary.includes(ALLOW_PYTHON_WHILE));
+	assert.match(ALLOW_PYTHON_WHILE, /higher risk: a loop may not end or may fill memory/);
 });

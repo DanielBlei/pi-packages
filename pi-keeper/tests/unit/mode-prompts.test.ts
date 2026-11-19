@@ -82,6 +82,8 @@ const GATED: Record<string, { words: RegExp } | { exempt: string }> = {
 	outsideCwdDestructive: { words: /outside the working directory/i },
 	bridgeInactive: { exempt: "parent-only plumbing: the subagent tool is unusable until children load this extension" },
 	projectAsk: { exempt: "project rules are user data, not mode semantics (the rules line states them)" },
+	projectAskTool: { exempt: "project rules are user data, not mode semantics" },
+	projectDenyTool: { exempt: "project rules are user data, not mode semantics" },
 	projectDeny: { exempt: "project rules are user data, not mode semantics (the rules line states them)" },
 };
 

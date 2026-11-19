@@ -155,7 +155,7 @@ describe("the published snapshot", () => {
 		parent.assertNoPendingAnswers();
 		const file = grantsFile(sandbox.agentDir, parent.sessionId);
 		const keys = Object.keys(JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>).sort();
-		const required = ["edits", "exact", "fetchHosts", "gitRepos", "loopGlobs", "outsideReadDirs", "outsideReads", "pid", "prefixes", "sessionId", "version"];
+		const required = ["edits", "exact", "fetchHosts", "gitRepos", "loopGlobs", "outsideReadDirs", "outsideReads", "pid", "prefixes", "pythonWhile", "sessionId", "tools", "version"];
 		const optional = ["cwd", "thinking"];
 		assert.deepEqual(
 			keys.filter((k) => !optional.includes(k)),

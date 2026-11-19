@@ -167,10 +167,9 @@ test("os and sys attributes off the allow-list", { skip }, () => {
 });
 
 test("a path from a loop is not a literal", { skip }, () => {
-	refuse(
-		src('for name in ["a.txt", "b.txt"]:', "    print(open(name).read())"),
-		PYTHON_PROBLEMS.pathNotLiteral("open"),
-	);
+	refuse(src("names = input_names()", "for name in names:", "    print(open(name).read())"), PYTHON_PROBLEMS.notAllowed("input_names"));
+	refuse(src("for name, n in [('a', 1)]:", "    print(open(name).read())"), PYTHON_PROBLEMS.pathNotLiteral("open"));
+	refuse(src("import os", 'for name in os.listdir("data"):', "    print(open(name).read())"), PYTHON_PROBLEMS.pathNotLiteral("open"));
 	refuse(src("def f(p):", "    return open(p).read()", 'print(f("a.txt"))'), PYTHON_PROBLEMS.pathNotLiteral("open"));
 	refuse(src('p = "a"', 'p = "b"', "print(open(p).read())"), PYTHON_PROBLEMS.pathNotLiteral("open"));
 });
@@ -342,8 +341,8 @@ test("plain formatting stays allowed", { skip }, () => {
 });
 
 test("work that may not end or may fill memory: near-misses", { skip }, () => {
-	refuse(src("while True:", "    pass"), PYTHON_PROBLEMS.unbounded("while"));
-	refuse(src("n = 3", "while n:", "    n -= 1"), PYTHON_PROBLEMS.unbounded("while"));
+	refuse(src("while True:", "    pass"), PYTHON_PROBLEMS.whileNeedsGrant());
+	refuse(src("n = 3", "while n:", "    n -= 1"), PYTHON_PROBLEMS.whileNeedsGrant());
 	refuse(src("import itertools", "for i in itertools.count():", "    print(i)"), PYTHON_PROBLEMS.unbounded("itertools.count"));
 	refuse(src("import itertools as it", "print(it.cycle([1]))"), PYTHON_PROBLEMS.unbounded("itertools.cycle"));
 	refuse(src("import itertools", "print(itertools.repeat(1, 2))"), PYTHON_PROBLEMS.unbounded("itertools.repeat"));
@@ -386,4 +385,110 @@ test("device and proc paths are refused", { skip }, () => {
 test("/dev/null and ordinary paths stay allowed", { skip }, () => {
 	pass(src('print(open("/dev/null").read())'));
 	pass(src('print(open("data/a.json").read())'));
+});
+
+// ---- loops over literal lists and listings, and the while switch --------------------------
+
+test("a literal-list loop folds the path once per value", { skip }, () => {
+	const v = pass(src('for name in ["a.txt", "b.txt", "a.txt"]:', '    print(open("data/" + name).read())'));
+	assert.deepEqual(v.effects, { reads: ["data/a.txt", "data/b.txt"], lists: [], writes: [] });
+	pass(src('names = ("x.csv", "y.csv")', "for n in sorted(names):", '    with open(f"data/{n}") as fh:', "        print(len(fh.read()))"));
+	const w = pass(src('for n in ["a", "b"]:', '    open(f"{n}.out", "r")', '    open("' + scratch + '/o.txt", "w").write(n)'));
+	assert.deepEqual(w.effects.writes, [scratch + "/o.txt"]);
+	// a write path derived from the value must still be inside the scratch dir
+	refuse(src('for n in ["a", "b"]:', '    open(n + ".out", "w").write("x")'), PYTHON_PROBLEMS.writeOutsideScratch("a.out"));
+	const ok = pass(src('for n in ["a", "b"]:', `    open("${scratch}/" + n, "w").write("x")`));
+	assert.deepEqual(ok.effects.writes, [`${scratch}/a`, `${scratch}/b`]);
+	// a derived name inside the loop
+	const d = pass(src('for n in ["a", "b"]:', '    p = "data/" + n', "    print(open(p).read())"));
+	assert.deepEqual(d.effects.reads, ["data/a", "data/b"]);
+});
+
+test("a literal-list loop: limits and rebinding fall back to a non-literal path", { skip }, () => {
+	const items = (n: number) => Array.from({ length: n }, (_, i) => JSON.stringify(`f${i}`)).join(", ");
+	assert.equal(pass(src(`for n in [${items(16)}]:`, '    print(open("d/" + n).read())')).effects.reads.length, 16);
+	refuse(src(`for n in [${items(17)}]:`, '    print(open("d/" + n).read())'), PYTHON_PROBLEMS.pathNotLiteral("open"));
+	// 8 x 8 = 64 passes, 9 x 8 = 72 does not
+	const nested = (a: number, b: number) => src(`for x in [${items(a)}]:`, `    for y in [${items(b)}]:`, '        print(open(x + "/" + y).read())');
+	assert.equal(pass(nested(8, 8)).effects.reads.length, 64);
+	refuse(nested(9, 8), PYTHON_PROBLEMS.pathNotLiteral("open"));
+	// the name is rebound, or the list is mutated
+	refuse(src('for n in ["a"]:', "    pass", 'n = "b"', 'print(open(n).read())'), PYTHON_PROBLEMS.pathNotLiteral("open"));
+	refuse(src('names = ["a", "b"]', 'names.append("../x")', "for n in names:", "    print(open(n).read())"), PYTHON_PROBLEMS.pathNotLiteral("open"));
+	refuse(src('names = ["a"]', 'names = ["b"]', "for n in names:", "    print(open(n).read())"), PYTHON_PROBLEMS.pathNotLiteral("open"));
+	refuse(src("for n in [1, 2]:", "    print(open(n).read())"), PYTHON_PROBLEMS.pathNotLiteral("open"));
+});
+
+test("listing loops fold to patterns", { skip }, () => {
+	const g = pass(src("import glob", 'for f in sorted(glob.glob("data/*.json")):', "    print(open(f).read())"));
+	assert.deepEqual(g.effects, { reads: [], lists: ["data/*.json"], writes: [], patterns: ["data/*.json"] });
+	const l = pass(src("import os", 'for n in os.listdir("data"):', '    print(os.path.getsize(os.path.join("data", n)))'));
+	assert.deepEqual(l.effects, { reads: [], lists: ["data"], writes: [], patterns: ["data/*", "data/.*"] });
+	const l2 = pass(src("import os", 'for n in os.listdir("data"):', '    p = "data/" + n', "    if os.path.isfile(p):", "        print(open(p).read())"));
+	assert.deepEqual(l2.effects.patterns, ["data/*", "data/.*"]);
+	const pg = pass(src("from pathlib import Path", 'for p in Path("data").glob("*.json"):', "    print(p.read_text())"));
+	assert.deepEqual(pg.effects.patterns, ["data/*.json", "data/.*.json"]);
+	assert.deepEqual(pg.effects.lists, ["data/*.json"]);
+	const it = pass(src("from pathlib import Path", 'for p in Path("data").iterdir():', "    print(open(p).read())"));
+	assert.deepEqual(it.effects.patterns, ["data/*", "data/.*"]);
+	const pd = pass(src("from pathlib import Path", "import os", 'for n in os.listdir("data"):', '    print((Path("data") / n).read_text())'));
+	assert.deepEqual(pd.effects.patterns, ["data/*", "data/.*"]);
+	const gp = pass(src("import glob", "from pathlib import Path", 'for f in glob.iglob("data/*.json"):', "    print(Path(f).read_text())"));
+	assert.deepEqual(gp.effects.patterns, ["data/*.json"]);
+	// a loop that only counts needs no pattern
+	assert.equal(pass(src("import glob", 'for f in glob.glob("data/*"):', "    print(f)")).effects.patterns, undefined);
+	// a write into scratch with a literal path inside such a loop
+	const w = pass(src("import glob", 'for f in glob.glob("data/*.json"):', "    text = open(f).read().strip()", `    open("${scratch}/clean.txt", "w").write(text)`));
+	assert.deepEqual(w.effects.writes, [`${scratch}/clean.txt`]);
+});
+
+test("listing loops: refusals", { skip }, () => {
+	refuse(src("import glob", 'for f in glob.glob("data/*"):', `    open(f, "w").write("x")`), PYTHON_PROBLEMS.matchWrite());
+	refuse(src("import glob", 'for f in glob.glob("data/*"):', `    open("${scratch}/" + f, "w").write("x")`), PYTHON_PROBLEMS.pathNotLiteral("open"));
+	refuse(src("from pathlib import Path", 'for p in Path("data").rglob("*"):', "    print(p.read_text())"), PYTHON_PROBLEMS.recursion("rglob"));
+	refuse(src("import glob", 'for f in glob.glob("data/*", recursive=True):', "    print(open(f).read())"), PYTHON_PROBLEMS.recursion("glob.glob recursive"));
+	refuse(src("import glob", 'for f in glob.glob("data/**/*.json"):', "    print(open(f).read())"), PYTHON_PROBLEMS.recursion("data/**/*.json"));
+	refuse(src("import glob", 'for f in glob.glob("data/*.{json}"):', "    print(open(f).read())"), PYTHON_PROBLEMS.badPattern("data/*.{json}"));
+	refuse(src("import glob", 'for f in glob.glob("data/[!a]*"):', "    print(open(f).read())"), PYTHON_PROBLEMS.badPattern("data/[!a]*"));
+	// pathlib's ? and [..] match a leading dot: refused; * keeps its dot variant
+	for (const g of ["?env", "[.]*", "[.]git-*", "a[0-9]/*", "x/?env"]) {
+		refuse(src("from pathlib import Path", `for p in Path("data").glob("${g}"):`, "    print(p.read_text())"), PYTHON_PROBLEMS.badPattern(g));
+	}
+	assert.deepEqual(pass(src("from pathlib import Path", 'for p in Path("data").glob("*.json"):', "    print(p.read_text())")).effects.patterns, ["data/*.json", "data/.*.json"]);
+	// a .. component escapes the directory: refused in every pattern and listing form
+	const up = (lines: string[], bad: string) => refuse(src(...lines), PYTHON_PROBLEMS.badPattern(bad));
+	up(["import glob", 'for f in glob.glob("d/*/../../../*/*"):', "    print(open(f).read())"], "d/*/../../../*/*");
+	up(["import glob", 'for f in glob.glob("../*"):', "    print(open(f).read())"], "../*");
+	up(["import glob", 'print(glob.glob("../*"))'], "../*");
+	up(["from pathlib import Path", 'for p in Path("data").glob("*/../../.."):', "    print(p.read_text())"], "*/../../..");
+	up(["import os", 'print(os.listdir(".."))'], "..");
+	up(["from pathlib import Path", 'for p in Path("../x").iterdir():', "    print(p.read_text())"], "../x");
+	// the base of a joined path is the exact listing directory
+	refuse(src("import os", 'for n in os.listdir("data"):', '    print(open(os.path.join("x/../data", n)).read())'), PYTHON_PROBLEMS.pathNotLiteral("open"));
+	refuse(src("import os", 'for n in os.listdir("data"):', '    print(open("x/../data/" + n).read())'), PYTHON_PROBLEMS.pathNotLiteral("open"));
+	refuse(src("from pathlib import Path", "import os", 'for n in os.listdir("data"):', '    print((Path("x/../data") / n).read_text())'), PYTHON_PROBLEMS.pathNotLiteral("read_text"));
+	up(["import os", 'for n in os.listdir("x/../data"):', '    print(open(os.path.join("x/../data", n)).read())'], "x/../data");
+	// a listdir name outside its directory is no path
+	refuse(src("import os", 'for n in os.listdir("data"):', "    print(open(n).read())"), PYTHON_PROBLEMS.pathNotLiteral("open"));
+	refuse(src("import os", 'for n in os.listdir("data"):', '    print(open(os.path.join("other", n)).read())'), PYTHON_PROBLEMS.pathNotLiteral("open"));
+	refuse(src("import os", 'for n in os.listdir("data"):', "    print(os.listdir(n))"), PYTHON_PROBLEMS.pathNotLiteral("os.listdir"));
+});
+
+test("while: needs the grant, and the grant lifts only that", { skip }, () => {
+	const loop = src("n = 3", "while n:", "    n -= 1", "print(n)");
+	refuse(loop, PYTHON_PROBLEMS.whileNeedsGrant());
+	assert.match(PYTHON_PROBLEMS.whileNeedsGrant(), /a `while` loop may not end or may fill memory, so it needs the session option/);
+	pass(loop, { allowWhile: true });
+	pass(src("while True:", "    break"), { allowWhile: true });
+	// another problem wins over the while
+	refuse(src("import requests", "while True:", "    break"), PYTHON_PROBLEMS.unknownImport("requests"));
+	refuse(src("while True:", "    break", "import requests"), PYTHON_PROBLEMS.unknownImport("requests"));
+	refuse(src("while True:", "    x = 2 ** 3"), PYTHON_PROBLEMS.unbounded("**"));
+	// every other rule still applies with the grant
+	refuse(loop.replace("n -= 1", "n = n ** 2"), PYTHON_PROBLEMS.unbounded("**"), { allowWhile: true });
+	refuse(src("while True:", '    print(open("x.txt", "w"))'), PYTHON_PROBLEMS.writeOutsideScratch("x.txt"), { allowWhile: true });
+	refuse(src("while True:", "    print(open(name).read())"), PYTHON_PROBLEMS.pathNotLiteral("open"), { allowWhile: true });
+	refuse(src("x = 'a' * 10000000000", "while True:", "    break"), PYTHON_PROBLEMS.unbounded("a repeat by 10000000000"), { allowWhile: true });
+	// the cache does not mix the two answers
+	refuse(loop, PYTHON_PROBLEMS.whileNeedsGrant());
 });

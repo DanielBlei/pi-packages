@@ -29,6 +29,8 @@ export interface ExpandOptions {
 	env: Readonly<Record<string, string | undefined>>;
 	/** Expand `for` loops over unquoted globs against `cwd` (a session grant). Without it such a loop is refused. */
 	globs?: boolean;
+	/** Accept `while` loops in inline python (a session grant). */
+	pythonWhile?: boolean;
 }
 
 export interface Program {
@@ -1164,10 +1166,11 @@ function scanPython(text: string): PySegment[] {
 }
 
 const PY_PATH = /^[\x20-\x7e]+$/;
+const PY_PATTERN = /^[A-Za-z0-9_\-./*?[\]]+$/;
 const PY_GLOB = /^[A-Za-z0-9_\-./+@:*?[\]!^]+$/;
 
 /** `cat -- reads; ls -- lists; touch -- writes`, or `true` when the script has no effect. */
-function effectProgram(effects: PythonEffects): string {
+function effectProgram(effects: PythonEffects, cwd: string): string {
 	const quote = (path: string): string => {
 		if (!PY_PATH.test(path) || path.includes("'")) throw new Refusal(PROBLEMS.pyPath(path));
 		return `'${path}'`;
@@ -1177,8 +1180,28 @@ function effectProgram(effects: PythonEffects): string {
 		if (!PY_GLOB.test(path) || path.startsWith("~")) throw new Refusal(PROBLEMS.pyPath(path));
 		return path;
 	};
+	// A pattern is judged by the classifier as an unquoted shell glob. A dotfile pattern (`d/.*`) is
+	// name-only there and always looks like a secret read, so it is replaced by the dotfiles that exist now.
+	const pattern = (path: string): string[] => {
+		if (!PY_PATTERN.test(path)) throw new Refusal(PROBLEMS.pyPath(path));
+		const slash = path.lastIndexOf("/");
+		const dir = slash < 0 ? "." : path.slice(0, slash) || "/";
+		const last = path.slice(slash + 1);
+		if (path.split("/").includes("..") || last.startsWith("?") || last.startsWith("[")) throw new Refusal(PROBLEMS.pyPath(path));
+		if (!last.startsWith(".") || /[*?[]/.test(dir)) return [path];
+		let names: string[];
+		let re: RegExp;
+		try {
+			re = new RegExp(`^${last.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")}$`);
+			names = readdirSync(resolve(cwd, dir));
+		} catch {
+			return [path];
+		}
+		return names.filter((name) => name.startsWith(".") && re.test(name)).map((name) => quote(slash < 0 ? name : `${path.slice(0, slash + 1)}${name}`));
+	};
 	const parts: string[] = [];
-	if (effects.reads.length > 0) parts.push(`cat -- ${effects.reads.map(quote).join(" ")}`);
+	const cats = [...effects.reads.map(quote), ...(effects.patterns ?? []).flatMap(pattern)];
+	if (cats.length > 0) parts.push(`cat -- ${cats.join(" ")}`);
 	if (effects.lists.length > 0) parts.push(`ls -- ${effects.lists.map(list).join(" ")}`);
 	if (effects.writes.length > 0) parts.push(`touch -- ${effects.writes.map(quote).join(" ")}`);
 	return parts.length === 0 ? "true" : parts.join("; ");
@@ -1196,11 +1219,11 @@ function expandPython(command: string, segments: readonly PySegment[], options: 
 	let at = 0;
 	const starts: number[] = [];
 	for (const seg of segments) {
-		const verdict = analyzePythonScript(seg.script, { runDir: options.cwd, scratch: options.scratch, env: options.env });
+		const verdict = analyzePythonScript(seg.script, { runDir: options.cwd, scratch: options.scratch, env: options.env, allowWhile: options.pythonWhile === true });
 		if (!verdict.ok) throw new Refusal(verdict.problem);
 		text += command.slice(at, seg.start);
 		starts.push(text.length);
-		text += effectProgram(verdict.effects);
+		text += effectProgram(verdict.effects, options.cwd);
 		at = seg.end;
 	}
 	return { text: text + command.slice(at), starts };

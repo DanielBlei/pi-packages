@@ -7,7 +7,7 @@
  */
 import { after, afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { assistantMessage, KEY, makeSandbox, restoreBell, startPi, type Harness, type Sandbox } from "../mocks/pi.ts";
 import { RELAY_KEY } from "../../extensions/ui-relay.ts";
@@ -353,8 +353,93 @@ describe("/rules renders the rulebook", () => {
 		await h.prompt("go");
 		await h.command("rules");
 		const text = h.notifications.at(-1)?.message ?? "";
-		assert.match(text, /no-claims · user · not fired · Do not claim tests pass/);
+		assert.match(text, /no-claims · user · not fired yet · Do not claim tests pass/);
 		assert.match(text, /broken\.md · skipped: the condition does not compile/);
 		assert.match(text, /permission rules are \/permissions/);
+	});
+});
+
+describe("lifetime fire counts", () => {
+	async function rulesListing(h: Harness): Promise<string> {
+		h.answer(/Rulebook rules/, "esc");
+		await h.command("rules");
+		return h.dialogs.at(-1)?.title ?? "";
+	}
+	const readStore = (sb: Sandbox): { user: Record<string, number>; projects: Record<string, Record<string, number>> } =>
+		JSON.parse(readFileSync(join(sb.agentDir, "pi-keeper", "rule-fires.json"), "utf8"));
+
+	it("a user rule that fires in two sessions shows 2 in the second", async () => {
+		const sb = sandboxed();
+		writeRule(sb, "no-claims.md", `${NO_CLAIMS[0]}\n${NO_CLAIMS[1]}`, NO_CLAIMS[2]);
+		const first = await start(sb);
+		await first.session();
+		assert.match(await rulesListing(first), /not fired yet/);
+		await first.prompt("go");
+		await first.turnEnd(BREAKS);
+		assert.match(await rulesListing(first), /1 fire · fired this session/);
+
+		const second = await start(sb);
+		await second.session();
+		const before = await rulesListing(second);
+		assert.match(before, /1 fire/, "the lifetime count from the first session");
+		assert.doesNotMatch(before, /fired this session/);
+		await second.prompt("go");
+		await second.turnEnd(BREAKS);
+		assert.match(await rulesListing(second), /2 fires · fired this session/);
+	});
+
+	it("a project rule is counted per project; a user rule across projects", async () => {
+		const sb = sandboxed();
+		const other = { ...sb, cwd: join(sb.root, "other") };
+		mkdirSync(join(other.cwd, ".git"), { recursive: true });
+		writeRule(sb, "global.md", "description: Global.\ncondition: (?i)\\ball tests pass\\b", "Global fix.");
+		writeRule(sb, "local.md", "description: Local.\ncondition: (?i)\\beverything is done\\b", "Local fix.", join(sb.cwd, ".pi", "rules"));
+		writeRule(other, "local.md", "description: Local.\ncondition: (?i)\\beverything is done\\b", "Local fix.", join(other.cwd, ".pi", "rules"));
+
+		for (const box of [sb, sb, other]) {
+			const h = await start(box);
+			h.answer(/Load .*rulebook rule/, "Load them");
+			await h.session();
+			await h.prompt("go");
+			await h.turnEnd(BREAKS);
+		}
+		const store = readStore(sb);
+		assert.deepEqual(store.user, { global: 3 }, "a user rule is counted across all projects");
+		assert.deepEqual(Object.values(store.projects).map((counts) => counts.local).sort(), [1, 2], "a project rule is counted in its own project");
+
+		const again = await start(other); // reviewed already: no prompt
+		await again.session();
+		const listing = await rulesListing(again);
+		assert.match(listing, /global.*3 fires/);
+		assert.match(listing, /local · project · 1 fire · Local/);
+	});
+
+	it("a resume or a fork does not count again", async () => {
+		const sb = sandboxed();
+		writeRule(sb, "no-claims.md", `${NO_CLAIMS[0]}\n${NO_CLAIMS[1]}`, NO_CLAIMS[2]);
+		const h = await start(sb);
+		await h.session();
+		await h.prompt("go");
+		await h.turnEnd(BREAKS);
+		await h.session("resume");
+		await h.turnEnd(BREAKS);
+		const forked = await startPi({ sandbox: sb, entries: [...h.entries] });
+		started.push(forked);
+		await forked.session("fork");
+		await forked.turnEnd(BREAKS);
+		assert.deepEqual(readStore(sb).user, { "no-claims": 1 });
+	});
+
+	it("a count that cannot be saved does not stop the fire", async () => {
+		const sb = sandboxed();
+		writeRule(sb, "no-claims.md", `${NO_CLAIMS[0]}\n${NO_CLAIMS[1]}`, NO_CLAIMS[2]);
+		mkdirSync(join(sb.agentDir, "pi-keeper", "rule-fires.json"), { recursive: true }); // a directory where the file belongs
+		const h = await start(sb);
+		await h.session();
+		await h.prompt("go");
+		const result = await h.turnEnd(BREAKS);
+		assert.equal(result.continue, true);
+		assert.equal(h.delivered(RULE_MESSAGE).length, 1);
+		assert.match(await rulesListing(h), /1 fire · fired this session/, "this session's fire still shows");
 	});
 });

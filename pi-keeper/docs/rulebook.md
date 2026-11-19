@@ -24,6 +24,10 @@ last `RULE_SCAN_CAP` (20 000) characters of an answer are scanned; `continue` is
 skipped when the turn made tool calls; **subagent children are not policed**; the
 card needs a TUI.
 
+## Fire counts
+
+`/rules` shows a lifetime count next to each rule, for example `12 fires · fired this session`, `12 fires` or `not fired yet`. A user rule shows its count across all projects. A project rule shows the count for this project only. The counts live in `<agent dir>/pi-keeper/rule-fires.json` (file mode 0600, keyed by the sha256 of the project root, written atomically by `extensions/rule-fires.ts`). A fire adds one; a resume, fork or branch switch adds nothing. A count that cannot be saved is skipped and never stops the fire.
+
 ## Debugging: it does not fire
 
 Work down this list; each step is one command or one look.
@@ -36,7 +40,7 @@ Work down this list; each step is one command or one look.
 | Does the pattern match the sentence at all? | `npm run rulebook-check` — put the sentence in `fires` in `scripts/rulebook-check.ts` and see it fail or pass against the installed file. |
 | Right sentence, wrong place? | Only the **last 20 000 characters** of the answer are scanned, and only **text blocks** — a claim made in thinking, or in a tool's arguments, is invisible. |
 | Right sentence, right place, no fire? | Was the turn `completed`? An aborted or errored turn fires nothing. An empty answer matches nothing. |
-| Already fired earlier? | `/rules` says `1 fire` for the session. A resume or fork keeps it fired: the records are read from the branch. |
+| Already fired earlier? | `/rules` says `fired this session` (with the lifetime count). A resume or fork keeps it fired: the records are read from the branch. |
 | Is it a child session? | Rules apply to the **parent** only. A subagent's answer is not policed. |
 | Is the file new, mid-session? | Rules are re-read every turn, so no reload is needed. But `firedRules` is per session, and the trust gate is per content hash. |
 

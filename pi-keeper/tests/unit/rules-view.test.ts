@@ -44,7 +44,7 @@ test("a rule row carries its name, its source and its fires in their own colours
 	assert.match(line, /^<accent>> <\/accent>/, "the selected row has a cursor");
 	assert.match(line, /<b><accent>no-claims<\/accent><\/b>/, "selected: the name is bold and accented");
 	assert.match(line, /<success>user<\/success>/, "the source of a user rule");
-	assert.match(line, /<success>1 fire<\/success>/, "a fire is green");
+	assert.match(line, /<success>1 fire · fired this session<\/success>/, "a fire is green");
 	assert.match(line, /<text>The no-claims rule\.<\/text>/, "the description reads as normal text, not dim");
 	assert.doesNotMatch(line, /<dim>.*description/, "nothing here is dimmed");
 });
@@ -55,7 +55,7 @@ test("an unselected, unfired rule: mdLink name, muted count, project in warning 
 	assert.match(first, /^ {2}/, "an unselected row has no cursor");
 	assert.match(second, /<b><mdLink>b<\/mdLink><\/b>/);
 	assert.match(second, /<warning>project<\/warning>/);
-	assert.match(second, /<muted>not fired<\/muted>/);
+	assert.match(second, /<muted>not fired yet<\/muted>/);
 });
 
 test("status rows say their own story: needs review, skipped and why", () => {
@@ -91,7 +91,7 @@ test("an unbroken 400-character regex, path and problem never overflow (the 'Ren
 test("the detail view shows the condition, the file and the body", () => {
 	const lines = renderRuleDetail(theme, rule("no-claims", "user", "Run them, then quote the output."), true, 300).join("\n");
 	assert.match(lines, /<b><accent>no-claims<\/accent><\/b>/);
-	assert.match(lines, /<success>1 fire<\/success>/);
+	assert.match(lines, /<success>1 fire · fired this session<\/success>/);
 	assert.match(lines, /<mdCode>\(\?i\)\\bno-claims\\b<\/mdCode>/, "the pattern as written");
 	assert.match(lines, /<dim>\/rules\/no-claims\.md<\/dim>/, "the file");
 	assert.match(lines, /Run them, then quote the output\./);
@@ -107,7 +107,7 @@ test("a body wraps to the width instead of overflowing", () => {
 test("the plain-text form for a session without a TUI has the same facts, no colours", () => {
 	const text = rulesText(view({ rules: [rule("no-claims")], untrusted: [{ file: "/p/.pi/rules/pending.md" }], problems: [{ file: "/r/broken.md", problem: "empty body" }], fired: new Set(["no-claims"]) }));
 	assert.doesNotMatch(text, /<(accent|text|dim|success|warning|muted|mdLink|mdCode|error|b)>/, "no markup");
-	assert.match(text, /no-claims · user · 1 fire · The no-claims rule\./);
+	assert.match(text, /no-claims · user · 1 fire · fired this session · The no-claims rule\./);
 	assert.match(text, /pending\.md · project · needs review/);
 	assert.match(text, /broken\.md · skipped: empty body/);
 	assert.match(text, /permission rules are \/permissions/);
@@ -141,4 +141,20 @@ test("rule text from a cloned repository cannot carry escape sequences to the te
 		assert.doesNotMatch(out, /\x1b|\x07/, "no raw escape or bell reaches the terminal");
 	}
 	assert.match(list, /␛\]0;pwned/, "the escape is shown as a visible symbol");
+});
+
+test("lifetime counts: '12 fires · fired this session', '12 fires', 'not fired yet', '1 fire'", () => {
+	const lifetime = new Map([["a", 12], ["b", 12], ["c", 1]]);
+	const rows = rulesRows(view({ rules: [rule("a"), rule("b"), rule("c"), rule("d")], fired: new Set(["a"]), lifetime }));
+	const lines = renderRulesList(theme, rows, -1, 300);
+	assert.match(lines[0], /<success>12 fires · fired this session<\/success>/);
+	assert.match(lines[1], /<success>12 fires<\/success>/);
+	assert.match(lines[2], /<success>1 fire<\/success>/);
+	assert.match(lines[3], /<muted>not fired yet<\/muted>/);
+	const text = rulesText(view({ rules: [rule("a"), rule("b"), rule("d")], fired: new Set(["a"]), lifetime }));
+	assert.match(text, /a · user · 12 fires · fired this session · /);
+	assert.match(text, /b · user · 12 fires · The b rule/);
+	assert.match(text, /d · user · not fired yet · /);
+	assert.match(renderRuleDetail(theme, rule("b"), false, 300, 12).join("\n"), /<success>12 fires<\/success>/);
+	assert.match(renderRuleDetail(theme, rule("b"), true, 300, 12).join("\n"), /12 fires · fired this session/);
 });

@@ -1,6 +1,6 @@
 {
 	"name": "pi-keeper",
-	"version": "0.1.2",
+	"version": "0.1.3",
 	"description": "Permission modes for pi (default, auto and plan) with per-project allow, ask and deny rules and a plan you approve before any edit.",
 	"license": "Apache-2.0",
 	"author": "Daniel Blei",

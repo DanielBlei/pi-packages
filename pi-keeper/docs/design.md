@@ -94,10 +94,10 @@ flowchart TD
         subgraph c_global_deny["deny"]
             c_priv["Privilege escalation: sudo, su, doas, pkexec<br/>matcher: privilegedBash"]
             c_bridge["Subagent launch while children would run unchecked<br/>matcher: bridgeInactive"]
-            c_pdeny["A deny rule in .pi/settings.local.json<br/>matcher: projectDeny"]
+            c_pdeny["A deny rule in .pi/settings.local.json<br/>matcher: projectDeny<br/>matcher: projectDenyTool"]
         end
         subgraph c_global_ask["ask"]
-            c_pask["An ask rule in .pi/settings.local.json<br/>matcher: projectAsk"]
+            c_pask["An ask rule in .pi/settings.local.json<br/>matcher: projectAsk<br/>matcher: projectAskTool"]
         end
     end
     c_global --> c_merge["Add the matches of the mode's rules<br/>default, auto and plan charts below<br/>strictest wins"]
@@ -169,6 +169,7 @@ flowchart TD
         d_allow_ro["Read-only shell command<br/>matcher: readOnlyBash"]
         d_allow_ok["Approved earlier: session prefix, exact command, project rule<br/>matcher: rememberedBash<br/>matcher: rememberedVerbatim<br/>matcher: projectAllowBash"]
         d_allow_tool["Read-only tools from other packages<br/>matcher: readOnlyTool"]
+        d_allow_grant["A tool or gateway call granted for the session or the project<br/>matcher: toolGrant"]
         d_allow_files["The session's own files: plan file, scratch dir, a subagent's report<br/>matcher: planFile<br/>matcher: scratchFile<br/>matcher: subagentArtifact"]
         d_allow_edits["Edits allowed for this session<br/>matcher: sessionEdits"]
         d_allow_child["Subagent protocol tools, inside a child only<br/>matcher: childSession"]
@@ -264,6 +265,26 @@ hints are the tool author's claim and aren't verified, so a server that
 mislabels a write tool gets it run unasked. Any ask or deny rule still wins.
 In plan mode these tools stay active because every mode declares the same
 tools, and tools this package doesn't manage (`MANAGED_TOOLS`) are never swapped.
+
+### Tool grants (default mode)
+
+A tool that is not built in, or a call through the `mcp` gateway, that falls to
+default mode's ask offers "don't ask again for `<key>` this session" and, with
+`projectCommandApprovals` on, "always allow `<key>` in this project". The key
+(`extensions/tool-grants.ts`) is `Tool(<name>)` for a directly registered tool,
+`Mcp(<server>/<tool>)` or `Mcp(<tool>)` for a gateway call, and
+`Mcp(<server>/catalog)` or `Mcp(catalog)` for a gateway lookup. It matches
+exactly: a server-qualified key never covers an unqualified call. The session
+grant is shared with every subagent (relay and snapshot, like the fetch hosts);
+the project grant is an allow rule in `.pi/settings.local.json`. `Tool(...)` and
+`Mcp(...)` ask and deny rules apply in every mode; plan mode and auto mode ignore
+allows. Never grantable: `connect`, any `action`, `mcpScript`, unknown gateway
+keys, `UNLISTABLE_TOOLS` (compared lowercased, without `_`, `-`, `.`), built-in
+tools, and a directly registered tool annotated `destructiveHint: true` (gateway
+sub-tools carry no annotations pi-keeper can see). A tool name with a write-like
+word gets "(may change data)". Allow keys match exactly; ask/deny rules match
+broadly (case-insensitive, server optional, `server_tool` prefixed names, other
+gateway keys ignored), so reshaping a call cannot dodge a deny.
 
 ### Read-only tools from other packages
 
@@ -377,7 +398,16 @@ Known limits: a reply is seen after up to about 0.5 s (both sides poll); a paren
 
 ## 5. Read-only classification
 
-A mistake here is a silent action, so the classifier is an allowlist that fails closed: every segment of a compound command must pass, and an unknown flag or an unparsed script is not read-only. Allowing a command means allowing a shape of it (`sort` yes, `sort -o` no), and redirects to files, heredocs and substitution are rejected wholesale by the classifier itself (checksum tools are on the list except with `-c`/`--check`). It judges the text as written. A step before it (`extensions/program.ts`) expands a small, provable subset of shell into the copies that would run: a `for` over at most 16 literal words, literal lowercase assignments, `cmd < file` as `cat file | cmd`, and an unquoted heredoc into the scratch dir whose body has no `$`, backtick or backslash (treated as quoted; `cat >> f <<EOF` as `>`). Inline python (`python3 -c '...'`, `python3 - <<'EOF'`) is expanded by an effect program: Python's own `ast`, in an isolated interpreter, parses the script without running it, and only allow-listed imports, calls and methods pass; its literal-path reads, non-recursive listings and scratch-dir writes become `cat`/`ls`/`touch` of the same paths, so the existing read, secret and scratch rules judge them. Anything else (unknown import, computed path, recursion, `python3 x.py`, `-m`, a double-quoted `-c`, piped stdin, python after `cd`, a `PYTHON*` variable, a shadowing `json.py` in the project dir, no `python3` on PATH) is not expanded and asks. Each copy is judged by the same rules; the command runs when every copy is read-only or covered, and a prefix grant covers every copy. This expansion only adds allows, so no answer of today gets stricter and auto mode, which has no read-only allow rule, is identical. Scanner and deny matchers consult the expanded text only when an allow came through it (`viaP` in `extensions/rules.ts`), and then they judge it too, so `x=.en; cat "${x}v"` is a `.env` read. A glob loop asks once per session (grant *allow loops over globs*) unless a hard limit applies: a match starting with `-` (unless the glob starts with `./` or contains `/`), an unquoted name with a space, a write or `cd` earlier, a glob in the scratch dir, a body that is not read-only, more than 64 matches, or none. Left to ask on purpose: `while`/`if`/`case`/functions (control flow is not followed), `$( )` and backticks (output can become options or commands), `cd` out of the working directory, a binding after `&&`/`||` (it may be unset), backslashes or non-ASCII text in an expanded command, and other heredocs. Cases: `tests/unit/program.test.ts`. `xargs` never makes an argument-sensitive tool read-only, because the words it appends are not the ones checked. Code: `isReadOnlyCommand` in `extensions/utils.ts`, tables in `extensions/modes.ts`; cases in `tests/unit/utils.test.ts`.
+A mistake here is a silent action, so the classifier is an allowlist that fails closed: every segment of a compound command must pass, and an unknown flag or an unparsed script is not read-only. Allowing a command means allowing a shape of it (`sort` yes, `sort -o` no). Redirects to files, heredocs and substitution are rejected wholesale by the classifier itself; checksum tools are on the list except with `-c`/`--check`. `xargs` never makes an argument-sensitive tool read-only, because the words it appends are not the ones checked. Code: `isReadOnlyCommand` in `extensions/utils.ts`, tables in `extensions/modes.ts`; cases in `tests/unit/utils.test.ts`.
+
+The classifier judges the text as written. A step before it, `programOf` in `extensions/program.ts`, expands a small provable subset of shell into the copies that would run. Each copy is judged by the same rules, the command runs when every copy is read-only or covered, and a prefix grant covers every copy. Expansion only adds allows: no answer of today gets stricter, and auto mode (no read-only allow rule) is identical. The scanner and deny matchers consult the expanded text only when an allow came through it (`viaP` in `rules.ts`), and then judge it too, so `x=.en; cat "${x}v"` is a `.env` read. Cases: `tests/unit/program.test.ts`.
+
+- **Expanded:** a `for` over at most 16 literal words (`MAX_LOOP_WORDS`, at most 64 unrolled bodies), literal lowercase assignments, `cmd < file` as `cat file | cmd`, and an unquoted heredoc into the scratch dir whose body has no `$`, backtick or backslash (treated as quoted; `cat >> f <<EOF` as `>`).
+- **Glob loops** ask once per session (grant `loopGlobs`, offered by `offerLoopGlobs` in `index.ts` only when a dry run with the grant would allow). Hard limits that always ask: a match starting with `-` (unless the glob starts with `./` or contains `/`), an unquoted name with a space, a write or `cd` earlier, a glob in the scratch dir, a body that is not read-only, more than 64 matches (`MAX_GLOB_WORDS`), or none.
+- **Inline python** (`python3 -c '...'`, `python3 - <<'EOF'`) is parsed by Python's own `ast` in an isolated interpreter, never run (`extensions/python.ts`). Only allow-listed imports, calls and methods pass. Literal-path reads, non-recursive listings and scratch-dir writes become `cat`/`ls`/`touch` of the same paths, so the existing read, secret and scratch rules judge them. A `for` over a literal list of names (at most 16, 64 combinations) or over `glob.glob`/`iglob`, `os.listdir`, `Path.glob` or `Path.iterdir` binds the loop variable once per value or, for a listing, to "a match"; the reads become `cat` of the pattern, and the secret, outside-read and symlink checks judge what the pattern matches at check time (dotfile patterns of `listdir`/`iterdir` are expanded against the files present). A write path built from a match asks. `while` asks once per session (grant `pythonWhile`, `offerPythonWhile`). Everything else (unknown import, computed path, recursion, `python3 x.py`, `-m`, a double-quoted `-c`, piped stdin, python after `cd`, a `PYTHON*` variable, a shadowing `json.py` in the project dir, no `python3` on PATH) is not expanded and asks.
+- **Asks on purpose:** `while`/`if`/`case`/functions (control flow is not followed), `$( )` and backticks (output can become options or commands), `cd` out of the working directory, a binding after `&&`/`||` (it may be unset), backslashes or non-ASCII text in an expanded command, and other heredocs.
+- **Where the grants go:** `loopGlobs` and `pythonWhile` are session grants, shared with subagents through the relay and snapshot (`index.ts`, `session-grants.ts`).
+- **Loop body rules:** shell keywords are never a prefix, so a `for` that still asks offers its body's command (`patternLadder` over the expanded text, `index.ts`), covering each copy; a loop that cannot be expanded gets the exact-command options.
 
 ## 6. Dangerous commands and denied privilege escalation
 
