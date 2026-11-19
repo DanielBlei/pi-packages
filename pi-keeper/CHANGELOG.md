@@ -18,6 +18,12 @@
   python (`python3 -c '…'`, `python3 - <<'EOF'`).
 - The secret, outside-read and dangerous-command checks judge the expanded command.
 - Dialogs name the real reason, taken from the expanded command.
+- A literal `for` loop that still asks offers its body's command as the session or
+  project rule (`harbor` in `for p in a b; do harbor repo list --project "$p"; done`),
+  instead of only the exact command.
+- `oc` is judged like `kubectl`: `oc get|describe|logs|top|explain|version|api-resources`,
+  `oc whoami` (not `-t`), `status`, `projects`, `api-versions` and `oc project` without a
+  name run without a dialog. Secrets, other clusters, `oc project <name>` and the rest ask.
 - No answer of an earlier version becomes stricter. Auto mode is unchanged.
 
 ## 0.1.2 - 2026-11-18

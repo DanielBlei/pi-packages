@@ -117,6 +117,7 @@ import {
 	planCommandPrefixes,
 	skillDirsFromPrompt,
 	viaRtkToo,
+	isRememberablePrefix,
 	type CoverSource,
 	type PathContext,
 	type PatternChoice,
@@ -1668,15 +1669,24 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			call.toolName === "bash" &&
 			((subject.mode === "default" && decision.rule === undefined) ||
 				(subject.mode === "plan" && decision.rule?.match === "unapprovedBash"));
-		const prefixes = notReadOnly ? deriveCommandPrefixes(commandOf(call.input), pathContext(ctx, subject)) : undefined;
+		const typedCommand = commandOf(call.input);
+		// a loop or variable that unrolled (and was not refused): the grant covers what it runs, so the options come from the expanded text
+		const program = notReadOnly ? programOf(typedCommand, evalContext(ctx, subject)) : undefined;
+		const expanded = program !== undefined && program.changed && program.problem === undefined ? program.text : undefined;
+		const typedPrefixes = notReadOnly ? deriveCommandPrefixes(typedCommand, pathContext(ctx, subject)) : undefined;
+		const grantText = expanded ?? typedCommand;
+		const derived = !notReadOnly ? undefined : expanded === undefined ? typedPrefixes : deriveCommandPrefixes(expanded, pathContext(ctx, subject));
+		// unrolled copies repeat their prefixes; a prefix the rule store would refuse is never offered
+		const unique = derived?.filter((p, i) => derived.findIndex((q) => q.join(" ") === p.join(" ")) === i);
+		const prefixes = unique === undefined || unique.length === 0 || (expanded !== undefined && !unique.every((p) => isRememberablePrefix(p))) ? undefined : unique;
 		const commands = prefixes?.map((p) => `\`${p.join(" ")}\``).join(", ");
 		// a rule for a command that writes files covers it only while its targets stay in the project
-		const scope = prefixes === undefined ? "" : scopeSuffix(commandOf(call.input), pathContext(ctx, subject));
+		const scope = prefixes === undefined ? "" : scopeSuffix(grantText, pathContext(ctx, subject));
 		const sessionLabel = prefixes === undefined ? undefined : `Yes, and don't ask again for ${commands} this session${subject.child ? ", for me and my subagents" : ""}${prefixes.some(viaRtkToo) ? " (also via rtk)" : ""}${scope}`;
 		// project allow rules don't apply in plan mode, so only default offers them
 		const projectLabel = config.projectCommandApprovals && prefixes !== undefined && subject.mode === "default" ? `Yes, and always allow ${commands} in this project${scope}` : undefined;
 		// one segment needing approval: let the user pick the granularity (same conditions as the session option)
-		const ladder = sessionLabel !== undefined ? patternLadder(commandOf(call.input), pathContext(ctx, subject)) : undefined;
+		const ladder = sessionLabel !== undefined ? patternLadder(grantText, pathContext(ctx, subject)) : undefined;
 		// no prefix can cover it (an interpreter, a script inside a compound): offer this exact text for the session (not in plan mode)
 		// ...but never one that removes things: those stay a per-call decision
 		// A child's answer is stored as an exact *pattern* in this session's list (which it and its
@@ -1684,7 +1694,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		// the parent's own verbatim list stays the parent user's own.
 		const exactTokens = subject.child ? exactRuleTokens(commandOf(call.input), pathContext(ctx, subject)) : undefined;
 		const exactCommand =
-			notReadOnly && prefixes === undefined && subject.mode === "default" && !hasRemoval(commandOf(call.input)) && (!subject.child || exactTokens !== undefined);
+			notReadOnly && typedPrefixes === undefined && subject.mode === "default" && !hasRemoval(commandOf(call.input)) && (!subject.child || exactTokens !== undefined);
 		// a child's answer lands in this session's list, which it and its siblings read, so the label says so
 		const exactLabel = subject.child ? REMEMBER_EXACT_SHARED : REMEMBER_EXACT;
 		// the `/keeper` setting adds a persistent variant: the exact rule
@@ -1897,7 +1907,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			}
 		}
 		if (choice === OTHER_PATTERN && ladder !== undefined) {
-			if (await patternFlow(subject, ui, commandOf(call.input), ladder, toolCallId)) {
+			if (await patternFlow(subject, ui, grantText, ladder, toolCallId)) {
 				report("pattern-flow");
 				return undefined;
 			}
