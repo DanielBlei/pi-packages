@@ -294,6 +294,19 @@ describe("answers apply to the whole pi session", () => {
 		parent.assertNoPendingAnswers();
 	});
 
+	it("the parent's exact-command (verbatim) grant is never seen by a foreground child: the same command still asks there", async () => {
+		const { parent, child } = await parentAndChild();
+		parent.answer(/Permission required \(default mode\)/, "Yes, and don't ask again for this exact command this session");
+		assert.equal((await parent.tool("bash", { command: "python3 x.py" })).blocked, false);
+		assert.equal((await parent.tool("bash", { command: "python3 x.py" })).blocked, false, "the parent itself is covered");
+		assert.equal(parent.dialogs.length, 1);
+		parent.answer(SUB, "esc");
+		const outcome = await child.tool("bash", { command: "python3 x.py" });
+		assert.equal(outcome.blocked, true);
+		assert.equal(parent.dialogs.length, 2, "the child's ask reached the parent's user");
+		parent.assertNoPendingAnswers();
+	});
+
 	it("a session prefix remembered by the parent covers a later child", async () => {
 		const { parent, child } = await parentAndChild();
 		// the parent remembers the command for its own ask

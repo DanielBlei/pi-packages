@@ -90,8 +90,8 @@ const CATALOGUE: Row[] = [
 		expect: { options: ["Yes", EXACT, "Yes, and always allow this exact command in this project", REJECT, MORE], more: [FEEDBACK, SWITCH] },
 	},
 	{
-		name: "4b. default bash, no prefix possible (a python -c one-liner): the project option is offered as exact text",
-		trigger: bash("python3 -c 'print(1)'"),
+		name: "4b. default bash, no prefix possible (a python -c one-liner that writes outside the scratch dir): the project option is offered as exact text",
+		trigger: bash(`python3 -c 'open("out.txt", "w").write("x")'`),
 		expect: { options: ["Yes", EXACT, "Yes, and always allow this exact command in this project", REJECT, MORE], more: [FEEDBACK, SWITCH] },
 	},
 	{
@@ -411,5 +411,30 @@ describe("dialog catalogue: plan approval and /permissions", () => {
 			assert.match(h.dialogs[base].title, /^Permission rules \(select one to remove it, Esc to close\)$/);
 			assert.deepEqual(h.dialogs[base + 1].options, ["Remove", "Cancel"]);
 			assert.equal(h.dialogs[base + 1].title, "[project allow] Bash(make build *)");
+		}));
+
+	// phase 3b: expanded. A loop whose body needs approval asks; the title shows the loop as typed, the Why names the body's command.
+	it("a shell loop asks in default mode: the title shows the loop as typed, the Why lines name the body's command", () =>
+		withSandbox(async (sb) => {
+			const loop = 'for f in a b; do npm test "$f"; done';
+			const h = await startPi({ sandbox: sb });
+			await h.session();
+			h.answer(PERMISSION, REJECT);
+			await h.tool("bash", { command: loop });
+			assert.equal(h.dialogs.length, 1);
+			assert.ok(h.dialogs[0].title.includes(loop), h.dialogs[0].title);
+			assert.match(h.dialogs[0].title, /Why: `npm test` isn't a read-only npm command/);
+			assert.doesNotMatch(h.dialogs[0].title, /shell loop/);
+			h.assertNoPendingAnswers();
+		}));
+
+	// phase 3b: expanded. A read-only loop runs without a dialog.
+	it("a read-only shell loop runs in default mode without a dialog", () =>
+		withSandbox(async (sb) => {
+			const h = await startPi({ sandbox: sb });
+			await h.session();
+			const outcome = await h.tool("bash", { command: 'for f in a.txt b.txt; do wc -l "$f"; done' });
+			assert.equal(outcome.blocked, false);
+			assert.deepEqual(h.dialogs, []);
 		}));
 });

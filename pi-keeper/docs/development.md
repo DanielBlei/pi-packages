@@ -73,6 +73,36 @@ and denies. What is still open is in
 [challenges.md](challenges.md); the rulebook's operator notes — where a rule lives,
 why it fired or did not — in [rulebook.md](rulebook.md).
 
+## Replaying a session
+
+`scripts/replay.ts` re-decides every recorded bash command of a session (and of its direct
+subagent children) with the decision code of a given tree, so a change to the rules can be
+measured on real work. It is dev-only and reads private sessions, so its output stays out of
+the repository: `--out` inside a git repository is refused, and the default is
+`$TMPDIR/pi-keeper-replay-<timestamp>/`. Rows hold keys, modes and rule names, never commands.
+
+```bash
+# one process per tree; <tree> is a package dir (the working tree, or an export of extensions/, prompts/, package.json)
+git -C .. archive <ref> pi-keeper/extensions pi-keeper/prompts pi-keeper/package.json | tar -x -C /tmp/baseline
+npm run replay -- run --session <parent.jsonl> --code /tmp/baseline/pi-keeper --out /tmp/old.jsonl
+npm run replay -- run --session <parent.jsonl> --code . --out /tmp/new.jsonl
+npm run replay -- compare /tmp/old.jsonl /tmp/new.jsonl [--fixture tests/fixtures/decisions.ts]
+```
+
+`compare` prints each row (`key | origin | old -> new | old reason`), the totals (recorded
+dialogs, old dialogs recomputed with each disagreement listed, new dialogs), the flips grouped
+by old reason, the rows that became allow, and then runs the `guard: true` fixture entries on
+both trees in every mode. It exits 1 on any new allow. It warns when the two runs have
+different environment fingerprints (node, platform, tmpdir, env names, project rules).
+
+What the replay cannot know: session grants are not in the log, so every row is decided with
+none (the self-check shows where that differs from what happened). A second, labelled count
+adds the prefix grants parsed from recorded choices. A background ask is paired with the
+child call whose command, redacted and shortened like the log's `target`, equals the
+recorded target; ambiguous or missing pairs are listed and left out of the counts. The scratch
+dir comes from the session's `Scratch dir:` message, or from the single
+`<tmpdir>/pi-keeper-XXXXXX` prefix in its commands.
+
 ## Layout
 
 The module map, event flow, state inventory and "how to change X" cheat sheet

@@ -17,6 +17,7 @@
  */
 import { after, beforeEach, afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { KEY, makeSandbox, planFileOf, restoreBell, scratchOf, startPi, type DialogRecord, type Harness, type Sandbox } from "../mocks/pi.ts";
@@ -189,9 +190,12 @@ describe("Opt-in exact approvals in project scope: commands no prefix can cover 
 		writeFileSync(join(sb.agentDir, "pi-keeper.json"), "{}");
 		const h = await startPi({ sandbox: sb });
 		await h.session("resume");
-		const quoted = await expectAsk(h, "bash", bash("python3 -c 'print(1)'"));
+		// a body that writes outside the scratch dir stays a question (static python only vouches for read-only scripts)
+		const quoted = await expectAsk(h, "bash", bash(`python3 -c 'open("out.txt", "w").write("x")'`));
 		assert.ok(quoted.options.includes(EXACT_SESSION));
 		assert.ok(quoted.options.includes(EXACT_PROJECT), JSON.stringify(quoted.options));
+		// a read-only one-liner is allowed without a dialog (when python3 can analyze it)
+		if (spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0) await expectSilent(h, "bash", bash("python3 -c 'print(1)'"));
 		for (const command of ["git rm x", "git push origin main"]) {
 			const ask = await expectAsk(h, "bash", bash(command));
 			assert.ok(!ask.options.includes(EXACT_PROJECT), command);
@@ -268,9 +272,15 @@ describe("Project exact text: a command approved for this project is remembered 
 		assert.equal(decisions.at(-1)?.matcher, "secretBash", JSON.stringify(decisions));
 	});
 
+	it("a literal for loop of read-only commands needs no rule: it runs without a question", async () => {
+		const h = await start(sandboxed());
+		await expectSilent(h, "bash", bash('for f in a b; do echo "$f"; done'));
+	});
+
 	it("a hand-written BashExact is listed for review and does not apply before Load them", async () => {
 		const sb = sandboxed();
-		const command = 'for f in a b; do echo "$f"; done';
+		// phase 3b: expanded. A literal `for` loop no longer asks, so the case is a `while` loop
+		const command = 'while read f; do echo "$f"; done';
 		write(sb, ".pi/settings.local.json", JSON.stringify({ "pi-keeper": { permissions: { allow: [`BashExact(${command})`] } } }));
 		const h = await startPi({ sandbox: sb });
 		h.answer(/Load 1 allow rule/, "Ignore for this session");

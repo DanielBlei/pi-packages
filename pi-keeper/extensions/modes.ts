@@ -399,6 +399,16 @@ export const READ_ONLY_BASH_COMMANDS: string[] = [
 	"diff",
 	"cmp",
 	"nl",
+	// Checksums (print digests; `-c`/`--check` reads file names from a file, see WRITE_FLAGS)
+	"sha1sum",
+	"sha224sum",
+	"sha256sum",
+	"sha384sum",
+	"sha512sum",
+	"md5sum",
+	"b2sum",
+	"cksum",
+	"sum",
 	// Text processing (stdout only)
 	"sort",
 	"uniq",
@@ -468,6 +478,8 @@ export interface FlagSpec {
 	longs?: string[];
 }
 
+export const CHECKSUM_COMMANDS = ["sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum", "md5sum", "b2sum", "cksum", "sum"];
+
 /**
  * Flags that make an otherwise read-only command run a program, hang, or
  * write somewhere that can't be named (effect "exec": never covered by a
@@ -491,6 +503,8 @@ export const WRITE_FLAGS: Record<string, FlagSpec> = {
 	tail: { exact: ["--follow"], prefixes: ["--follow="], shortLetters: "fF" },
 	date: { exact: ["-s", "--set"], prefixes: ["--set=", "-s"] },
 	printf: { exact: ["-v"] },
+	// -c/--check reads the file names to hash from a file
+	...Object.fromEntries(CHECKSUM_COMMANDS.map((name): [string, FlagSpec] => [name, { shortLetters: "c", longs: ["--check"] }])),
 };
 
 /**

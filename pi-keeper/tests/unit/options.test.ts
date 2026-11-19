@@ -3,7 +3,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { dialogOptions, gitGrantLabel, readGrantLabel, type DialogOptionsInput } from "../../extensions/options.ts";
+import { ALLOW_LOOP_GLOBS, ALLOW_LOOP_GLOBS_SHARED, dialogOptions, gitGrantLabel, readGrantLabel, type DialogOptionsInput } from "../../extensions/options.ts";
 
 const SESSION = "Yes, and don't ask again for `sed` this session";
 const PROJECT = "Yes, and always allow `sed` in this project";
@@ -144,4 +144,13 @@ test("the git grant is offered after the fetch options, before No, and never rep
 	const label = gitGrantLabel(["/x/harbor"]);
 	assert.deepEqual(dialogOptions({ ...base, gitGrantLabel: label }).primary, ["Yes", label, "No", "More…"]);
 	assert.deepEqual(dialogOptions({ ...base, mode: "plan", gitGrantLabel: label }).primary, ["Yes", label, "No", FEEDBACK]);
+});
+
+test("the loop-glob option is offered when asked for, shared for a background ask, and never in auto", () => {
+		const base: DialogOptionsInput = { mode: "default", toolName: "bash", ruleMatch: undefined, hasLadder: false, loopGlobsGrant: true };
+		assert.ok(dialogOptions(base).primary.includes(ALLOW_LOOP_GLOBS));
+		assert.ok(dialogOptions({ ...base, mode: "plan" }).primary.includes(ALLOW_LOOP_GLOBS));
+		assert.ok(dialogOptions({ ...base, sharedEdits: true }).primary.includes(ALLOW_LOOP_GLOBS_SHARED));
+		assert.ok(!dialogOptions({ ...base, mode: "auto" }).primary.includes(ALLOW_LOOP_GLOBS));
+		assert.ok(!dialogOptions({ ...base, loopGlobsGrant: undefined }).primary.includes(ALLOW_LOOP_GLOBS));
 });

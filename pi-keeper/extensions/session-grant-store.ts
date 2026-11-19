@@ -28,6 +28,7 @@ export interface SessionGrantsSnapshot {
 	readonly outsideReadDirs: readonly string[];
 	readonly fetchHosts: readonly string[];
 	readonly gitRepos: readonly string[];
+	readonly loopGlobs: boolean;
 }
 
 export class SessionGrants {
@@ -38,6 +39,7 @@ export class SessionGrants {
 	readonly #outsideReadDirs: string[] = [];
 	readonly #fetchHosts: string[] = [];
 	readonly #gitRepos: string[] = [];
+	#loopGlobs = false;
 
 	/** Command prefixes approved for the session. */
 	get prefixes(): readonly (readonly string[])[] {
@@ -74,6 +76,11 @@ export class SessionGrants {
 		return this.#gitRepos;
 	}
 
+	/** "Yes, and allow loops over globs this session": a `for` loop over a glob may be unrolled (the hard limits still ask). */
+	get loopGlobs(): boolean {
+		return this.#loopGlobs;
+	}
+
 	/** Empty everything in place (the arrays keep their identity, so a live reader sees the reset). */
 	reset(): void {
 		this.#prefixes.length = 0;
@@ -83,6 +90,7 @@ export class SessionGrants {
 		this.#outsideReadDirs.length = 0;
 		this.#fetchHosts.length = 0;
 		this.#gitRepos.length = 0;
+		this.#loopGlobs = false;
 	}
 
 	/** A deep copy, frozen: mutating it can't reach the live state. */
@@ -96,6 +104,7 @@ export class SessionGrants {
 			outsideReadDirs: Object.freeze([...this.#outsideReadDirs]),
 			fetchHosts: Object.freeze([...this.#fetchHosts]),
 			gitRepos: Object.freeze([...this.#gitRepos]),
+			loopGlobs: this.#loopGlobs,
 		});
 	}
 
@@ -109,6 +118,14 @@ export class SessionGrants {
 		const list = exact ? this.#exact : this.#prefixes;
 		const at = list.findIndex((t) => t.join(" ") === tokens.join(" "));
 		if (at !== -1) list.splice(at, 1);
+	}
+
+	allowLoopGlobs(): void {
+		this.#loopGlobs = true;
+	}
+
+	revokeLoopGlobs(): void {
+		this.#loopGlobs = false;
 	}
 
 	allowOutsideReads(): void {

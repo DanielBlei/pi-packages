@@ -47,6 +47,56 @@ resume.
   cannot reach outside the pipeline (no `system`, `getline`, pipe, redirect or
   `-f` file); anything it can't read means a dialog (`docs/design.md`, "Read-only
   analysis").
+  Small shell programs are read as the shell would run them, so these run too:
+  a `for` loop over up to 16 literal words (`for f in a.txt b.txt; do wc -l
+  "$f"; done`), a literal lowercase variable (`out=notes.txt; … > "$out"`),
+  `cmd < file` (judged as a read of that file) and checksum tools (`sha256sum`,
+  `md5sum`, `b2sum`, `cksum`, `sum`; not with `-c`/`--check`). A pipe or output
+  redirect after `done` is judged on the last copy. The command runs without a
+  dialog when every copy is read-only or covered by a rule; a prefix rule
+  covers every copy. In the scratch dir, a heredoc with an unquoted delimiter
+  is accepted when its body has no `$`, backtick or backslash, and `cat >> file
+  <<EOF` works like `>`. The secret, outside-read and dangerous-command checks
+  judge the expanded text too whenever it is what makes a command run. No
+  answer gets stricter, and auto mode is unchanged: it has no read-only allow
+  rule, so it gains nothing.
+- **Loops over globs ask:** `for f in *.md; do …; done` asks, and when the loop
+  is otherwise safe the dialog offers *Yes, and allow loops over globs this
+  session*. Some glob loops always ask: a match that starts with `-` (unless the
+  glob starts with `./` or contains `/`), an unquoted use of a name with a
+  space, a write or `cd` earlier in the command, a glob in the scratch dir, a
+  body that is not read-only, more than 64 matches, or no match.
+- **Still asks, by design:** `while`, `if`, `case` and functions (their control
+  flow is not followed), `$( )` and backticks (the output can become options or
+  commands), `cd` out of the working directory, a variable set after `&&` or
+  `||` (it may not be set), backslashes or non-ASCII text in an expanded
+  command (the shell's reading is not certain), and heredocs other than the
+  one above and the python one below. The dialog's *Why:* line names the reason
+  from the expanded program, or the reason the expansion was refused. In plan
+  mode an ask may now name the sharper rule (for example the secret check
+  rather than "not approved"); the action itself is unchanged.
+- **Inline python runs when it is statically readable:** `python3 -c '<script>'`
+  (single quotes) and `python3 - <<'EOF' … EOF` (quoted delimiter) run without a
+  dialog when the script uses only allow-listed stdlib imports (`json`, `csv`,
+  `re`, `collections`, `pathlib`, `glob`, ...), allow-listed calls and methods,
+  reads from literal paths, listings that do not recurse, and writes only to
+  literal files in the scratch dir. Its reads are checked like a shell read: a
+  secret file or a path outside the working directory asks for the same reason
+  `cat` would, and a granted read dir counts. It still asks for an unknown or
+  third-party import (`requests`, `pandas`, `subprocess`), `os.system`,
+  `os.environ`, `eval`, `exec`, `getattr` or dunder names, a path built from a
+  variable, input, argv or the environment, a write outside the scratch dir,
+  recursion (`os.walk`, `rglob`, `**`), anything that may not end or may fill
+  memory (`while`, `**` and `pow`, `itertools.count`/`cycle`/`repeat`, a `*` by a
+  number over a million or by another product), any path under `/dev` or `/proc`
+  (except `/dev/null`), `.format` on anything but a plain string literal without
+  attribute, index or conversion fields (also `format_map`, `%` on a built
+  string, `format()` with a computed spec), `python3 script.py`, `python3 -m`, a
+  double-quoted `-c` script, piped stdin, python after a `cd`, any `PYTHON*`
+  variable in the environment, and a project dir holding a file that would
+  shadow a module the script loads (such as `json.py`). It needs `python3` on
+  `PATH`: the script is parsed with Python's own `ast` in an isolated
+  interpreter and never run. Auto mode is unchanged.
   pi's built-in `grep`/`find`/`ls` tools are off; the model uses `rtk` in
   bash (`pi --enable-builtin-tools` turns them back on; tools enabled
   through pi's `defaultTools` setting are left alone). `rtk` itself is
@@ -149,7 +199,7 @@ or one saved to a file. Only hosts you allow qualify, never "any host".
      `.pi/settings.local.json`; default mode only.
    - **Yes, and don't ask again for this exact command this session:**
      offered instead of the two above when no prefix can cover the command
-     (an interpreter such as `python3 x.py`, a script inside a chain). Only
+     (an interpreter running a file such as `python3 x.py`, a script inside a chain). Only
      that exact text, character for character, runs unasked; default mode
      only (plan mode still asks), in memory until a new session starts
      (`/new`, `/resume`, fork) or pi exits, listed by `/permissions`. Never
@@ -188,7 +238,8 @@ How rules match:
 - **rtk is transparent:** `git add` and `rtk git add` are the same rule.
 - **Shell keywords are never a prefix:** `for`, `do`, `if`, `while` and the
   other reserved words are never remembered, so a loop gets the exact-command
-  options instead. `time` and `!` before a command are stripped, like `nice`.
+  options instead (a prefix rule for the loop body's command still covers each
+  copy). `time` and `!` before a command are stripped, like `nice`.
 - **Writes stay in the project:** a rule for a command that writes files
   (`sed -i`, `cp`, `mkdir`, `tee`, `tar -czf`, `curl -o`, `zip`, `rsync`,
   ...) covers it only while every target is inside the project (or the
@@ -209,7 +260,7 @@ Representative cases (the exact option lists are pinned by
 `tests/integration/dialogs.test.ts`):
 
 - **Bash in default mode:** Yes · session option · project option · No ·
-  More…. Commands no prefix can cover (interpreters, anything with a
+  More…. Commands no prefix can cover (interpreters running a file, anything with a
   program-running flag or an outside write target) offer *this exact command
   this session* instead (Yes · exact · No · More…), plus *always allow this
   exact command in this project* when the `project-exact-commands` setting is on

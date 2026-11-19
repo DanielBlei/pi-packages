@@ -511,6 +511,47 @@ describe("parent: workflow children (subagent_launch)", () => {
 		}
 	});
 
+	// phase 3b: expanded. A loop over literal words is judged as its unrolled commands.
+	it("a read-only shell loop the child leaves behind runs in every mode", async () => {
+		const loop = 'for f in a.txt b.txt; do wc -l "$f"; done';
+		for (const mode of ["default", "auto", "plan"]) {
+			const h = await startPi({ sandbox: sandboxed() });
+			await h.session();
+			await h.command("mode", mode);
+			const outcome = await h.tool("subagent_launch", launch({ commands: [{ command: loop }] }));
+			assert.equal(outcome.blocked, false, mode);
+			assert.deepEqual(h.dialogs, [], mode);
+		}
+	});
+
+	// phase 3b: expanded. A loop whose body still asks keeps asking, and the dialog shows the loop as typed.
+	it("a shell loop whose body needs approval still asks in default and plan, runs in auto", async () => {
+		const loop = 'for f in a b; do npm test "$f"; done';
+		const asks: Record<string, boolean> = { default: true, auto: false, plan: true };
+		for (const mode of ["default", "auto", "plan"]) {
+			const h = await startPi({ sandbox: sandboxed() });
+			await h.session();
+			await h.command("mode", mode);
+			h.answer(/Permission required/, "No");
+			const outcome = await h.tool("subagent_launch", launch({ commands: [{ command: loop }] }));
+			assert.equal(outcome.blocked, asks[mode], mode);
+			assert.equal(h.dialogs.length, asks[mode] ? 1 : 0, mode);
+			if (asks[mode]) assert.match(h.dialogs[0].title, /The child leaves this behind: bash: for f in a b; do npm test/, mode);
+		}
+	});
+
+	// phase 3b: expanded. A command bound to a variable is judged as the command it runs.
+	it("a gate command that runs a privileged command through a variable is still denied", async () => {
+		for (const mode of ["default", "auto", "plan"]) {
+			const h = await startPi({ sandbox: sandboxed() });
+			await h.session();
+			await h.command("mode", mode);
+			const outcome = await h.tool("subagent_launch", launch({ commands: [{ command: "x=sudo; $x ls" }] }));
+			assert.equal(outcome.blocked, true, mode);
+			assert.deepEqual(h.dialogs, [], mode);
+		}
+	});
+
 	it("a command whose cwd is inside the project, and a plain command, are not asked about when read-only", async () => {
 		const sb = sandboxed();
 		const h = await startPi({ sandbox: sb });

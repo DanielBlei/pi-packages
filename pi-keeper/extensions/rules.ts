@@ -20,6 +20,10 @@ import {
 	isScratchPath,
 	outsideCwdBashWrites,
 	isReadOnlyCommand,
+	approvalBreakdown,
+	formatBreakdown,
+	type ApprovalBreakdown,
+	type CoverSource,
 	isSamePath,
 	isSecretCommand,
 	isSubagentArtifactPath,
@@ -31,6 +35,7 @@ import {
 	type PathContext,
 } from "./utils.ts";
 import { ANY_TOOL, SUBAGENT_LAUNCH_TOOL } from "./modes.ts";
+import { expandCommand, type ExpandOptions, type Program } from "./program.ts";
 import { findMatchingRule, type ProjectPermissions } from "./project-rules.ts";
 
 export type Action = "allow" | "ask" | "deny";
@@ -103,6 +108,8 @@ export interface EvalContext extends PathContext {
 	subagentBridge?: boolean;
 	/** This session is a pi-subagents child. */
 	child?: boolean;
+	/** The session grant "allow loops over globs": the expander may unroll a loop over a glob (plumbing comes later; absent = never). */
+	loopGlobs?: boolean;
 }
 
 /** The subset of tool annotations the rules read. */
@@ -169,7 +176,7 @@ export function pathOf(input: unknown): string {
 	return typeof path === "string" ? path : "";
 }
 
-function matches(matcher: Matcher, call: ToolCall, ctx: EvalContext): boolean {
+function body(matcher: Matcher, call: ToolCall, ctx: EvalContext): boolean {
 	switch (matcher) {
 		// Read-only analysis is bash syntax: powershell never matches it (fail closed)
 		case "readOnlyBash":
@@ -177,10 +184,9 @@ function matches(matcher: Matcher, call: ToolCall, ctx: EvalContext): boolean {
 		// Not read-only and not covered by "Yes, and always allow" prefixes. Excluding
 		// remembered commands here keeps a rememberedBash allow from being
 		// outranked by this ask (strictest wins).
-		case "unapprovedBash": {
-			const command = commandOf(call.input);
-			return call.toolName === "bash" && !isReadOnlyCommand(command, ctx.cwd, ctx.scratchDir, ctx.fetchHosts, ctx.gitRepos) && !isCoveredByPrefixes(command, ctx.remembered, ctx.cwd, ctx.rememberedExact ?? [], ctx.scratchDir, ctx.fetchHosts, ctx.gitRepos);
-		}
+		// (the seam replaces this body with the negation of the expanded allow matchers, see `matches`)
+		case "unapprovedBash":
+			return call.toolName === "bash" && !body("readOnlyBash", call, ctx) && !body("rememberedBash", call, ctx);
 		case "rememberedBash":
 			return call.toolName === "bash" && isCoveredByPrefixes(commandOf(call.input), ctx.remembered, ctx.cwd, ctx.rememberedExact ?? [], ctx.scratchDir, ctx.fetchHosts, ctx.gitRepos);
 		// The whole command, character for character, was approved for the session (default mode only lists this matcher)
@@ -258,6 +264,132 @@ function matches(matcher: Matcher, call: ToolCall, ctx: EvalContext): boolean {
 	}
 }
 
+/** How a matcher reads the expanded program `P` (see program.ts and the plan's D2). */
+export type MatcherKind =
+	/** Grants an allow: holds on the call as given or on `P`. */
+	| "allow"
+	/** "Exactly this text": the call as given only. */
+	| "verbatim"
+	/** Finds a hazard: holds on the call as given, or on `P` when an allow came through `P` (`viaP`). */
+	| "scanner"
+	/** The negation of the two expanded allow matchers it stands for (`unapprovedBash`). */
+	| "complement"
+	/** Ignores the command. */
+	| "blind";
+
+export const MATCHER_KIND: Record<Matcher, MatcherKind> = {
+	readOnlyBash: "allow",
+	rememberedBash: "allow",
+	projectAllowBash: "allow",
+	subagentArtifact: "allow",
+	rememberedVerbatim: "verbatim",
+	dangerousBash: "scanner",
+	secretBash: "scanner",
+	outsideCwdRead: "scanner",
+	outsideCwdBashWrite: "scanner",
+	outsideCwdDestructive: "scanner",
+	secretSearch: "scanner",
+	secretUpload: "scanner",
+	projectAsk: "scanner",
+	projectDeny: "scanner",
+	privilegedBash: "scanner",
+	unapprovedBash: "complement",
+	readOnlyTool: "blind",
+	scratchFile: "blind",
+	sessionEdits: "blind",
+	bridgeInactive: "blind",
+	childSession: "blind",
+	planFile: "blind",
+	protectedPath: "blind",
+	outsideCwd: "blind",
+	secretFile: "blind",
+	childCwdLocked: "blind",
+	launchNested: "blind",
+};
+
+/** What the expander needs from a context. */
+type ExpandContext = PathContext & { loopGlobs?: boolean };
+
+/** The expanded program `P` of a bash command in this context (never cached: `process.env` is read each time). */
+export function programOf(command: string, ctx: ExpandContext): Program {
+	const options: ExpandOptions & { globs?: boolean } = { cwd: ctx.cwd, scratch: ctx.scratchDir, env: process.env, globs: ctx.loopGlobs === true };
+	return expandCommand(command, options);
+}
+
+/** `command` is allowed by `holds` as typed or as expanded: the one coverage predicate of the dialog, the warning and the rules. */
+function asTypedOrExpanded(command: string, ctx: ExpandContext, holds: (text: string) => boolean): boolean {
+	if (holds(command)) return true;
+	const program = programOf(command, ctx);
+	return program.changed && holds(program.text);
+}
+
+/** `isCoveredByPrefixes` on the command as typed or as expanded (what `rememberedBash` means). */
+export function coversCommand(command: string, ctx: ExpandContext, prefixes: readonly (readonly string[])[], exact: readonly (readonly string[])[]): boolean {
+	return asTypedOrExpanded(command, ctx, (text) => isCoveredByPrefixes(text, prefixes, ctx.cwd, exact, ctx.scratchDir, ctx.fetchHosts, ctx.gitRepos));
+}
+
+/** The state `matches` shares within one `evaluate` call: `P` and `viaP`, each computed at most once. */
+interface Seam {
+	/** The call with `P` as its command; undefined when the tool is not bash or `P` is the command itself. */
+	expanded(): ToolCall | undefined;
+	/** `P` changed the command, no allow of the rule list holds as typed, and one holds on `P`. */
+	viaP(): boolean;
+}
+
+function makeSeam(call: ToolCall, ctx: EvalContext, rules: readonly Rule[]): Seam {
+	let expanded: ToolCall | undefined | null = null;
+	let via: boolean | undefined;
+	const seam: Seam = {
+		expanded() {
+			if (expanded !== null) return expanded;
+			expanded = undefined;
+			if (call.toolName === "bash") {
+				const program = programOf(commandOf(call.input), ctx);
+				if (program.changed) expanded = { toolName: call.toolName, input: { ...(call.input as object), command: program.text } };
+			}
+			return expanded;
+		},
+		viaP() {
+			if (via !== undefined) return via;
+			via = false;
+			const p = seam.expanded();
+			if (p === undefined) return via;
+			const listed = new Set(rules.flatMap((rule) => (rule.match === undefined ? [] : [rule.match])));
+			const allows = [...listed].filter((m) => MATCHER_KIND[m] === "allow");
+			const typed = [...listed].filter((m) => MATCHER_KIND[m] === "verbatim" || MATCHER_KIND[m] === "allow");
+			via = !typed.some((m) => body(m, call, ctx)) && allows.some((m) => body(m, p, ctx));
+			return via;
+		},
+	};
+	return seam;
+}
+
+/** An allow-kind matcher: as typed, or on `P`. */
+function allowMatches(matcher: Matcher, call: ToolCall, ctx: EvalContext, seam: Seam): boolean {
+	if (body(matcher, call, ctx)) return true;
+	const p = seam.expanded();
+	return p !== undefined && body(matcher, p, ctx);
+}
+
+/** Does `matcher` hold for `call`? The one place that decides which text(s) a matcher reads (MATCHER_KIND). */
+function matches(matcher: Matcher, call: ToolCall, ctx: EvalContext, seam: Seam): boolean {
+	switch (MATCHER_KIND[matcher]) {
+		case "allow":
+			return allowMatches(matcher, call, ctx, seam);
+		case "complement":
+			// the negation of the expanded allow matchers, so it cannot drift from them
+			return call.toolName === "bash" && !allowMatches("readOnlyBash", call, ctx, seam) && !allowMatches("rememberedBash", call, ctx, seam);
+		case "scanner": {
+			if (body(matcher, call, ctx)) return true;
+			const p = seam.expanded();
+			return p !== undefined && seam.viaP() && body(matcher, p, ctx);
+		}
+		case "verbatim":
+		case "blind":
+			return body(matcher, call, ctx);
+	}
+}
+
 /**
  * Built-in tools whose input the rules inspect and whose execute never
  * mutates it, so their input can be locked after approval.
@@ -303,9 +435,10 @@ function deepFreeze<T>(value: T): T {
 /** Decide a tool call: strictest matching rule, else the mode fallback. */
 export function evaluate(mode: ModeRules, globalRules: readonly Rule[], call: ToolCall, ctx: EvalContext): Decision {
 	let decision: Decision | undefined;
-	for (const rule of [...globalRules, ...mode.rules]) {
-		if (!rule.tools.includes(call.toolName) && !rule.tools.includes(ANY_TOOL)) continue;
-		if (rule.match !== undefined && !matches(rule.match, call, ctx)) continue;
+	const applicable = [...globalRules, ...mode.rules].filter((rule) => rule.tools.includes(call.toolName) || rule.tools.includes(ANY_TOOL));
+	const seam = makeSeam(call, ctx, applicable);
+	for (const rule of applicable) {
+		if (rule.match !== undefined && !matches(rule.match, call, ctx, seam)) continue;
 		if (decision === undefined || SEVERITY[rule.action] > SEVERITY[decision.action]) {
 			decision = { action: rule.action, rule };
 		}
@@ -562,18 +695,56 @@ const MAX_EXPLAINED_PATTERNS = 40;
  * sources' patterns that still covers it (earlier sources are kept over later
  * ones). Empty when the command is not covered (e.g. it is read-only).
  */
-export function coveringPatterns(command: string, sources: readonly PatternSource[], cwd: string, scratch?: string, fetchHosts?: readonly string[], gitRepos?: readonly string[]): Array<{ label: string; tokens: readonly string[]; exact: boolean }> {
+export function coveringPatterns(command: string, sources: readonly PatternSource[], cwd: string, scratch?: string, fetchHosts?: readonly string[], gitRepos?: readonly string[], loopGlobs?: boolean): Array<{ label: string; tokens: readonly string[]; exact: boolean }> {
 	let items = sources.flatMap((s) => [
 		...s.prefixes.map((tokens) => ({ label: s.label, tokens, exact: false })),
 		...s.exact.map((tokens) => ({ label: s.label, tokens, exact: true })),
 	]);
 	if (items.length === 0 || items.length > MAX_EXPLAINED_PATTERNS) return [];
+	// the same text(s) the rules read: as typed, or as expanded
+	const ctx: ExpandContext = { cwd, scratchDir: scratch, fetchHosts, gitRepos, loopGlobs };
 	const covers = (set: typeof items): boolean =>
-		set.length === 0 ? isReadOnlyCommand(command, cwd, scratch, fetchHosts, gitRepos) : isCoveredByPrefixes(command, set.filter((i) => !i.exact).map((i) => i.tokens), cwd, set.filter((i) => i.exact).map((i) => i.tokens), scratch, fetchHosts, gitRepos);
+		asTypedOrExpanded(command, ctx, (text) =>
+			set.length === 0 ? isReadOnlyCommand(text, cwd, scratch, fetchHosts, gitRepos) : isCoveredByPrefixes(text, set.filter((i) => !i.exact).map((i) => i.tokens), cwd, set.filter((i) => i.exact).map((i) => i.tokens), scratch, fetchHosts, gitRepos));
 	if (!covers(items)) return [];
 	for (let k = items.length - 1; k >= 0; k--) {
 		const without = items.filter((_, j) => j !== k);
 		if (covers(without)) items = without;
 	}
 	return items;
+}
+
+/**
+ * The dialog's "why" lines for a bash command, from the same text the rules judged:
+ * `Why: <problem>.` first when the expander refused; when it expanded, the breakdown of
+ * `P` with one entry per reason (the first segment and `(+N more)`); else the breakdown
+ * of the command as typed.
+ */
+export function bashWhy(command: string, ctx: ExpandContext, covered: readonly CoverSource[]): string[] {
+	const program = programOf(command, ctx);
+	const breakdown = approvalBreakdown(program.changed ? program.text : command, ctx.cwd, covered, ctx.scratchDir, ctx.fetchHosts, ctx.gitRepos);
+	if (program.problem === undefined) return program.changed ? formatGrouped(breakdown) : formatBreakdown(breakdown);
+	// one block: the problem first, then only the entries that say more than the problem and the generic loop/assignment blocker
+	const problem = `${program.problem}.`;
+	const needs = breakdown.needs.filter((n) => !GENERIC_BLOCKER.test(n.reason) && `${n.reason}.` !== problem);
+	const lines = formatBreakdown({ needs, ok: breakdown.ok }).map((line) => (line.startsWith("Why: ") ? `Also: ${line.slice(5)}` : line));
+	return [`Why: ${problem}`, ...lines];
+}
+
+/** The loop/function and `NAME=…` blockers: they only restate that the command is a loop or an assignment, which the problem already explains. */
+const GENERIC_BLOCKER = /^(uses a shell loop, conditional or function|sets `[^`]*=…`)/;
+
+/** `formatBreakdown` with the needs grouped by reason: `wc -l a` (+15 more) instead of 16 entries. */
+function formatGrouped(breakdown: ApprovalBreakdown): string[] {
+	const groups: { segment: string; reason: string; more: number }[] = [];
+	for (const need of breakdown.needs) {
+		const group = need.segment === "" ? undefined : groups.find((g) => g.reason === need.reason && g.segment !== "");
+		if (group === undefined) groups.push({ segment: need.segment, reason: need.reason, more: 0 });
+		else group.more++;
+	}
+	if (groups.length === 0) return [];
+	if (groups.length === 1 && breakdown.ok.length === 0) return [`Why: ${groups[0].reason}.`];
+	const needs = groups.map((g) => (g.segment === "" ? g.reason : `\`${g.segment}\`${g.more > 0 ? ` (+${g.more} more)` : ""} \u2014 ${g.reason}`));
+	const ok = formatBreakdown({ needs: breakdown.needs, ok: breakdown.ok }).slice(1);
+	return [`Needs approval: ${needs.join("; ")}`, ...ok];
 }

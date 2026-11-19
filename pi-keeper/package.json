@@ -36,6 +36,7 @@
 		"typecheck": "tsc --noEmit",
 		"prepublishOnly": "npm run typecheck && npm test",
 		"bench": "node scripts/bench.ts",
+		"replay": "node scripts/replay.ts",
 		"prompt-weight": "node scripts/prompt-weight.ts",
 		"check:charts": "node scripts/charts/check.ts",
 		"rulebook-check": "node scripts/rulebook-check.ts",

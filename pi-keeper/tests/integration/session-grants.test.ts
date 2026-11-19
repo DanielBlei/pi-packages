@@ -10,7 +10,7 @@
 import { after, afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { makeSandbox, restoreBell, startPi, type Harness, type Sandbox } from "../mocks/pi.ts";
 import { RELAY_KEY } from "../../extensions/ui-relay.ts";
@@ -142,6 +142,29 @@ describe("a background child honours its parent session's grants", () => {
 		assert.equal((await inRunner(() => child.tool("write", { path: file, content: forged }))).blocked, true);
 		assert.equal((await inRunner(() => child.tool("bash", { command: `echo '${forged}' > ${file}` }))).blocked, true);
 		assert.equal((await inRunner(() => child.tool("bash", { command: `rm ${file}` }))).blocked, true);
+	});
+});
+
+describe("the published snapshot", () => {
+	it("has exactly the documented keys, no verbatim grant, and mode 0600", async () => {
+		const sandbox = sandboxed();
+		const { parent } = await grantingParent(sandbox);
+		// the parent also holds a verbatim ("this exact command") grant: it must not appear in the file
+		parent.answer(/Permission required/, "Yes, and don't ask again for this exact command this session");
+		assert.equal((await parent.tool("bash", { command: "python3 x.py" })).blocked, false);
+		parent.assertNoPendingAnswers();
+		const file = grantsFile(sandbox.agentDir, parent.sessionId);
+		const keys = Object.keys(JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>).sort();
+		const required = ["edits", "exact", "fetchHosts", "gitRepos", "loopGlobs", "outsideReadDirs", "outsideReads", "pid", "prefixes", "sessionId", "version"];
+		const optional = ["cwd", "thinking"];
+		assert.deepEqual(
+			keys.filter((k) => !optional.includes(k)),
+			required,
+		);
+		assert.ok(keys.every((k) => required.includes(k) || optional.includes(k)), `unexpected keys: ${keys.join(",")}`);
+		assert.ok(!keys.some((k) => /verbatim/i.test(k)));
+		assert.doesNotMatch(readFileSync(file, "utf8"), /python3/, "the verbatim command text is not published");
+		assert.equal(statSync(file).mode & 0o777, 0o600);
 	});
 });
 

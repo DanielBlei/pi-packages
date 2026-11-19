@@ -78,10 +78,13 @@ import {
 	type DeliveryDetails,
 } from "./prompt-blocks.ts";
 import {
+	bashWhy,
 	commandOf,
+	coversCommand,
 	coveringPatterns,
 	evaluate,
 	launchNestedCalls,
+	programOf,
 	launchNestedHazards,
 	LOCKABLE_TOOLS,
 	lockApprovedInput,
@@ -94,14 +97,12 @@ import {
 	type ToolCall,
 	verbatimKey,
 } from "./rules.ts";
+import { PROBLEMS } from "./program.ts";
 import {
-	approvalBreakdown,
 	commandEffects,
 	createScratchDir,
 	deriveCommandPrefixes,
 	exactRuleTokens,
-	formatBreakdown,
-	isCoveredByPrefixes,
 	outsideCwdReadPaths,
 	readGrantDir,
 	fetchGrantHosts,
@@ -209,6 +210,8 @@ import {
 import {
 	ALLOW_EDITS,
 	ALLOW_EDITS_SHARED,
+	ALLOW_LOOP_GLOBS,
+	ALLOW_LOOP_GLOBS_SHARED,
 	ALLOW_ONCE,
 	ALLOW_OUTSIDE_READS,
 	dialogOptions,
@@ -832,7 +835,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 
 	/** This session's own grants (a parent's; what it relays and publishes to its children). */
 	function ownGrants(cwd: string | undefined): SessionGitRules {
-		return { prefixes: grants.prefixes, exact: grants.exact, edits: sessionEdits, outsideReads: grants.outsideReadsAllowed, outsideReadDirs: grants.outsideReadDirs, fetchHosts: grants.fetchHosts, gitRepos: grants.gitRepos, ...(cwd !== undefined ? { cwd } : {}), ...(parentThinking !== undefined ? { thinking: parentThinking } : {}) };
+		return { prefixes: grants.prefixes, exact: grants.exact, edits: sessionEdits, outsideReads: grants.outsideReadsAllowed, outsideReadDirs: grants.outsideReadDirs, fetchHosts: grants.fetchHosts, gitRepos: grants.gitRepos, loopGlobs: grants.loopGlobs, ...(cwd !== undefined ? { cwd } : {}), ...(parentThinking !== undefined ? { thinking: parentThinking } : {}) };
 	}
 
 	/** This session's thinking level, from the harness (the session's own level wins over the event copy). */
@@ -897,6 +900,8 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			readOnlyTools: config.readOnlyTools,
 			outsideReadsAllowed: grants.outsideReadsAllowed || (shared?.outsideReads ?? false),
 			sessionEdits: sessionEdits || (shared?.edits ?? false),
+			// a background request is judged in the parent, with the parent's own grant (the request carries none)
+			loopGlobs: grants.loopGlobs || shared?.loopGlobs === true,
 			project,
 			commandGrants: remote ? { prefixes: [], exact: [] } : grantPatterns(),
 			annotationsOf: hintsOf,
@@ -1031,6 +1036,10 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			grantReadDirs: (dirs) => addReadDirs(dirs),
 			grantFetchHosts: (hosts) => addFetchHosts(hosts),
 			grantGitRepos: (roots) => addGitRepos(roots),
+			grantLoopGlobs: () => {
+				grants.allowLoopGlobs();
+				syncGrants();
+			},
 			rememberSession: (patterns) => rememberForSession(patterns),
 			setSessionFlag: (flag) => {
 				if (flag === "edits") sessionEdits = true;
@@ -1610,6 +1619,24 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		return deny(relaylessChildDeny(description, unansweredClause(result)));
 	}
 
+	/**
+	 * Whether to offer "allow loops over globs this session": a bash call whose expansion stops only at
+	 * PROBLEMS.globNeedsGrant (judged WITHOUT the grant), and whose dry run WITH the grant would allow.
+	 * Every hard limit (a `-` match, a write earlier, the scratch dir, a body that is not read-only, no match)
+	 * either changes the problem or keeps the dry run from allowing, so the option never appears for them.
+	 */
+	function offerLoopGlobs(call: ToolCall, decision: Decision, ctx: ExtensionContext, subject: AskSubject): boolean {
+		if (call.toolName !== "bash" || subject.mode === "auto" || decision.action !== "ask") return false;
+		try {
+			const evalCtx = evalContext(ctx, subject);
+			if (evalCtx.loopGlobs === true) return false;
+			if (programOf(commandOf(call.input), evalCtx).problem !== PROBLEMS.globNeedsGrant) return false;
+			return evaluate(MODES[subject.mode].permissions, GLOBAL_RULES, call, { ...evalCtx, loopGlobs: true }).action === "allow";
+		} catch {
+			return false;
+		}
+	}
+
 	/** Permission dialog for an "ask" decision. Runs serialized. */
 	async function ask(call: ToolCall, decision: Decision, ctx: ExtensionContext, toolCallId: string, subject: AskSubject = selfSubject(ctx), recheck?: () => boolean): Promise<ToolCallBlock | undefined> {
 		const description = describe(call);
@@ -1678,6 +1705,8 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 		const hostGrant = grantHosts.length > 0 ? grantHosts : undefined;
 		// a cd into another git repository (CD_GIT_REASON): offer its repo roots; only where a plain bash ask or the default fallback reaches
 		const gitRoots = call.toolName === "bash" && (decision.rule === undefined || decision.rule.match === "unapprovedBash") ? gitGrantRoots(commandOf(call.input), subject.cwd, subject.scratchDir, pathContext(ctx, subject).gitRepos) : undefined;
+		// a `for` loop over a glob that only the loop-glob grant keeps from running: offer the grant when a dry run with it would allow
+		const loopGlobsOffer = offerLoopGlobs(call, decision, ctx, subject);
 		const { primary, secondary } = dialogOptions({
 			mode: subject.mode,
 			toolName: call.toolName,
@@ -1696,9 +1725,11 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			// a background child's reply carries no text back, so there is nowhere for feedback to go
 			feedback: subject.remote === undefined,
 			sharedEdits: subject.remote !== undefined,
+			loopGlobsGrant: loopGlobsOffer,
 		});
 
-		const why = notReadOnly ? formatBreakdown(approvalBreakdown(commandOf(call.input), subject.cwd, coverSources(ctx, subject), subject.scratchDir, pathContext(ctx, subject).fetchHosts, pathContext(ctx, subject).gitRepos)) : [];
+		// the claims come from the same expanded text the rules judged (bashWhy); the title below stays the typed command
+		const why = notReadOnly ? bashWhy(commandOf(call.input), pathContext(ctx, subject), coverSources(ctx, subject)) : [];
 		const hints = [...why, askHint(decision.rule?.match, commandOf(call.input), pathContext(ctx, subject), decision.detail)].filter((line) => line !== undefined);
 		// The command/path is model-controlled: segments are sanitized for the terminal (title.ts)
 		const { label, main, lang } = describeParts(call);
@@ -1771,6 +1802,20 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 			}
 			refreshStatus(ctx);
 			ui.notify("Edits in the working directory allowed for this session (until /new, /resume, fork or exit). Protected paths, outside paths and secrets still ask.", "info");
+			return undefined;
+		}
+		if ((choice === ALLOW_LOOP_GLOBS || choice === ALLOW_LOOP_GLOBS_SHARED) && primary.includes(choice)) {
+			report("remember-session", { remembered: "loops over globs", scope: "session" });
+			grants.allowLoopGlobs();
+			syncGrants();
+			if (relay?.grantLoopGlobs !== undefined) {
+				try {
+					relay.grantLoopGlobs();
+				} catch {
+					// the local grant stands
+				}
+			}
+			ui.notify("Loops over globs allowed for this session (read-only bodies; a match starting with '-', a write or cd earlier in the command, and the scratch dir still ask). /permissions lists and removes it.", "info");
 			return undefined;
 		}
 		if (choice === SWITCH_TO_AUTO) {
@@ -2100,7 +2145,7 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				return true;
 			}
 			pattern = { tokens: parsed.tokens, exact: parsed.exact };
-			const covers = isCoveredByPrefixes(command, pattern.exact ? [] : [[...pattern.tokens]], subject.cwd, pattern.exact ? [[...pattern.tokens]] : [], subject.scratchDir);
+			const covers = coversCommand(command, { cwd: subject.cwd, scratchDir: subject.scratchDir }, pattern.exact ? [] : [[...pattern.tokens]], pattern.exact ? [[...pattern.tokens]] : []);
 			if (!covers) ui.notify(sanitizeForTerminal(`\`${patternText(pattern)}\` doesn't cover this command; allowed once, rule still saved`), "warning");
 		} else {
 			const choice = ladder.find((c) => c.label === picked);
@@ -2726,6 +2771,15 @@ export default function keeperExtension(pi: ExtensionAPI, { childMode, askServer
 				label: `[session] git in ${sanitizeForTerminal(repo)}/ allowed`,
 				remove: () => {
 					grants.removeGitRepo(repo);
+					syncGrants();
+				},
+			});
+		}
+		if (grants.loopGlobs) {
+			entries.push({
+				label: "[session] Loops over globs: allowed this session",
+				remove: () => {
+					grants.revokeLoopGlobs();
 					syncGrants();
 				},
 			});
