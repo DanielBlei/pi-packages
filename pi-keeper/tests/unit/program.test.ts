@@ -639,16 +639,18 @@ test("python: near-misses are refused with their problem, twins expand", { skip:
 		[`${READ} a.txt`, { problem: PROBLEMS.pyArgv }],
 		[`${READ} > out`, { problem: PROBLEMS.pyArgv }],
 		[`${READ} < in`, { problem: PROBLEMS.pyArgv }],
-		[`${READ} 2>&1`, { problem: PROBLEMS.pyArgv }],
+		[`${READ} 2>&1 x`, { problem: PROBLEMS.pyArgv }],
+		[`${READ} 2>&1x`, { problem: PROBLEMS.pyArgv }],
+		[`${READ} 2>/dev/nullx`, { problem: PROBLEMS.pyArgv }],
 		[`${READ} &`, { problem: PROBLEMS.pyBackground }],
 		[`${READ} # c`, { problem: PROBLEMS.pyArgv }],
 		[`${READ};; ls`, { problem: PROBLEMS.pyArgv }],
 		// heredoc forms
 		[`python3 - <<EOF\nprint(1)\nEOF`, { problem: PROBLEMS.pyHeredoc }],
-		[`python3 - <<"EOF"\nprint(1)\nEOF`, { problem: PROBLEMS.pyHeredoc }],
+		[`python3 - <<"EOF"\nprint(1)\nEOF`, { text: "true" }],
 		[`python3 - <<-'EOF'\nprint(1)\nEOF`, { problem: PROBLEMS.pyHeredoc }],
 		[`python3 - <<< 'print(1)'`, { problem: PROBLEMS.pyHeredoc }],
-		[`python3 - <<'EOF' && ls\nprint(1)\nEOF`, { problem: PROBLEMS.pyHeredoc }],
+		[`python3 - <<'EOF' && ls\nprint(1)\nEOF`, { text: "true && ls" }],
 		[`python3 - <<'EOF'\nprint(1)\n EOF`, { problem: PROBLEMS.pyHeredocOpen }],
 		[`python3 - <<'EOF'\nprint(1)`, { problem: PROBLEMS.pyHeredocOpen }],
 		[`python3 - <<'EOF'`, { problem: PROBLEMS.pyHeredocOpen }],
@@ -667,7 +669,7 @@ test("python: near-misses are refused with their problem, twins expand", { skip:
 		[`python3 -c 'import requests'`, { problem: "python: import requests is not on the allow-list" }],
 		[`python3 -c 'import os; os.system("ls")'`, { problem: "python: os.system is not on the allow-list" }],
 		// not our form: today's answer, no problem
-		["python -c 'print(1)'", { problem: "" }],
+		["python2 -c 'print(1)'", { problem: "" }],
 	];
 	for (const [command, expected] of rows) {
 		if ("problem" in expected && expected.problem === "") {
@@ -680,8 +682,13 @@ test("python: near-misses are refused with their problem, twins expand", { skip:
 
 test("python: other interpreters, wrappers, prefixes, modules and files keep today's answer", () => {
 	for (const command of [
-		"python -c 'print(1)'",
-		"python3.11 -c 'print(1)'",
+		"python2 -c 'print(1)'",
+		"pypy3 -c 'print(1)'",
+		"python3.x -c 'print(1)'",
+		"/usr/bin/../bin/python3 -c 'print(1)'",
+		"./python3 -c 'print(1)'",
+		"python3 -uc 'print(1)'",
+		"python3 -m json.tool\n",
 		"python3 -m json.tool a.json",
 		"python3 x.py",
 		"python3",
@@ -730,4 +737,175 @@ test("python: dotfile patterns become the dotfiles that exist", { skip: hasPytho
 	writeFileSync(join(pyRoot, "dots", ".hid.json"), "{}\n");
 	pyCheck(`python3 -c 'import os\nfor n in os.listdir("dots"): print(open(os.path.join("dots", n)).read())'`, { text: "cat -- dots/* 'dots/.env' 'dots/.hid.json'; ls -- 'dots'" });
 	pyCheck(`python3 -c 'from pathlib import Path\nfor p in Path("dots").glob("*.json"): print(p.read_text())'`, { text: "cat -- dots/*.json 'dots/.hid.json'; ls -- dots/*.json" });
+});
+
+// ---------------------------------------------------------------------------
+// Static python: cat | python3, heredoc forms, flags, tails and interpreters
+// ---------------------------------------------------------------------------
+
+const READ_BODY = `print(open("data/a.json").read())`;
+const CAT = "cat -- 'data/a.json'";
+
+/** The command is not rewritten; `problem` is checked only when given. */
+function pyKeeps(command: string, problem?: string): void {
+	const got = expandCommand(command, { cwd: pyRoot, scratch: pyScratch, env: pyEnv });
+	assert.equal(got.text, command, `text for ${JSON.stringify(command)}`);
+	assert.equal(got.changed, false, `changed for ${JSON.stringify(command)}`);
+	if (problem !== undefined) assert.equal(got.problem, problem, `problem for ${JSON.stringify(command)}`);
+}
+
+test("python: cat <<'D' | python3, the heredoc operator forms and the flags", { skip: hasPython ? false : "python3 is not installed" }, () => {
+	const rows: ReadonlyArray<readonly [string, Expect]> = [
+		[`cat <<'EOF' | python3\n${READ_BODY}\nEOF`, { text: CAT }],
+		[`cat <<'EOF' | python3 -\n${READ_BODY}\nEOF`, { text: CAT }],
+		[`cat << 'EOF' | python3\n${READ_BODY}\nEOF`, { text: CAT }],
+		[`cat <<"EOF" | python3\n${READ_BODY}\nEOF`, { text: CAT }],
+		[`cat <<'EOF'  |  python3 -u -\n${READ_BODY}\nEOF`, { text: CAT }],
+		[`cat <<'EOF' | python3 -u\n${READ_BODY}\nEOF\nls data`, { text: `${CAT}\nls data` }],
+		[`ls data; cat <<'EOF' | python3\n${READ_BODY}\nEOF`, { text: `ls data; ${CAT}` }],
+		[`ls data && cat <<'EOF' | python3\n${READ_BODY}\nEOF`, { text: `ls data && ${CAT}` }],
+		[`for f in a b; do cat <<'EOF' | python3\n${READ_BODY}\nEOF\ndone`, { text: `${CAT}; ${CAT}` }],
+		[`cat <<'EOF' | python3 -\nprint(1)\n# python3 -c 'print(2)'\n# cat <<'X' | python3 -\nEOF`, { text: "true" }],
+		// the operator forms of the python head
+		[`python3 - << 'EOF'\n${READ_BODY}\nEOF`, { text: CAT }],
+		[`python3 -u - <<'EOF'\n${READ_BODY}\nEOF`, { text: CAT }],
+		[`python3 -uB -I <<'EOF'\n${READ_BODY}\nEOF`, { text: CAT }],
+		[`python3 -EsSq - <<"EOF"\n${READ_BODY}\nEOF`, { text: CAT }],
+		[`python3 -u -c '${READ_BODY}'`, { text: CAT }],
+		[`python3 - <<'EOF'|head\n${READ_BODY}\nEOF`, { text: `${CAT}|head` }],
+		[`python3 - <<'EOF'>/dev/null\nprint(1)\nEOF`, { problem: PROBLEMS.pyHeredocWords }],
+	];
+	for (const [command, expected] of rows) pyCheck(command, expected);
+});
+
+test("python: tails keep their text and only the quote-free grammar is accepted", { skip: hasPython ? false : "python3 is not installed" }, () => {
+	const rows: ReadonlyArray<readonly [string, Expect]> = [
+		[`python3 - <<'EOF' 2>&1\n${READ_BODY}\nEOF`, { text: `${CAT} 2>&1` }],
+		[`python3 - <<'EOF' 2>/dev/null | head -20\n${READ_BODY}\nEOF`, { text: `${CAT} 2>/dev/null | head -20` }],
+		[`python3 - <<'EOF' 2>&1 2>/dev/null\n${READ_BODY}\nEOF`, { text: `${CAT} 2>&1 2>/dev/null` }],
+		[`python3 - <<'EOF' | sort -u\n${READ_BODY}\nEOF\nls data`, { text: `${CAT} | sort -u\nls data` }],
+		[`python3 - <<'EOF' && ls data\n${READ_BODY}\nEOF`, { text: `${CAT} && ls data` }],
+		[`python3 - <<'EOF' || ls data\n${READ_BODY}\nEOF`, { text: `${CAT} || ls data` }],
+		[`python3 - <<'EOF' ; ls data\n${READ_BODY}\nEOF`, { text: `${CAT} ; ls data` }],
+		[`python3 - <<'EOF' ;\n${READ_BODY}\nEOF`, { text: `${CAT} ;` }],
+		[`cat <<'EOF' | python3 - 2>&1 | head -5\n${READ_BODY}\nEOF`, { text: `${CAT} 2>&1 | head -5` }],
+		[`cat <<'EOF' | python3 2>/dev/null\n${READ_BODY}\nEOF`, { text: `${CAT} 2>/dev/null` }],
+		// `-c` takes the same redirects
+		[`${READ} 2>&1`, { text: `${CAT} 2>&1` }],
+		[`${READ} 2>/dev/null | head`, { text: `${CAT} 2>/dev/null | head` }],
+		[`${READ} 2>&1 && ls data`, { text: `${CAT} 2>&1 && ls data` }],
+		// | sh and | python3 are judged by the normal rules, the expander only keeps the tail
+		[`python3 - <<'EOF' | sh\n${READ_BODY}\nEOF`, { text: `${CAT} | sh` }],
+		[`python3 - <<'EOF' | python3\n${READ_BODY}\nEOF`, { text: `${CAT} | python3` }],
+		// refused tails
+		[`python3 - <<'EOF' &\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyBackground }],
+		[`python3 - <<'EOF' 2>&1 &\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyBackground }],
+		[`python3 - <<'EOF' |& cat\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyPipe }],
+		[`python3 - <<'EOF' | grep 'x'\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyHeredocWords }],
+		[`python3 - <<'EOF' | grep "x"\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyHeredocWords }],
+		[`python3 - <<'EOF' | echo '\n${READ_BODY}\nEOF\n'`, { problem: PROBLEMS.pyHeredocWords }],
+		[`python3 - <<'EOF' | echo \\\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyHeredocWords }],
+		[`python3 - <<'EOF' | echo # '\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyHeredocWords }],
+		[`python3 - <<'EOF' | echo $HOME\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyHeredocWords }],
+		[`python3 - <<'EOF' | echo \`id\`\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyHeredocWords }],
+		[`python3 - <<'EOF' | true <evil.py\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyHeredocWords }],
+		[`python3 - <<'EOF' <evil.py\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyHeredocWords }],
+		[`python3 - <<'EOF' <<<x\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyHeredocWords }],
+		[`python3 - <<'EOF' x.py\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyHeredocWords }],
+		[`python3 - <<'EOF' -c 'print(1)'\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyHeredocWords }],
+		[`python3 - <<'EOF' > out\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyHeredocWords }],
+		[`python3 - <<'EOF' 2>&1x\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyHeredocWords }],
+		[`python3 - <<'EOF' ;;\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyHeredocWords }],
+		[`python3 - <<'A' <<'B'\n${READ_BODY}\nA\nB`, { problem: PROBLEMS.pyHeredocWords }],
+		// delimiter forms
+		[`python3 - <<'EOF'x\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyHeredoc }],
+		[`python3 - <<'EOF'"x"\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyHeredoc }],
+		[`python3 - <<'EOF'\r\n${READ_BODY}\r\nEOF\r`, { problem: PROBLEMS.pyHeredoc }],
+		[`python3 - <<"EOF'\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyHeredoc }],
+		[`python3 - <<\\EOF\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyHeredoc }],
+		[`python3 - <<-"EOF"\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyHeredoc }],
+		[`python3 - <<<"x"`, { problem: PROBLEMS.pyHeredoc }],
+		[`python3 - <<'E OF'\n${READ_BODY}\nE OF`, { problem: PROBLEMS.pyHeredoc }],
+	];
+	for (const [command, expected] of rows) pyCheck(command, expected);
+});
+
+test("python: every cat variant that is not exactly `cat <<'D' | python3` keeps asking", { skip: hasPython ? false : "python3 is not installed" }, () => {
+	const b = `\n${READ_BODY}\nEOF`;
+	pyKeeps(`cat - <<'EOF' | python3${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`cat -- <<'EOF' | python3${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`\\cat <<'EOF' | python3${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`command cat <<'EOF' | python3${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`X=1 cat <<'EOF' | python3${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`ls | cat <<'EOF' | python3${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`cat <<'EOF' <f | python3${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`cat <<'EOF' | python3 -c 'print(1)'${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`cat<<'EOF'|python3${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`cat <<'EOF' |& python3${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`cat <<'EOF' |\npython3${b}`);
+	pyKeeps(`cat <<'EOF' | python3 x.py${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`cat <<'EOF' | python3 - x${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`cat <<'EOF' | python3 -m json.tool${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`cat <<'EOF' | python3 -x${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`cat <<'EOF' | python3 -uc${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`cat <<'EOF' | python3 | grep 'x'${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`cat <<'EOF' | python3 &${b}`, PROBLEMS.pyBackground);
+	pyKeeps(`cat <<EOF | python3${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`cat <<-'EOF' | python3${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`cat <<'EOF'x | python3${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`cat <<'A' <<'B' | python3${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`cat <<'EOF' | echo | python3${b}`, PROBLEMS.pyPipe);
+	pyKeeps(`echo hi | python3 -`, PROBLEMS.pyPipe);
+	pyKeeps(`cat data/a.json | python3 -`, PROBLEMS.pyPipe);
+	pyCheck(`cd data && cat <<'EOF' | python3\n${READ_BODY}\nEOF`, { problem: PROBLEMS.pyDir("cd") });
+	pyCheck(`cat <<'EOF' | python3\nprint(1)`, { problem: PROBLEMS.pyHeredocOpen });
+	pyCheck(`cat <<'EOF' | python3`, { problem: PROBLEMS.pyHeredocOpen });
+	pyCheck(`cat <<'EOF' | python3\nimport requests\nEOF`, { problem: "python: import requests is not on the allow-list" });
+});
+
+test("python: segments never overlap and a body is never scanned", { skip: hasPython ? false : "python3 is not installed" }, () => {
+	const body = `print(open("data/a.json").read())\n# cat <<'X' | python3 -\n# python3 - <<'X'\n# python3 -c 'print(2)'`;
+	pyCheck(`cat <<'EOF' | python3 -\n${body}\nEOF\ncat <<'EOF' | python3 -\nprint(1)\nEOF`, { text: `${CAT}\ntrue` });
+	pyCheck(`python3 - <<'EOF'\n${body}\nEOF\npython3 - <<'EOF'\nprint(1)\nEOF`, { text: `${CAT}\ntrue` });
+	pyCheck(`python3 - <<'EOF' | cat\nprint(1)\nEOF\n${READ}`, { text: `true | cat\n${CAT}` });
+});
+
+test("python: flags other than -u -B -I -E -s -S -q keep asking", { skip: hasPython ? false : "python3 is not installed" }, () => {
+	for (const flag of ["-x", "-i", "-W error::mod.X", "-W", "-X pycache_prefix=x", "-uc", "-uW", "-uX", "-um", "-m", "-O", "-OO", "-V", "-b", "-d", "-R", "--", "-u -m json.tool"]) {
+		pyKeeps(`python3 ${flag} - <<'EOF'\nprint(1)\nEOF`);
+		pyKeeps(`python3 ${flag} -c 'print(1)'`);
+		pyKeeps(`cat <<'EOF' | python3 ${flag}\nprint(1)\nEOF`);
+	}
+	pyKeeps(`python3 - -u <<'EOF'\nprint(1)\nEOF`);
+	pyKeeps(`python3 - arg <<'EOF'\nprint(1)\nEOF`);
+	pyKeeps(`python3 -c -u 'print(1)'`);
+	pyKeeps(`python3 -u -c'print(1)'`);
+});
+
+const has = (cmd: string): boolean => spawnSync(cmd, ["--version"], { stdio: "ignore" }).status === 0;
+
+test("python: interpreter names are matched and passed on", { skip: hasPython ? false : "python3 is not installed" }, () => {
+	// names that are recognised reach the analyzer: a missing binary is its problem, not a silent pass-through
+	for (const word of ["python3.99", "/nonexistent-pk/bin/python3", "/nonexistent-pk/bin/python3.99", "/nonexistent-pk/python"]) {
+		for (const command of [`${word} -c 'print(1)'`, `${word} - <<'EOF'\nprint(1)\nEOF`, `cat <<'EOF' | ${word}\nprint(1)\nEOF`, `cat <<'EOF' | ${word} -u -\nprint(1)\nEOF`]) {
+			const got = expandCommand(command, { cwd: pyRoot, scratch: pyScratch, env: pyEnv });
+			assert.notEqual(got.problem, undefined, `recognised: ${JSON.stringify(command)}`);
+			assert.match(got.problem as string, new RegExp(word.replace(/[.\\/]/g, "\\$&")), `names the interpreter: ${JSON.stringify(command)}`);
+			assert.equal(got.changed, false);
+		}
+	}
+	if (has("python")) pyCheck(`python -c 'print(1)'`, { text: "true" });
+	if (has("python")) pyCheck(`cat <<'EOF' | python\nprint(1)\nEOF`, { text: "true" });
+	const abs = spawnSync("python3", ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" }).stdout.trim();
+	if (/^\/[A-Za-z0-9_./-]+\/python(3(\.[0-9]+)?)?$/.test(abs) && !abs.includes("/shims/")) {
+		pyCheck(`${abs} -c 'print(1)'`, { text: "true" });
+		pyCheck(`${abs} -u - <<'EOF'\nprint(1)\nEOF`, { text: "true" });
+		pyCheck(`cat <<'EOF' | ${abs}\nprint(1)\nEOF`, { text: "true" });
+	}
+	// names that keep asking: today's answer, no problem
+	for (const word of ["python2", "python2.7", "pypy", "pypy3", "python3x", "python3.", "python3.1a", "/usr/bin/../bin/python3", "/usr/bin/python3x", "/usr/bin/python2", "bin/python3", "./python3", "~/python3", "/python3", "/usr/bin/python3/", "/usr/b in/python3"]) {
+		pyKeeps(`${word} -c 'print(1)'`);
+		pyKeeps(`${word} - <<'EOF'\nprint(1)\nEOF`);
+	}
+	for (const command of ["env python3 -c 'print(1)'", "uv run python3 -c 'print(1)'", "uv run python -c 'print(1)'", "python3 -m json.tool", "sudo /usr/bin/python3 -c 'print(1)'", "echo /usr/bin/python3 -c 'print(1)'"]) pyKeeps(command);
 });

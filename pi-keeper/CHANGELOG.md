@@ -2,6 +2,12 @@
 
 ## 0.1.3 - 
 
+### Security
+
+- Inline python with a coding declaration (`# coding: utf-7`) or a BOM is refused.
+  Python decodes a script file by the declaration while the shell and `python3 -c`
+  do not, so such a script could hide `os.system` from the analyzer.
+
 ### Added
 
 - Tool and MCP grants: a tool that is not built in, or a call through the `mcp`
@@ -14,6 +20,11 @@
   option "Yes, and allow loops over globs this session".
 - Inline python `while` loops ask once per session, with a new option "allow python
   `while` loops this session (higher risk: a loop may not end or may fill memory)".
+- Inline python also runs as `cat <<'EOF' | python3` (or `python3 -`), with `python`,
+  `python3.N` or an absolute interpreter path (Python 3 only; not in the project,
+  scratch dir, a `shims` directory or a relative `PATH` entry), the flags
+  `-u -B -I -E -s -S -q`, `<< 'EOF'` and `<<"EOF"`, and a tail of `2>&1`,
+  `2>/dev/null`, `| head` and `&&`/`||`/`;` with plain words.
 - Session grants for the two options above and for tools are shared with subagents.
 - Dev: `npm run replay` replays a recorded session and compares the decisions of two
   code trees.

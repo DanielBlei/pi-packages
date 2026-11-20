@@ -5,7 +5,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { analyzePythonScript, PYTHON_PROBLEMS, type AnalyzeOptions } from "../../extensions/python.ts";
@@ -491,4 +491,108 @@ test("while: needs the grant, and the grant lifts only that", { skip }, () => {
 	refuse(src("x = 'a' * 10000000000", "while True:", "    break"), PYTHON_PROBLEMS.unbounded("a repeat by 10000000000"), { allowWhile: true });
 	// the cache does not mix the two answers
 	refuse(loop, PYTHON_PROBLEMS.whileNeedsGrant());
+});
+
+// ---- PEP 263 coding cookies and BOMs ---------------------------------------------------
+
+const COOKIE = PYTHON_PROBLEMS.codingCookie();
+
+test("a coding cookie or BOM is refused, whatever the line ends", { skip }, () => {
+	const exploit = '# coding: utf-7\nACM=0\nx=1 +ACM- 1;import os;os.system("touch pwned.txt")\n';
+	refuse(exploit, COOKIE);
+	refuse("print(1)\n# coding: utf-7\nprint(2)\n", COOKIE);
+	refuse("# coding: utf-8\nprint(1)\n", COOKIE);
+	refuse("# coding=latin-1\nprint(1)\n", COOKIE);
+	refuse("# -*- coding: utf-7 -*-\nprint(1)\n", COOKIE);
+	refuse("# vim: set fileencoding=utf-7 :\nprint(1)\n", COOKIE);
+	refuse("\f# coding: utf-7\nprint(1)\n", COOKIE);
+	refuse("# coding: utf-7\rprint(1)\r", COOKIE);
+	refuse("print(1)\r# coding: utf-7\rprint(2)\r", COOKIE);
+	refuse("print(1)\r\n# coding: utf-7\r\nprint(2)\r\n", COOKIE);
+	refuse("﻿print(1)\n", COOKIE);
+	refuse("￾print(1)\n", COOKIE);
+});
+
+test("the word coding after line 2 is fine", { skip }, () => {
+	pass(src("print(1)", "print(2)", "# coding: utf-7 is only a word here", "print(3)"));
+	pass(src("print(1)", "x = 'coding: utf-7'", "print(x)"));
+});
+
+// ---- interpreter checks ----------------------------------------------------------------
+
+const realPython = spawnSync("python3", ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" }).stdout.trim();
+const bin = join(root, "bin");
+mkdirSync(bin);
+function fake(dir: string, name: string, body: string): string {
+	mkdirSync(dir, { recursive: true });
+	const file = join(dir, name);
+	writeFileSync(file, `#!/bin/sh\n${body}\n`);
+	chmodSync(file, 0o755);
+	return file;
+}
+const wrapper = (dir: string, name: string) => fake(dir, name, `exec ${realPython} "$@"`);
+const unsafe = (p: string) => PYTHON_PROBLEMS.unsafeInterpreter(p);
+
+test("an interpreter inside runDir or scratch is refused", { skip }, () => {
+	const inRun = wrapper(runDir, "py-in-run");
+	const inScratch = wrapper(scratch, "py-in-scratch");
+	for (const p of [inRun, inScratch]) refuse("print(1)\n", unsafe(p), { python: p });
+});
+
+test("an absolute interpreter path with .., odd characters or no leading slash is refused", { skip }, () => {
+	wrapper(bin, "py-dots");
+	const p = join(bin, "..", "bin", "py-dots");
+	const dots = `${bin}/../bin/py-dots`;
+	assert.ok(p.includes("py-dots"));
+	refuse("print(1)\n", PYTHON_PROBLEMS.badInterpreter(dots), { python: dots });
+	const odd = wrapper(join(root, "odd dir"), "py");
+	refuse("print(1)\n", PYTHON_PROBLEMS.badInterpreter(odd), { python: odd });
+	refuse("print(1)\n", PYTHON_PROBLEMS.badInterpreter("bin/py-dots"), { python: "bin/py-dots" });
+});
+
+test("a missing absolute interpreter is reported", { skip }, () => {
+	const p = join(bin, "does-not-exist");
+	refuse("print(1)\n", PYTHON_PROBLEMS.noInterpreter(p), { python: p });
+});
+
+test("a shims interpreter is refused unless it is plain python3", { skip }, () => {
+	const shims = join(root, "pyenv", "shims");
+	const p = wrapper(shims, "python3");
+	refuse("print(1)\n", unsafe(p), { python: p });
+	wrapper(shims, "python3.99");
+	refuse("print(1)\n", unsafe(join(shims, "python3.99")), { python: "python3.99", env: { PATH: shims } });
+	pass("print(1)\n", { env: { PATH: `${shims}:${env.PATH}` } });
+});
+
+test("an interpreter reporting Python 2 or no version is refused", { skip }, () => {
+	const py2 = fake(join(root, "py2"), "python", 'echo "2 2.7.18 (default)"');
+	refuse("print(1)\n", PYTHON_PROBLEMS.notPython3("2 2.7.18 (default)"), { python: py2 });
+	const broken = fake(join(root, "broken"), "python", "exit 3");
+	refuse("print(1)\n", PYTHON_PROBLEMS.notPython3("it could not report its version"), { python: broken });
+});
+
+test("a relative or run-dir PATH entry holding the interpreter is refused", { skip }, () => {
+	wrapper(runDir, "pyhere");
+	refuse("print(1)\n", unsafe(join(runDir, "pyhere")), { python: "pyhere", env: { PATH: `${runDir}:${env.PATH}` } });
+	const v = analyzePythonScript("print(1)\n", opts({ python: "pyhere", env: { PATH: `.:${env.PATH}` } }));
+	assert.ok(!v.ok);
+	if (!v.ok) assert.equal(v.problem, unsafe(join(".", "pyhere")));
+	// an unsafe entry that does not hold the interpreter is only skipped
+	pass("print(1)\n", { env: { PATH: `.::${runDir}:${env.PATH}` } });
+});
+
+test("two interpreters never share a cached verdict", { skip }, () => {
+	const script = "print('iso')\n";
+	const good = wrapper(join(root, "ia"), "py");
+	// Answers the version probe like python 3, then fails the analyzer run with a distinct verdict.
+	const fakeAnalyzer = fake(
+		join(root, "ib"),
+		"py",
+		`case "$*" in *version_info*) echo "3 3.99.0 fake";; *) echo '{"ok": false, "code": "syntax", "detail": "fake"}';; esac`,
+	);
+	assert.ok(analyzePythonScript(script, opts({ python: good })).ok);
+	const second = analyzePythonScript(script, opts({ python: fakeAnalyzer }));
+	assert.ok(!second.ok);
+	if (!second.ok) assert.equal(second.problem, PYTHON_PROBLEMS.syntax("fake"));
+	assert.ok(analyzePythonScript(script, opts({ python: good })).ok);
 });
