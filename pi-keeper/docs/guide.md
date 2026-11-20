@@ -69,7 +69,13 @@ what always asks, and what is denied.
   rule. A rule for the loop body's command covers every copy. The secret,
   outside-read and dangerous-command checks judge the expanded text too.
 - **Inline python that pi-keeper can read ahead of time:** `python3 -c '<script>'`
-  (single quotes) and `python3 - <<'EOF' … EOF` (quoted delimiter). The script
+  (single quotes), `python3 - <<'EOF' … EOF` and `cat <<'EOF' … EOF | python3`
+  (or `python3 -`). The delimiter must be quoted: `<<'EOF'`, `<< 'EOF'` or
+  `<<"EOF"`. The interpreter may be `python3`, `python`, `python3.N` or an
+  absolute path to one, and may take the flags `-u -B -I -E -s -S -q`. After the
+  heredoc operator (or after `-c '…'`) only `2>&1`, `2>/dev/null` and then `|`,
+  `&&`, `||` or `;` with plain words may follow (`| head -20` runs, `| grep 'x'`
+  asks). The script
   may use plain standard-library modules (`json`, `csv`, `re`, `collections`,
   `pathlib`, `glob`, ...), read literal paths and list directories without
   recursion, and write literal files in the scratch dir. pi-keeper checks the
@@ -78,8 +84,13 @@ what always asks, and what is denied.
   `glob.glob`, `os.listdir`, `Path.glob` or `Path.iterdir`, runs too. The files
   it lists are judged when the command is checked, so a matching `.env` or a
   symlink out of the project still asks, and `listdir` includes dotfiles. The
-  script is parsed with Python's own `ast` and never run, so `python3` must be
-  on `PATH`.
+  script is parsed with Python's own `ast` and never run, so the interpreter
+  must be on `PATH` (or given by absolute path) and must be Python 3. An
+  interpreter inside the project or scratch dir, in a `shims` directory, or
+  found through a relative `PATH` entry asks (plain `python3` through `PATH` is
+  unchanged). A coding declaration (`# coding: ...`) or a BOM on the script asks,
+  because python decodes a script file differently from what the shell shows
+  (a utf-7 declaration could hide `os.system`).
 - **No change to what already asked.** Expanding a program only adds allows.
   Auto mode has no read-only allow rule, so it is unchanged.
 
@@ -113,8 +124,10 @@ Subagents share these grants with their parent.
   `exec`, `getattr`, a path built from a variable, input or the environment, a
   write outside the scratch dir, recursion (`os.walk`, `rglob`, `**`), anything
   that may fill memory, `.format` on built strings, `python3 script.py`,
-  `python3 -m`, a double-quoted `-c`, piped stdin, python after a `cd`, a
-  `PYTHON*` variable, and a project dir with a file that would shadow a loaded
+  `python3 -m`, a double-quoted `-c`, an unquoted or `<<-` delimiter, a
+  here-string, stdin from anything but `cat <<'EOF'` (`echo x | python3`),
+  `cat` with arguments, a word after `-`, `uv run python`, `python2`, python
+  after a `cd`, a coding declaration or BOM, a `PYTHON*` variable, and a project dir with a file that would shadow a loaded
   module (such as `json.py`).
 - **Secrets:** `.env`, private keys, credential stores (`~/.ssh`, `~/.aws`, ...).
   So do a recursive or hidden-file search over a tree that holds one (`grep -r

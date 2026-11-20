@@ -14,7 +14,8 @@
  * must succeed and must split `P` into the same simple commands and words.
  * `cmd < path` (a literal path) is judged as `cat path | cmd`, and a loop over
  * an unquoted glob expands against the cwd when `options.globs` is set.
- * A whole-unit `python3 -c '<script>'` or `python3 - <<'DELIM'` is replaced by the
+ * A whole-unit `python3 -c '<script>'`, `python3 - <<'DELIM'` or `cat <<'DELIM' | python3` (also `python`, `python3.N` and an
+ * absolute path to one, with flags `-uBIEsSq`) is replaced by the
  * effect program of `analyzePythonScript` (`cat -- reads; ls -- lists; touch -- writes`).
  */
 
@@ -110,11 +111,13 @@ export const PROBLEMS = {
 	loopPipeCd: (word: string) => `\`${word}\` in the body of a piped loop would run in a subshell`,
 	loopPipeTail: "the pipe tail of a loop must end at `;`, `&&`, `||` or a newline",
 	pyDouble: "`python3 -c` with a double-quoted script is not analyzed, only a single-quoted one",
-	pyArgv: "`python3 -c '...'` may not be followed by arguments, redirections or other words",
+	pyArgv: "`python3 -c '...'` may only be followed by `2>&1`, `2>/dev/null`, and then `|`, `&&`, `||` or `;`",
 	pyBackground: "`python3` followed by `&` is not analyzed",
-	pyHeredoc: "a python heredoc needs a quoted delimiter and nothing else on its line",
+	pyHeredoc: "a python heredoc needs a quoted plain-word delimiter (`<<'EOF'`, `<< 'EOF'` or `<<\"EOF\"`) with no `-`, `\\` or characters glued to the closing quote",
+	pyHeredocWords: "after a python heredoc operator only `2>&1`, `2>/dev/null`, then `|`, `&&`, `||` or `;` and plain words (no quote, backslash, `#`, `$`, backtick or `<`) are analyzed",
+	pySegments: "the python segments overlap",
 	pyHeredocOpen: "the python heredoc has no closing delimiter line",
-	pyPipe: "`python3` after a pipe reads its input from the pipe, so it is not analyzed",
+	pyPipe: "`python3` after a pipe is analyzed only as `cat <<'EOF' | python3`, any other producer feeds it input that is not in the command",
 	pyDir: (word: string) => `\`${word}\` changes the directory, so the run directory of python3 may differ`,
 	pyPath: (path: string) => `the python path ${JSON.stringify(path)} cannot be written into the effect program`,
 	leftover: (name: string) => `\`$${name}\` is still used in the expanded command`,
@@ -1049,15 +1052,31 @@ function checkExpanded(c: Cx, expanded: string, scratch: string | undefined): vo
 // ---------------------------------------------------------------------------
 
 interface PySegment {
+	/** The head word (`python3`, an interpreter path or `cat`) of the unit. */
 	start: number;
+	/** The end of the `-c` script's closing quote, or of the heredoc delimiter line. */
 	end: number;
 	script: string;
+	/** Text kept after the effect program: the rest of the first heredoc line (empty for `-c`, whose tail stays in the text after `end`). */
+	tail: string;
+	/** The interpreter word when it is not plain `python3`. */
+	interpreter?: string;
 }
 
 const PY_SEPARATORS = " \t\n;&|";
+/** `python3`, `python`, `python3.N`, or an absolute path ending in one of them. */
+const PY_INTERPRETER = /^(?:python3?|python3\.[0-9]+|\/[A-Za-z0-9_./-]+\/python(?:3(?:\.[0-9]+)?)?)$/;
+const PY_FLAG = /^-[uBIEsSq]+$/;
+/** Characters that could move the start of a heredoc body or bind a redirect to python. */
+const PY_TAIL_FORBIDDEN = /['"\\#$`<]/;
+const PY_REDIRECTS = ["2>&1", "2>/dev/null"];
 
-/** Where a `python3` word at `i` stands: true when it starts a command, null when it is not ours, a Refusal when it is piped. */
-function pythonStartsUnit(text: string, i: number): boolean {
+function isInterpreterWord(word: string): boolean {
+	return PY_INTERPRETER.test(word) && !word.split("/").includes("..");
+}
+
+/** Where a `python3` (or `cat`) word at `i` stands: true when it starts a command, false when it is not ours, a Refusal when python is piped. */
+function pythonStartsUnit(text: string, i: number, head: "python" | "cat"): boolean {
 	let j = i - 1;
 	while (j >= 0 && (text[j] === " " || text[j] === "\t")) j--;
 	const prev = j >= 0 ? (text[j] as string) : "";
@@ -1065,11 +1084,15 @@ function pythonStartsUnit(text: string, i: number): boolean {
 	if (prev === "" || prev === "\n") return true;
 	if (prev === ";") return before !== ";" && before !== "&";
 	if (prev === "&") {
-		if (before === "|") throw new Refusal(PROBLEMS.pyPipe);
+		if (before === "|") {
+			if (head === "cat") return false;
+			throw new Refusal(PROBLEMS.pyPipe);
+		}
 		return before !== ">" && before !== "<";
 	}
 	if (prev === "|") {
 		if (before === "|") return true;
+		if (head === "cat") return false;
 		throw new Refusal(PROBLEMS.pyPipe);
 	}
 	let s = j;
@@ -1080,18 +1103,155 @@ function pythonStartsUnit(text: string, i: number): boolean {
 	return k < 0 || text[k] === "\n" || text[k] === ";" || text[k] === "&";
 }
 
-/** The segment `python3 ...` at `i` when it is one of the two supported forms; null when it is some other python call. */
-function pythonSegmentAt(text: string, i: number): PySegment | null {
-	if (!pythonStartsUnit(text, i)) return null;
+/** The word at `k` (after blanks), ending at a blank or newline. */
+function pyWordAt(text: string, k: number): { word: string; start: number; end: number } {
+	let s = k;
+	while (s < text.length && (text[s] === " " || text[s] === "\t")) s++;
+	let e = s;
+	while (e < text.length && !" \t\n".includes(text[e] as string)) e++;
+	return { word: text.slice(s, e), start: s, end: e };
+}
+
+/** Is `text[k..]` the redirect word `word`, ended by a blank, newline, control character or the end? */
+function redirectAt(text: string, k: number, word: string): boolean {
+	if (!text.startsWith(word, k)) return false;
+	const next = text[k + word.length];
+	return next === undefined || " \t\n;&|".includes(next);
+}
+
+/**
+ * The first line of a heredoc after the operator (or after the interpreter): `2>&1` and `2>/dev/null`, then `|`, `&&`, `||`
+ * or `;` and plain words. No quote, backslash, `#`, `$`, backtick or `<` anywhere, so the body starts at the next newline.
+ */
+function checkPyTail(line: string): void {
+	let k = 0;
+	for (;;) {
+		while (k < line.length && (line[k] === " " || line[k] === "\t")) k++;
+		const redirect = PY_REDIRECTS.find((r) => redirectAt(line, k, r));
+		if (redirect === undefined) break;
+		k += redirect.length;
+	}
+	if (k >= line.length) return;
+	const two = line.slice(k, k + 2);
+	let rest: number;
+	if (two === "|&") throw new Refusal(PROBLEMS.pyPipe);
+	if (two === "&&" || two === "||") rest = k + 2;
+	else if (line[k] === "&") throw new Refusal(PROBLEMS.pyBackground);
+	else if (line[k] === "|") rest = k + 1;
+	else if (line[k] === ";" && !";&|".includes(line[k + 1] ?? " ")) rest = k + 1;
+	else throw new Refusal(PROBLEMS.pyHeredocWords);
+	if (PY_TAIL_FORBIDDEN.test(line.slice(rest))) throw new Refusal(PROBLEMS.pyHeredocWords);
+}
+
+interface HeredocOp {
+	delim: string;
+	/** Just after the closing quote. */
+	end: number;
+}
+
+/** The `<<'D'`, `<< 'D'` or `<<"D"` operator at `p`; a Refusal for any other heredoc form. */
+function parseHeredocOp(text: string, p: number): HeredocOp {
+	let q = p + 2;
+	while (text[q] === " " || text[q] === "\t") q++;
+	const quote = text[q];
+	const m = quote === "'" || quote === '"' ? /^[A-Za-z_][A-Za-z0-9_]*/.exec(text.slice(q + 1)) : null;
+	if (m === null || text[q + 1 + m[0].length] !== quote) throw new Refusal(PROBLEMS.pyHeredoc);
+	const end = q + 2 + m[0].length;
+	if (end < text.length && !" \t\n|;&>".includes(text[end] as string)) throw new Refusal(PROBLEMS.pyHeredoc);
+	return { delim: m[0], end };
+}
+
+/** The body of a heredoc whose first line ends at `eol`, and where its delimiter line ends. */
+function findHeredocBody(text: string, eol: number, delim: string): { script: string; end: number } {
+	if (eol < 0) throw new Refusal(PROBLEMS.pyHeredocOpen);
 	const n = text.length;
-	const after = text.slice(i + 7);
-	const single = /^[ \t]+-c[ \t]+'/.exec(after);
-	if (single !== null) {
-		const open = i + 7 + single[0].length - 1;
+	const bodyStart = eol + 1;
+	for (let pos = bodyStart; pos <= n; ) {
+		const nl = text.indexOf("\n", pos);
+		const lineEnd = nl < 0 ? n : nl;
+		if (text.slice(pos, lineEnd) === delim) return { script: text.slice(bodyStart, pos), end: lineEnd };
+		if (nl < 0) break;
+		pos = nl + 1;
+	}
+	throw new Refusal(PROBLEMS.pyHeredocOpen);
+}
+
+interface PyArgs {
+	/** `c` for `-c`, else the script comes from stdin. */
+	form: "c" | "stdin";
+	/** After the flags (and `-`, or `-c`), where the heredoc operator, the script quote or the tail may start. */
+	end: number;
+}
+
+/** The flags after an interpreter word ending at `k`: `-uB...`, then `-c`, or an optional `-`. */
+function parsePyArgs(text: string, k: number): PyArgs {
+	for (;;) {
+		const w = pyWordAt(text, k);
+		if (PY_FLAG.test(w.word)) {
+			k = w.end;
+			continue;
+		}
+		if (w.word === "-c") return { form: "c", end: w.end };
+		if (w.word === "-") return { form: "stdin", end: w.end };
+		return { form: "stdin", end: k };
+	}
+}
+
+/** `cat <<'D' | python3 [flags] [-] [tail]` at `i`; null when it is not exactly that. */
+function catSegmentAt(text: string, i: number): PySegment | null {
+	if (!pythonStartsUnit(text, i, "cat")) return null;
+	let p = i + 3;
+	if (text[p] !== " " && text[p] !== "\t") return null;
+	while (text[p] === " " || text[p] === "\t") p++;
+	if (!text.startsWith("<<", p)) return null;
+	let op: HeredocOp;
+	try {
+		op = parseHeredocOp(text, p);
+	} catch (error) {
+		if (error instanceof Refusal) return null;
+		throw error;
+	}
+	const pipe = /^[ \t]*\|[ \t]+/.exec(text.slice(op.end));
+	if (pipe === null) return null;
+	const w = pyWordAt(text, op.end + pipe[0].length);
+	if (!isInterpreterWord(w.word)) return null;
+	const args = parsePyArgs(text, w.end);
+	if (args.form === "c") return null;
+	const eol = text.indexOf("\n", args.end);
+	const tail = text.slice(args.end, eol < 0 ? text.length : eol);
+	try {
+		checkPyTail(tail);
+	} catch (error) {
+		if (error instanceof Refusal && error.message === PROBLEMS.pyHeredocWords) return null;
+		throw error;
+	}
+	const body = findHeredocBody(text, eol, op.delim);
+	return { start: i, end: body.end, script: body.script, tail, ...(w.word === "python3" ? {} : { interpreter: w.word }) };
+}
+
+/** The segment `python3 ...` at `i` when it is one of the supported forms; null when it is some other python call. */
+function pythonSegmentAt(text: string, i: number, word: string): PySegment | null {
+	if (!pythonStartsUnit(text, i, "python")) return null;
+	const n = text.length;
+	const interpreter = word === "python3" ? {} : { interpreter: word };
+	const args = parsePyArgs(text, i + word.length);
+	if (args.form === "c") {
+		const after = text.slice(args.end);
+		const single = /^[ \t]+'/.exec(after);
+		if (single === null) {
+			if (/^[ \t]+"/.test(after)) throw new Refusal(PROBLEMS.pyDouble);
+			return null;
+		}
+		const open = args.end + single[0].length - 1;
 		const close = text.indexOf("'", open + 1);
 		if (close < 0) throw new Refusal(PROBLEMS.quote);
 		let k = close + 1;
-		while (k < n && (text[k] === " " || text[k] === "\t")) k++;
+		for (;;) {
+			while (k < n && (text[k] === " " || text[k] === "\t")) k++;
+			const redirect = PY_REDIRECTS.find((r) => redirectAt(text, k, r));
+			if (redirect === undefined) break;
+			k += redirect.length;
+		}
 		const next = k < n ? (text[k] as string) : "";
 		const two = text.slice(k, k + 2);
 		if (next === "&" && two !== "&&") throw new Refusal(PROBLEMS.pyBackground);
@@ -1103,25 +1263,17 @@ function pythonSegmentAt(text: string, i: number): PySegment | null {
 			two === "||" ||
 			(next === "|" && text[k + 1] !== "&");
 		if (!whole) throw new Refusal(PROBLEMS.pyArgv);
-		return { start: i, end: close + 1, script: text.slice(open + 1, close) };
+		return { start: i, end: close + 1, script: text.slice(open + 1, close), tail: "", ...interpreter };
 	}
-	if (/^[ \t]+-c[ \t]+"/.test(after)) throw new Refusal(PROBLEMS.pyDouble);
-	const doc = /^(?:[ \t]+-)?[ \t]*<<'([A-Za-z_][A-Za-z0-9_]*)'[ \t]*(\n|$)/.exec(after);
-	if (doc !== null) {
-		const delim = doc[1] as string;
-		const bodyStart = i + 7 + doc[0].length;
-		if (doc[2] === "") throw new Refusal(PROBLEMS.pyHeredocOpen);
-		for (let pos = bodyStart; pos <= n; ) {
-			const eol = text.indexOf("\n", pos);
-			const lineEnd = eol < 0 ? n : eol;
-			if (text.slice(pos, lineEnd) === delim) return { start: i, end: lineEnd, script: text.slice(bodyStart, pos) };
-			if (eol < 0) break;
-			pos = eol + 1;
-		}
-		throw new Refusal(PROBLEMS.pyHeredocOpen);
-	}
-	if (/^(?:[ \t]+-)?[ \t]*<</.test(after)) throw new Refusal(PROBLEMS.pyHeredoc);
-	return null;
+	let p = args.end;
+	while (p < n && (text[p] === " " || text[p] === "\t")) p++;
+	if (!text.startsWith("<<", p)) return null;
+	const op = parseHeredocOp(text, p);
+	const nl = text.indexOf("\n", op.end);
+	const tail = text.slice(op.end, nl < 0 ? n : nl);
+	checkPyTail(tail);
+	const body = findHeredocBody(text, nl, op.delim);
+	return { start: i, end: body.end, script: body.script, tail, ...interpreter };
 }
 
 /** The supported python segments of `text`, found with a quote-aware scan. Anything the scan misses stays in the text and meets the other checks. */
@@ -1152,8 +1304,18 @@ function scanPython(text: string): PySegment[] {
 			while (i < n && text[i] !== "\n") i++;
 			continue;
 		}
-		if (atWord && text.startsWith("python3", i) && (i + 7 === n || " \t\n".includes(text[i + 7] as string))) {
-			const seg = pythonSegmentAt(text, i);
+		if (atWord && (ch === "p" || ch === "/")) {
+			const word = pyWordAt(text, i).word;
+			if (isInterpreterWord(word)) {
+				const seg = pythonSegmentAt(text, i, word);
+				if (seg !== null) {
+					found.push(seg);
+					i = seg.end;
+					continue;
+				}
+			}
+		} else if (atWord && ch === "c" && text.startsWith("cat", i)) {
+			const seg = catSegmentAt(text, i);
 			if (seg !== null) {
 				found.push(seg);
 				i = seg.end;
@@ -1219,11 +1381,18 @@ function expandPython(command: string, segments: readonly PySegment[], options: 
 	let at = 0;
 	const starts: number[] = [];
 	for (const seg of segments) {
-		const verdict = analyzePythonScript(seg.script, { runDir: options.cwd, scratch: options.scratch, env: options.env, allowWhile: options.pythonWhile === true });
+		if (seg.start < at || seg.end < seg.start) throw new Refusal(PROBLEMS.pySegments);
+		const verdict = analyzePythonScript(seg.script, {
+			runDir: options.cwd,
+			scratch: options.scratch,
+			env: options.env,
+			allowWhile: options.pythonWhile === true,
+			...(seg.interpreter === undefined ? {} : { python: seg.interpreter }),
+		});
 		if (!verdict.ok) throw new Refusal(verdict.problem);
 		text += command.slice(at, seg.start);
 		starts.push(text.length);
-		text += effectProgram(verdict.effects, options.cwd);
+		text += effectProgram(verdict.effects, options.cwd) + seg.tail;
 		at = seg.end;
 	}
 	return { text: text + command.slice(at), starts };

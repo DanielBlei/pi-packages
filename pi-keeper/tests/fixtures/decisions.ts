@@ -396,3 +396,52 @@ ENTRIES.push(
 	{ id: "oc/get-secret", command: () => "oc get secret db", today: { default: x("ask", "fallback", /Why: `oc` isn't on the read-only list\./), auto: x("allow", "fallback", /Why: `oc` isn't on the read-only list\./), plan: x("ask", "unapprovedBash", /Why: `oc` isn't on the read-only list\./) }, guard: true, after: [{ phase: "oc", default: x("ask", "fallback", /Why: `oc get` of Secrets prints credentials\./), auto: x("allow", "fallback", /Why: `oc get` of Secrets prints credentials\./), plan: x("ask", "unapprovedBash", /Why: `oc get` of Secrets prints credentials\./) }] },
 	{ id: "oc/login", command: () => "oc login", today: { default: x("ask", "fallback", /Why: `oc` isn't on the read-only list\./), auto: x("allow", "fallback", /Why: `oc` isn't on the read-only list\./), plan: x("ask", "unapprovedBash", /Why: `oc` isn't on the read-only list\./) }, guard: true, after: [{ phase: "oc", default: x("ask", "fallback", /Why: `oc login` isn't a read-only oc command\./), auto: x("allow", "fallback", /Why: `oc login` isn't a read-only oc command\./), plan: x("ask", "unapprovedBash", /Why: `oc login` isn't a read-only oc command\./) }] },
 );
+
+/**
+ * Other inline-python shapes (cat-pipe, flags, interpreter names, heredoc tails, coding cookie). `today` here is the
+ * answer when the entry was added. The fixture cwd does not exist, so python never flips to allow here: the
+ * allow side is asserted on real temp dirs in tests/unit/python-wiring.test.ts. Guards must never loosen.
+ */
+const PY_RUN_DIR = /^Why: python: the run directory cannot be read\./;
+const PY_FORMS: { id: string; command: string; why: RegExp; deny?: true; twin?: string }[] = [
+	{ id: "py/cat-pipe", command: "cat << 'EOF' | python3\nimport os\nprint(os.listdir('.'))\nEOF", why: PY_RUN_DIR },
+	{ id: "py/cat-pipe-dash-flags", command: "cat <<'EOF' | python3 -u -\nprint(1)\nEOF", why: PY_RUN_DIR },
+	{ id: "py/flags", command: "python3 -uB -c 'print(1)'", why: PY_RUN_DIR },
+	{ id: "py/flag-x", command: "python3 -x -c 'print(1)'", why: /^Why: `python3` isn't on the read-only list\./ },
+	{ id: "py/heredoc-tail", command: "python3 - <<'EOF' 2>&1 | head -20\nprint(1)\nEOF", why: PY_RUN_DIR },
+	{ id: "py/heredoc-spaced", command: "python3 - << 'EOF'\nprint(1)\nEOF", why: PY_RUN_DIR },
+	{ id: "py/cat-pipe-guard", command: "cat <<'EOF' | python3 | sh\nprint('ls')\nEOF", why: PY_RUN_DIR, deny: true },
+	{ id: "py/pipe-to-sh", command: "python3 -c 'print(1)' | sh", why: PY_RUN_DIR, deny: true },
+	{ id: "py/cat-pipe-secret", command: "cat <<'EOF' | python3\nprint(open('.env').read())\nEOF", why: PY_RUN_DIR },
+	{ id: "py/cat-pipe-os-system", command: "cat <<'EOF' | python3\nimport os\nos.system('id')\nEOF", why: /^Why: python: os\.system is not on the allow-list\./ },
+	{ id: "py/utf7", command: "python3 -c '# coding: utf-7\nprint(1)'", why: /^Why: python: a coding declaration or BOM changes how the script is decoded\./ },
+	{ id: "py/python2", command: "python2 -c 'print(1)'", why: /^Why: `python2` isn't on the read-only list\./ },
+	{ id: "py/interp-python", command: "python -c 'print(1)'", why: PY_RUN_DIR },
+	{ id: "py/cat-n-pipe", command: "cat -n <<'EOF' | python3\nprint(1)\nEOF", why: /^Why: `python3` after a pipe is analyzed only as/ },
+	{ id: "py/echo-pipe", command: "echo x | python3", why: /^Why: `python3` after a pipe is analyzed only as/ },
+];
+for (const form of PY_FORMS) {
+	const dangerous = form.deny === true; // the pipe into `sh` is judged by dangerousBash whatever python does
+	const rule = (mode: ModeName): Expect["rule"] => (dangerous ? "dangerousBash" : mode === "plan" ? "unapprovedBash" : "fallback");
+	const action = (mode: ModeName): Action => (dangerous ? (mode === "plan" ? "deny" : "ask") : mode === "auto" ? "allow" : "ask");
+	ENTRIES.push({
+		id: form.id,
+		command: () => form.command,
+		today: { default: x(action("default"), rule("default"), form.why), auto: x(action("auto"), rule("auto"), form.why), plan: x(action("plan"), rule("plan"), form.why) },
+		guard: true,
+	});
+}
+
+/** The `-c` tail grammar changed the text of the extra-argv refusal; only the Why line moves, the decision stays. */
+const EXTRA_ARGV = ENTRIES.find((e) => e.id === "py/extra-argv");
+if (EXTRA_ARGV !== undefined) {
+	const why = /^Why: `python3 -c '\.\.\.'` may only be followed by `2>&1`, `2>\/dev\/null`, and then `\|`, `&&`, `\|\|` or `;`\./;
+	(EXTRA_ARGV.after ??= []).push({ phase: "py-forms", default: x("ask", "fallback", why), auto: x("allow", "fallback", why), plan: x("ask", "unapprovedBash", why) });
+}
+
+/** `python3` after a pipe: the refusal now names the one producer that is analyzed (`cat <<'EOF'`); the decision stays. */
+const AFTER_PIPE = ENTRIES.find((e) => e.id === "py/after-pipe");
+if (AFTER_PIPE !== undefined) {
+	const why = /^Why: `python3` after a pipe is analyzed only as `cat <<'EOF' \| python3`, any other producer feeds it input that is not in the command\./;
+	(AFTER_PIPE.after ??= []).push({ phase: "py-forms", default: x("ask", "fallback", why), auto: x("allow", "fallback", why), plan: x("ask", "unapprovedBash", why) });
+}

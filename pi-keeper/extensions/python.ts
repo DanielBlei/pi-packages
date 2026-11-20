@@ -90,7 +90,26 @@ export const PYTHON_PROBLEMS = {
 	formatString: (what: string) => `${P}${what}: format strings are allowed only on a plain string literal without attribute, index or conversion fields`,
 	deviceRoot: (path: string) => `${P}${path} is under /dev or /proc`,
 	runDirUnreadable: (_detail = "") => `${P}the run directory cannot be read`,
+	codingCookie: (_detail = "") => `${P}a coding declaration or BOM changes how the script is decoded`,
+	badInterpreter: (name: string) => `${P}the interpreter ${JSON.stringify(name)} is not an accepted name or path`,
+	unsafeInterpreter: (path: string) => `${P}the interpreter ${path} lies in the run or scratch directory, a shims directory, or a relative PATH entry`,
+	notPython3: (detail: string) => `${P}the interpreter is not Python 3: ${detail}`,
 };
+
+/**
+ * PEP 263: a coding cookie on line 1 or 2, or a BOM, changes how python decodes the script bytes
+ * (utf-7 turns "+ACM-" into a comment marker), while the shell and python3 -c see the text.
+ * Every cookie is refused, utf-8 included: the script text is always plain UTF-8 and a script
+ * that needs a declaration is one the analyzer cannot vouch for. Line ends are CR, LF and CRLF.
+ * The analyzer repeats the check on the raw bytes before it parses, so neither side can be skipped.
+ */
+const COOKIE_RE = /^[ \t\f]*#.*coding[:=]/;
+export function hasCodingCookieOrBom(script: string): boolean {
+	const first = script.charCodeAt(0);
+	if (first === 0xfeff || first === 0xfffe) return true;
+	const lines = script.split(/\r\n|\r|\n/, 2);
+	return lines.some((l) => COOKIE_RE.test(l));
+}
 
 // The analyzer is python source. It must hold no backtick and no dollar-brace.
 const ANALYZER_SOURCE = String.raw`
@@ -196,7 +215,19 @@ OK_NODES = (ast.Module, ast.Expr, ast.Assign, ast.AugAssign, ast.AnnAssign, ast.
     ast.arguments, ast.arg, ast.keyword, ast.comprehension, ast.ExceptHandler, ast.withitem, ast.alias,
     ast.expr_context, ast.operator, ast.unaryop, ast.boolop, ast.cmpop)
 
+COOKIE_RE = re.compile(rb"^[ \t\f]*#.*coding[:=]")
+BOMS = (b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff")
+
+def check_cookie(src):
+    for b in BOMS:
+        if src.startswith(b):
+            fail("codingCookie")
+    for line in re.split(rb"\r\n|\r|\n", src, maxsplit=2)[:2]:
+        if COOKIE_RE.match(line):
+            fail("codingCookie")
+
 def analyze(src):
+    check_cookie(src)
     tree = ast.parse(src, "<script>")
     READS = []
     LISTS = []
@@ -1021,17 +1052,61 @@ function isExecutable(file: string): boolean {
 	}
 }
 
-function resolveInterpreter(name: string, pathEnv: string, runDir: string): string | undefined {
+/** Resolution outcome: a path, or the problem that refuses it. */
+type Resolved = { path: string } | { problem: string };
+
+const ABS_PATH_RE = /^\/[A-Za-z0-9_./-]+$/;
+
+function resolveInterpreter(name: string, pathEnv: string, runDir: string): Resolved {
 	if (name.includes("/")) {
-		const file = resolve(runDir, name);
-		return isExecutable(file) ? file : undefined;
+		if (!ABS_PATH_RE.test(name) || name.split("/").includes("..")) return { problem: PYTHON_PROBLEMS.badInterpreter(name) };
+		return isExecutable(name) ? { path: name } : { problem: PYTHON_PROBLEMS.noInterpreter(name) };
 	}
+	if (!/^[A-Za-z0-9_.-]+$/.test(name) || name === "." || name === "..") return { problem: PYTHON_PROBLEMS.badInterpreter(name) };
 	for (const dir of pathEnv.split(":")) {
-		if (!dir) continue;
-		const file = join(resolve(runDir, dir), name);
-		if (isExecutable(file)) return file;
+		// Only an absolute entry outside the run directory is trusted. An unsafe entry that holds
+		// the interpreter refuses the call; one that does not is skipped.
+		const unsafe = !isAbsolute(dir) || inside(resolve(dir), runDir) || inside(realOr(dir), realOr(runDir));
+		const file = join(dir === "" ? "." : dir, name);
+		if (!isExecutable(unsafe ? resolve(runDir, file) : file)) continue;
+		return unsafe ? { problem: PYTHON_PROBLEMS.unsafeInterpreter(file) } : { path: file };
 	}
-	return undefined;
+	return { problem: PYTHON_PROBLEMS.noInterpreter(name) };
+}
+
+const versionCache = new Map<string, string | { problem: string }>();
+
+/** Asks the interpreter for its version. Cached per file identity: the probe costs a process. */
+function interpreterVersion(interpreter: string, pathEnv: string, timeoutMs: number): string | { problem: string } {
+	let id: string;
+	try {
+		const st = statSync(interpreter);
+		id = [realpathSync(interpreter), st.mtimeMs, st.size].join("\0");
+	} catch {
+		return { problem: PYTHON_PROBLEMS.noInterpreter(interpreter) };
+	}
+	const hit = versionCache.get(id);
+	if (hit !== undefined) return hit;
+	let answer: string | { problem: string };
+	const r = spawnSync(interpreter, ["-I", "-S", "-c", 'import sys; print(sys.version_info[0], sys.version.replace(chr(10), " "))'], {
+		timeout: timeoutMs,
+		env: { PATH: pathEnv, LC_ALL: "C" },
+		cwd: tmpdir(),
+		stdio: ["ignore", "pipe", "pipe"],
+		encoding: "utf8",
+		maxBuffer: 64 * 1024,
+	});
+	const out = (r.stdout ?? "").trim();
+	if (r.error || r.status !== 0) {
+		answer = { problem: PYTHON_PROBLEMS.notPython3("it could not report its version") };
+	} else if (!/^3 [ -~]{1,200}$/.test(out)) {
+		answer = { problem: PYTHON_PROBLEMS.notPython3(out.slice(0, 80) || "no version reported") };
+	} else {
+		answer = out;
+	}
+	if (versionCache.size >= CACHE_LIMIT) versionCache.clear();
+	versionCache.set(id, answer);
+	return answer;
 }
 
 function realOr(p: string): string {
@@ -1141,14 +1216,24 @@ export function analyzePythonScript(script: string, options: AnalyzeOptions): Py
 	}
 	const pathEnv = options.env.PATH ?? "";
 	const wanted = options.python ?? "python3";
-	const interpreter = resolveInterpreter(wanted, pathEnv, runDir);
-	if (!interpreter) return { ok: false, problem: PYTHON_PROBLEMS.noInterpreter(wanted) };
+	if (hasCodingCookieOrBom(script)) return { ok: false, problem: PYTHON_PROBLEMS.codingCookie() };
+	const resolved = resolveInterpreter(wanted, pathEnv, runDir);
+	if ("problem" in resolved) return { ok: false, problem: resolved.problem };
+	const interpreter = resolved.path;
+	const realInterpreter = realOr(interpreter);
+	const inTree = (dir: string) => !!dir && (inside(interpreter, dir) || inside(realInterpreter, dir) || inside(realInterpreter, realOr(dir)));
+	// Plain python3 through PATH keeps its old behaviour, shims included; every other name is stricter.
+	const shim = wanted !== "python3" && [interpreter, realInterpreter].some((p) => p.split("/").includes("shims"));
+	if (inTree(runDir) || inTree(scratch) || shim) return { ok: false, problem: PYTHON_PROBLEMS.unsafeInterpreter(interpreter) };
+	const timeoutMs = options.timeoutMs ?? 2000;
+	const version = interpreterVersion(interpreter, pathEnv, Math.max(timeoutMs, 2000));
+	if (typeof version !== "string") return { ok: false, problem: version.problem };
 
 	const allowWhile = options.allowWhile === true;
-	const key = [createHash("sha256").update(script).digest("hex"), interpreter, scratch, runDir, allowWhile ? "while" : ""].join("\0");
+	const key = [createHash("sha256").update(script).digest("hex"), realInterpreter, version, scratch, runDir, allowWhile ? "while" : ""].join("\0");
 	let raw = cache.get(key);
 	if (!raw) {
-		raw = runAnalyzer(script, interpreter, scratch, runDir, pathEnv, options.timeoutMs ?? 2000, allowWhile);
+		raw = runAnalyzer(script, interpreter, scratch, runDir, pathEnv, timeoutMs, allowWhile);
 		if (cache.size >= CACHE_LIMIT) cache.clear();
 		cache.set(key, raw);
 	}

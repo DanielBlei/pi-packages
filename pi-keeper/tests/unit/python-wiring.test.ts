@@ -122,14 +122,14 @@ test("shapes outside the whole-unit form ask", { skip }, () => {
 		[`${ONE_LINER} &`, PROBLEMS.pyBackground],
 		[`python3 - <<EOF\nprint(1)\nEOF`, PROBLEMS.pyHeredoc],
 		[`python3 - <<'EOF'\nprint(1)\n`, PROBLEMS.pyHeredocOpen],
-		[`python3 - <<'EOF' | sort\nprint(1)\nEOF`, PROBLEMS.pyHeredoc],
+		[`python3 - <<'EOF' > out.txt\nprint(1)\nEOF`, PROBLEMS.pyHeredocWords],
 	];
 	for (const [command, problem] of cases) {
 		for (const mode of ["default", "plan"] as const) assert.equal(decide(mode, command).action, "ask", `${mode}: ${command}`);
 		assert.equal(expandCommand(command, { cwd, scratch, env: process.env }).problem, problem, command);
 	}
-	// today's answer, no problem: another interpreter name, a module, a script file, a wrapper, a prefix assignment
-	for (const command of ["python -c 'print(1)'", "python3.11 -c 'print(1)'", "python3 -m json.tool a.json", "python3 x.py", "env python3 -c 'print(1)'", "PYTHONPATH=src python3 -c 'print(1)'"]) {
+	// no problem, still asks: a module, a script file, a wrapper, a prefix assignment
+	for (const command of ["python3 -m json.tool a.json", "python3 x.py", "env python3 -c 'print(1)'", "PYTHONPATH=src python3 -c 'print(1)'"]) {
 		const program = expandCommand(command, { cwd, scratch, env: process.env });
 		assert.deepEqual(program, { text: command, changed: false }, command);
 		assert.equal(decide("default", command).action, "ask", command);
@@ -157,7 +157,7 @@ test("the effect program format", { skip }, () => {
 });
 
 test("auto keeps today's answer for every python shape", { skip }, () => {
-	const commands = [HEREDOC, ONE_LINER, `python3 -c 'print(open("/etc/hosts").read())'`, `python3 -c 'print(open(".env").read())'`, `python3 -c 'import requests'`, `cd src && ${ONE_LINER}`, `python3 -c "print(1)"`, `python3 -c 'open("src/o", "w").write("x")'`, "python3 x.py"];
+	const commands = [HEREDOC, ONE_LINER, CAT_PIPE, `${HEREDOC} 2>&1`, `${ONE_LINER} 2>&1`, "python -c 'print(1)'", "ls | python3 -c 'print(1)'", `python3 -c '${UTF7}'`, `python3 -c 'print(open("/etc/hosts").read())'`, `python3 -c 'print(open(".env").read())'`, `python3 -c 'import requests'`, `cd src && ${ONE_LINER}`, `python3 -c "print(1)"`, `python3 -c 'open("src/o", "w").write("x")'`, "python3 x.py"];
 	for (const command of commands) {
 		assert.deepEqual(decide("auto", command), { action: "allow", rule: "fallback" }, command);
 	}
@@ -253,4 +253,124 @@ test("while: asks without the session option, runs with it, other rules still ap
 	const pow = expandCommand(py("n = 3\nwhile n:\n    n = n ** 2"), { cwd, scratch, env: process.env, pythonWhile: true });
 	assert.equal(pow.changed, false);
 	assert.match(pow.problem ?? "", /can run without end or fill memory/);
+});
+
+// ---- the other ways models run inline python (cat-pipe, flags, interpreters, tails) ---------------
+
+const LISTING = ["import os", 'print("=== Files and Directories ===")', "for item in sorted(os.listdir('.')):", "    path = os.path.join('.', item)", "    if os.path.isdir(path):", '        print(f"DIRECTORY:  {item}/")', "    else:", '        print(f"FILE:       {item}")', ""].join("\n");
+const CAT_PIPE = `cat << 'EOF' | python3\n${LISTING}EOF`;
+const bodyOf = (head: string, script = LISTING) => `${head}\n${script}EOF`;
+const UTF7 = "# coding: utf-7\nimport os\nos.system('id')";
+const run = (command: string) => expandCommand(command, { cwd, scratch, env: process.env });
+
+// a clean dir: no secret file, so a listing of "." is a plain read
+const clean = join(root, "clean");
+before(() => {
+	mkdirSync(join(clean, "sub"), { recursive: true });
+	writeFileSync(join(clean, "a.txt"), "x\n");
+	writeFileSync(join(clean, "b.json"), "{}\n");
+});
+
+test("ACCEPTANCE: the directory listing through cat | python3 is allowed, and asks with a .env", { skip }, () => {
+	for (const mode of modes) {
+		assert.deepEqual(decide(mode, CAT_PIPE, { cwd: clean }), { action: "allow", rule: "readOnlyBash" }, mode);
+		assert.deepEqual(decide(mode, CAT_PIPE), { action: "ask", rule: "secretBash" }, `${mode} with .env`);
+	}
+});
+
+test("the cat-pipe and heredoc forms: operator spellings, flags, interpreter names", { skip }, () => {
+	const heads = [
+		"cat << 'EOF' | python3", "cat <<'EOF' | python3", 'cat <<"EOF" | python3', "cat <<'EOF' | python3 -", "cat <<'EOF' | python3 -u", "cat <<'EOF' | python3 -I",
+		"cat <<'EOF' | python3 -uB -", "python3 - << 'EOF'", 'python3 - <<"EOF"', "python3 - <<'EOF'", "python3 -u - <<'EOF'", "python3 -I - <<'EOF'", "python3 -I -S - <<'EOF'",
+		"python3 <<'EOF'", "cat <<'EOF' | python3.12", "python3.12 - <<'EOF'",
+	];
+	const extra: string[] = [];
+	for (const name of ["python", "/usr/bin/python3", "/usr/bin/python"]) {
+		if (spawnSync(name, ["--version"], { stdio: "ignore" }).status === 0) extra.push(`cat <<'EOF' | ${name}`, `${name} - <<'EOF'`, `${name} -c 'print(1)'`);
+	}
+	for (const head of [...heads, ...extra]) {
+		const command = head.includes("-c '") ? head : bodyOf(head);
+		if (/python3\.12/.test(command) && spawnSync("python3.12", ["--version"], { stdio: "ignore" }).status !== 0) continue;
+		for (const mode of modes) {
+			assert.deepEqual(decide(mode, command, { cwd: clean }), { action: "allow", rule: "readOnlyBash" }, `${mode}: ${head}`);
+			if (!head.includes("-c '")) assert.equal(decide(mode, command).action, "ask", `${mode} with .env: ${head}`);
+		}
+	}
+});
+
+test("tails after the heredoc operator are judged with the effect program", { skip }, () => {
+	for (const head of ["python3 - <<'EOF'", "cat <<'EOF' | python3"]) {
+		for (const tail of [" 2>&1", " 2>/dev/null", " | head -20", " && echo done", " 2>&1 | head -20", " | sort | uniq -c", " || echo failed", " ; echo done"]) {
+			const command = bodyOf(head + tail);
+			for (const mode of modes) assert.equal(decide(mode, command, { cwd: clean }).action, "allow", `${mode}: ${head}${tail}`);
+		}
+	}
+	assert.equal(run(bodyOf("python3 - <<'EOF' 2>&1", "print(1)\n")).text, "true 2>&1");
+	assert.equal(run(`python3 -c 'print(1)' 2>/dev/null && echo done`).text, "true 2>/dev/null && echo done");
+});
+
+test("python output piped into another program keeps asking", { skip }, () => {
+	const asks = [
+		`python3 -c 'print("ls")' | sh`, `python3 -c 'print(1)' | python3`, bodyOf("python3 - <<'EOF' | sh", "print('ls')\n"), bodyOf("python3 - <<'EOF' | python3", "print('ls')\n"),
+		bodyOf("cat <<'EOF' | python3 | sh", "print('ls')\n"), bodyOf("python3 - <<'EOF' | bash -s", "print('ls')\n"), bodyOf("python3 - <<'EOF' | xargs rm", "print('a')\n"),
+	];
+	for (const command of asks) for (const mode of modes) assert.notEqual(decide(mode, command, { cwd: clean }).action, "allow", `${mode}: ${command}`);
+});
+
+test("a coding cookie or BOM is refused for -c, heredoc and cat-pipe", { skip }, () => {
+	const commands = [`python3 -c '${UTF7}'`, bodyOf("python3 - <<'EOF'", UTF7 + "\n"), bodyOf("cat <<'EOF' | python3", UTF7 + "\n"), bodyOf("python3 - <<'EOF'", "#!/usr/bin/python3\n# -*- coding: latin-1 -*-\nprint(1)\n"), bodyOf("python3 - <<'EOF'", "\ufeffprint(1)\n")];
+	for (const command of commands) {
+		for (const mode of modes) assert.equal(decide(mode, command, { cwd: clean }).action, "ask", `${mode}: ${command}`);
+		assert.ok(run(command).problem, command);
+	}
+});
+
+test("cat-pipe scripts that are not a plain read of the cwd ask", { skip }, () => {
+	const head = "cat <<'EOF' | python3";
+	const scripts: [string, string][] = [
+		['print(open(".env").read())\n', "secretBash"],
+		['print(open("/etc/passwd").read())\n', "outsideCwdRead"],
+		["import requests\nprint(1)\n", ""],
+		['import os\nos.system("id")\n', ""],
+		['open("src/out.txt", "w").write("x")\n', ""],
+		['open("/tmp/pk-out.txt", "w").write("x")\n', ""],
+	];
+	for (const [script, rule] of scripts) {
+		for (const mode of modes) {
+			const got = decide(mode, bodyOf(head, script), { cwd: clean });
+			assert.equal(got.action, "ask", `${mode}: ${script}`);
+			if (rule !== "") assert.equal(got.rule, rule, script);
+		}
+	}
+});
+
+test("shapes that must keep asking: interpreters, flags, producers, extra heredocs", { skip }, () => {
+	const body = "print(1)\nEOF";
+	const asks = [
+		`python2 - <<'EOF'\n${body}`, `python2 -c 'print(1)'`, `pypy3 -c 'print(1)'`, `./python3 - <<'EOF'\n${body}`, `src/python3 -c 'print(1)'`, `${cwd}/python3 -c 'print(1)'`,
+		`env python3 - <<'EOF'\n${body}`, `env python3 -c 'print(1)'`, `/usr/bin/../bin/python3 -c 'print(1)'`, `uv run python -c 'print(1)'`,
+		`python3 -x - <<'EOF'\n${body}`, `python3 -i -c 'print(1)'`, `python3 -m json.tool a.json`, `python3 -m json.tool <<'EOF'\n{}\nEOF`, `python3 -uc 'print(1)'`, `python3 -W error -c 'print(1)'`,
+		`python3 -X dev -c 'print(1)'`, `python3 -O -c 'print(1)'`, `python3 -- - <<'EOF'\n${body}`, `python3 - arg <<'EOF'\n${body}`,
+		`ls | python3 -c 'print(1)'`, `echo x | python3`, `echo 'print(1)' | python3`, `printf 'print(1)' | python3 -`, `cat a.txt | python3`, `cat <<'EOF' | python3 -c 'print(1)'\n${body}`,
+		`cat -n <<'EOF' | python3\n${body}`, `cat - <<'EOF' | python3\n${body}`, `cat <<'EOF' <a.txt | python3\n${body}`, `ls | cat <<'EOF' | python3\n${body}`, `\\cat <<'EOF' | python3\n${body}`,
+		`cat <<-'EOF' | python3\n${body}`, `cat <<<'print(1)' | python3`, `python3 <<<'print(1)'`, `python3 < a.txt`, `python3 - <<'EOF' <evil.py\n${body}`, `cat <<'EOF' | python3 |& cat\n${body}`,
+		`python3 - <<'EOF' &\n${body}`, `python3 - <<'EOF' | grep 'x'\n${body}`, `python3 - <<'EOF' | head \\\n${body}`, `cd src && cat <<'EOF' | python3\n${body}`,
+		`python3 - <<'EOF'\nprint(1)\nEOF\npython3 - <<'EOF2'\nprint(2)\nEOF2 <<'EOF3'\nx\nEOF3`, `cat <<'A' <<'B' | python3\nprint(1)\nA\nprint(2)\nB`,
+	];
+	for (const command of asks) {
+		for (const mode of modes) assert.equal(decide(mode, command, { cwd: clean }).action, "ask", `${mode}: ${command}`);
+	}
+});
+
+test("a script reading two files is judged on every read, also with a tail", { skip }, () => {
+	const two = ["from pathlib import Path", 'print(Path("a.txt").read_text())', 'print(Path("b.json").read_text())', ""].join("\n");
+	const withEnv = ["from pathlib import Path", 'print(Path("a.txt").read_text())', 'print(Path(".env").read_text())', ""].join("\n");
+	const expanded = run(bodyOf("python3 - <<'EOF' | head", two));
+	assert.equal(expanded.text, "cat -- 'a.txt' 'b.json' | head");
+	for (const head of ["python3 - <<'EOF' | head", "cat <<'EOF' | python3 | head", "cat <<'EOF' | python3 2>&1", "python3 - <<'EOF' && echo done"]) {
+		for (const mode of modes) {
+			assert.equal(decide(mode, bodyOf(head, two), { cwd: clean }).action, "allow", `${mode}: ${head}`);
+			assert.deepEqual(decide(mode, bodyOf(head, withEnv)), { action: "ask", rule: "secretBash" }, `${mode}: ${head} with .env`);
+		}
+	}
 });
