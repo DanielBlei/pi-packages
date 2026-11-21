@@ -116,7 +116,7 @@ export interface EvalContext extends PathContext {
 	child?: boolean;
 	/** Tool grant keys (`Tool(x)`, `Mcp(server/tool)`) approved for this session, its parent's included. */
 	toolGrants?: readonly string[];
-	/** The session grant "allow loops over globs": the expander may unroll a loop over a glob (plumbing comes later; absent = never). */
+	/** The session grant "allow loops over globs": the expander may unroll a loop over a glob (absent = never). */
 	loopGlobs?: boolean;
 	/** The session grant "allow python `while` loops": the python analyzer accepts a `while` statement (absent = never). */
 	pythonWhile?: boolean;

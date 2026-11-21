@@ -26,6 +26,10 @@ test("read-only oc commands run in every mode", () => {
 		"oc api-resources",
 		"oc api-versions",
 		"oc version",
+		"oc -n demo get pods",
+		"oc --namespace=demo get pods",
+		"kubectl -n demo get pods",
+		"oc get pods --watch",
 	]) {
 		for (const mode of ["default", "plan", "auto"] as const) {
 			assert.equal(decide(mode, command).action, "allow", `${command} [${mode}]`);
@@ -59,6 +63,16 @@ const REFUSED: [string, RegExp][] = [
 	["oc process -f t.yaml", /`oc process` isn't a read-only oc command/],
 	["oc adm top nodes", /`oc adm` isn't a read-only oc command/],
 	["oc adm policy add-role-to-user admin bob", /`oc adm` isn't a read-only oc command/],
+	["oc get pods -o go-template-file=/etc/passwd", /with an output template file reads a local file/],
+	["oc get pods -o jsonpath-file=/etc/passwd", /with an output template file/],
+	["oc get pods --output=custom-columns-file=/etc/passwd", /with an output template file/],
+	["kubectl get pods -o go-template-file=/etc/passwd", /with an output template file/],
+	["x=pods; oc get $x -o go-template-file=/etc/passwd", /with an output template file/],
+	["oc get oauthclients -o yaml", /of OAuth clients or tokens prints credentials/],
+	["oc get oauthaccesstokens", /of OAuth clients or tokens/],
+	["oc describe oauthclient db", /of OAuth clients or tokens/],
+	["kubectl get oauthclients -o yaml", /of OAuth clients or tokens/],
+	["oc -n demo get secret db", /`oc get` of Secrets prints credentials/],
 ];
 
 test("other oc commands ask, each with its own reason", () => {

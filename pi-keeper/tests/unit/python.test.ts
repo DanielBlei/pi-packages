@@ -152,6 +152,7 @@ test("unknown imports", { skip }, () => {
 	refuse(src("import requests"), PYTHON_PROBLEMS.unknownImport("requests"));
 	refuse(src("import pandas as pd"), PYTHON_PROBLEMS.unknownImport("pandas"));
 	refuse(src("import subprocess"), PYTHON_PROBLEMS.unknownImport("subprocess"));
+refuse(src("import importlib"), PYTHON_PROBLEMS.unknownImport("importlib"));
 	refuse(src("from subprocess import run"), PYTHON_PROBLEMS.unknownImport("subprocess"));
 	refuse(src("from os import *"), PYTHON_PROBLEMS.starImport("os"));
 	refuse(src("from os import system"), PYTHON_PROBLEMS.unknownAttribute("os.system"));
