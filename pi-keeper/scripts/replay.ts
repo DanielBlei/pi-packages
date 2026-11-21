@@ -670,7 +670,9 @@ async function compareCommand(args: string[], opts: Map<string, string>): Promis
 	const fixture = (await import(pathToFileURL(fixturePath).href)) as Fixture;
 	const [apiOld, apiNew] = [decisionApi(await loadTree(codeOld)), decisionApi(await loadTree(codeNew))];
 	const scratch = mkdtempSync(join(tmpdir(), "pi-keeper-"));
-	const cwd = mkdtempSync(join(tmpdir(), "replay-cwd-"));
+	// the fixture is calibrated with a cwd that does not exist (same as tests/unit/decision-fixture.test.ts):
+	// a real one would make the inline-python forms analyze and allow, flagging their designed conversions as guard failures
+	const cwd = "/home/user/project";
 	const env = { scratch, cwd };
 	let guards = 0;
 	const failures: string[] = [];

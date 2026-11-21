@@ -1512,17 +1512,30 @@ const KUBECTL_UNCHECKED_FLAGS = new Set(["--raw", "--profile", "--profile-output
 /** `oc` subcommands that only print (`project` only without a name; `whoami` only without a token flag). */
 const OC_READ_ONLY_SUBCOMMANDS = ["whoami", "status", "projects", "api-versions", "project"];
 
+/** kubectl/oc output formats that read a local template file (`-o go-template-file=path`). */
+const KUBECTL_TEMPLATE_FILE_FORMATS = ["go-template-file", "jsonpath-file", "custom-columns-file"];
+
+/** An argument naming one of those formats, spaced, glued or long (`-o go-template-file=p`, `--output=go-template-file=p`, `-ogo-template-file=p`). */
+function isTemplateFileArg(arg: string): boolean {
+	const value = arg.replace(/^-{1,2}o(?:utput)?=?/, "");
+	return KUBECTL_TEMPLATE_FILE_FORMATS.some((format) => value === format || value.startsWith(`${format}=`));
+}
+
 /**
- * `kubectl|oc get|describe|logs|top|explain|version|api-resources` on the current cluster, plus `oc whoami|status|projects|api-versions|project`;
- * Secrets still ask. `root` is the command name (`kubectl` or `oc`).
+ * `kubectl|oc get|describe|logs|top|explain|version|api-resources` on the current cluster, plus `oc whoami|status|projects|api-versions|project`
+ * (a leading namespace option stays on the same cluster); Secrets and OpenShift OAuth objects still ask, and so does an output template file,
+ * which reads a local path the path checks never see. `root` is the command name (`kubectl` or `oc`).
  */
 function kubectlBlocker(root: string, args: string[]): Blocker | undefined {
 	const oc = root === "oc";
-	const sub = args[0];
+	// a leading namespace option (`-n ns`, `--namespace=ns`) selects a namespace on the same cluster, so it doesn't change what runs
+	let at = 0;
+	while (at < args.length && /^(-n|--namespace)(=|$)/.test(args[at])) at += args[at].includes("=") ? 1 : 2;
+	const sub = args[at];
 	if (sub === undefined || !(READ_ONLY_KUBECTL_SUBCOMMANDS.includes(sub) || (oc && OC_READ_ONLY_SUBCOMMANDS.includes(sub)))) {
 		return plain(`\`${[root, sub].filter(Boolean).join(" ")}\` isn't a read-only ${root} command`);
 	}
-	const rest = args.slice(1);
+	const rest = args.slice(at + 1);
 	if (rest.some((a) => KUBECTL_CONNECTION_FLAGS.has(a.split("=")[0]) || /^-s./.test(a) || (oc && OC_CONNECTION_FLAGS.has(a.split("=")[0])))) {
 		return execBlock(`\`${root}\` pointed at another server, user or kubeconfig can't be checked`);
 	}
@@ -1539,9 +1552,17 @@ function kubectlBlocker(root: string, args: string[]): Blocker | undefined {
 	if ((sub === "get" || sub === "describe") && rest.some((a) => /^-[fk]/.test(a) || /^--(filename|kustomize)(=|$)/.test(a))) {
 		return plain(`\`${root} ${sub}\` from a file can't be checked (the manifest may be a Secret)`);
 	}
+	// `-o go-template-file=…` (likewise jsonpath/custom-columns) reads a local file the path checks never see
+	if (rest.some(isTemplateFileArg)) {
+		return plain(`\`${root} ${sub}\` with an output template file reads a local file that can't be checked`);
+	}
 	// Secret contents are credentials: reading them asks
 	if (rest.some((a) => !a.startsWith("-") && /(^|[,/])secrets?(\.[a-z0-9.]+)?([,/]|$)/i.test(a))) {
 		return plain(`\`${root} ${sub}\` of Secrets prints credentials`);
+	}
+	// OpenShift OAuth objects hold client secrets and access tokens
+	if (rest.some((a) => !a.startsWith("-") && /(^|[,/])oauth(clients?|accesstokens?)(\.[a-z0-9.]+)?([,/]|$)/i.test(a))) {
+		return plain(`\`${root} ${sub}\` of OAuth clients or tokens prints credentials`);
 	}
 	return undefined;
 }

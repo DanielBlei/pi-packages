@@ -1,12 +1,17 @@
 # Changelog
 
-## 0.1.3 - 
+## 0.1.3 - 2026-11-21
 
 ### Security
 
 - Inline python with a coding declaration (`# coding: utf-7`) or a BOM is refused.
   Python decodes a script file by the declaration while the shell and `python3 -c`
   do not, so such a script could hide `os.system` from the analyzer.
+- `oc`/`kubectl` with an output template file (`-o go-template-file=…`,
+  `jsonpath-file`, `custom-columns-file`) asks, since it reads a local path the path
+  checks never see. `get` of OpenShift OAuth clients or access tokens asks like Secrets.
+- A leading namespace option (`oc -n ns get pods`) no longer hides the subcommand
+  from the read-only check.
 
 ### Added
 

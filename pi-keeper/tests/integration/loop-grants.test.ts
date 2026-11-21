@@ -88,6 +88,15 @@ describe("loops offer the prefixes of their expanded body", () => {
 		assert.deepEqual(grants(h), [], h.dialogs[0].options.join(" | "));
 	});
 
+	it("an interpreter body offers no prefix, only the exact command", async () => {
+		const { h } = await start();
+		h.answer(ASK, "Yes");
+		await h.tool("bash", { command: 'for f in a b; do python3 script.py "$f"; done' });
+		const options = h.dialogs[0].options.join(" | ");
+		assert.equal(options.includes("don't ask again for `"), false, options); // an interpreter root is never a rememberable prefix
+		assert.ok(options.includes("this exact command"), options); // the exact rule only reruns this command
+	});
+
 	it("a refused loop (17 words) keeps today's options", async () => {
 		const { h } = await start();
 		h.answer(ASK, "Yes");
